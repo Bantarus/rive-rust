@@ -1,0 +1,53 @@
+[package]
+name = "bevy-rive"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Bevy plugin for the native Rive Renderer (offscreen render + CPU-copy bridge, M1a)."
+publish = false
+
+[dependencies]
+rive-renderer = { path = "../rive-renderer" }
+# The plugin only defines an asset + loader, ECS components/systems, and fills a
+# Bevy `Image` — no render-side code (display is user-side via `Sprite`). So it
+# needs just the asset + image stack, not the sprite/render crates or winit.
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_asset",
+    "bevy_image",
+    "bevy_log",
+] }
+# `Image::new` takes `wgpu_types::{Extent3d, TextureDimension, TextureFormat}` directly;
+# this MUST be the exact version `bevy_image` 0.18.1 links, or `TextureFormat` is a distinct
+# type and `Image::new` rejects our format constant. Pinned exact; guarded by `cargo tree -d`.
+wgpu-types = "=27.0.1"
+
+[dev-dependencies]
+# The example is a full windowed app: window + winit + a Linux display backend +
+# 2D sprite rendering + png encode. Feature-unified with the lib's bevy deps.
+bevy = { version = "0.18.1", default-features = false, features = [
+    "bevy_asset",
+    "bevy_image",
+    "bevy_log",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",
+    "bevy_sprite_render",
+    "bevy_window",
+    "bevy_winit",
+    "x11",
+    "wayland",
+    "png",
+    "multi_threaded",
+    "default_font",
+] }
+# Deterministic RGBA PNG dump of the offscreen Rive texture for inspection.
+image = "0.25"
+
+[[example]]
+name = "sprite_riv"
+path = "../../examples/sprite_riv.rs"
+
+[lints]
+workspace = true

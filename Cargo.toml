@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/rive-renderer-sys",
     "crates/rive-renderer",
+    "crates/bevy-rive",
 ]
 
 [workspace.package]

@@ -1,9 +1,9 @@
-//! Safe RAII wrapper over the native Rive Renderer (offscreen Vulkan, M0).
+//! Safe RAII wrapper over the native Rive Renderer (offscreen Vulkan, M0/M1a).
 //!
 //! This crate wraps the raw [`rive_renderer_sys`] FFI in `Result`-based,
 //! drop-safe handles. Milestone 0 renders a `.riv` file's default state machine
 //! to an offscreen image with rive's own (self-managed) Vulkan device and reads
-//! the pixels back — no wgpu and no Bevy yet.
+//! the pixels back — no wgpu and no Bevy.
 //!
 //! # Example
 //!
@@ -12,7 +12,7 @@
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let ctx = Context::new()?;
-//! let mut target = ctx.offscreen_target(512, 512)?;
+//! let target = ctx.offscreen_target(512, 512)?;
 //! let file = ctx.load_file(&std::fs::read("assets/coffee_loader.riv")?)?;
 //! let artboard = file.default_artboard()?;
 //! let mut state_machine = artboard.default_state_machine()?;
@@ -28,11 +28,26 @@
 //! # }
 //! ```
 //!
-//! # Ownership & lifetimes
+//! # Ownership, lifetimes & threading
 //!
-//! A [`Context`] owns the Vulkan device. [`RenderTarget`], [`File`], and
-//! [`Artboard`] borrow the context and cannot outlive it; a [`StateMachine`]
-//! borrows its artboard. Every handle frees its native resources on `Drop`.
+//! Unlike a borrow-checked-against-`&Context` design, every handle here is
+//! **owned and `'static`**: it keeps the native Vulkan context alive by holding a
+//! shared (`Rc`) reference to it. This lets handles be stored in long-lived
+//! containers (e.g. a Bevy `NonSend` resource) without naming a lifetime, which
+//! M1a's ECS bridge needs. Concretely:
+//!
+//! * Every handle ([`RenderTarget`], [`File`], [`Artboard`], [`StateMachine`])
+//!   holds an `Rc` to the [`Context`]'s inner state, so the `VkDevice` is
+//!   destroyed only after the **last** handle drops — regardless of drop order.
+//! * A [`StateMachine`] additionally keeps its [`Artboard`] alive (the native
+//!   `rive::Scene` holds a non-owning pointer back to the artboard instance, so
+//!   the scene must be destroyed first). A manual `Drop` body always runs before
+//!   the handle's fields drop, so each native `*_destroy` precedes the `Rc`
+//!   decrement it guards — the required destruction order holds by construction.
+//!
+//! Because the handles hold `Rc` (and raw pointers), they are **`!Send + !Sync`**
+//! and must be used from a single thread (in Bevy: a `NonSend` resource on the
+//! main thread). The native renderer is not internally synchronized.
 //!
 //! # Color contract
 //!
@@ -42,7 +57,7 @@
 //! straight alpha, or clear to an opaque color (then premultiplied == straight).
 
 use std::ffi::CStr;
-use std::marker::PhantomData;
+use std::rc::Rc;
 
 use rive_renderer_sys as sys;
 
@@ -81,6 +96,12 @@ pub enum Error {
     /// Reading pixels back failed, or the destination buffer was the wrong size.
     #[error("pixel readback failed: {0}")]
     ReadPixels(String),
+    /// A handle from a different [`Context`] was mixed into an operation (e.g. a
+    /// [`RenderTarget`] or [`Artboard`] built on another context). Doing so would
+    /// drive one Vulkan device's objects through another's — undefined behavior —
+    /// so it is rejected here rather than executed.
+    #[error("handle belongs to a different Context")]
+    ContextMismatch,
 }
 
 /// Returns the shim's most recent error string (empty if none).
@@ -97,13 +118,38 @@ fn last_error() -> String {
     }
 }
 
+/// Owns the native render context (and its `VkInstance`/`VkDevice`). Shared via
+/// `Rc` so every handle can keep it alive; destroyed on the last drop.
+///
+/// Private: the public surface is [`Context`] and the handle types, all of which
+/// hold an `Rc<ContextInner>`. A manual `Drop` runs before the (none) fields, so
+/// the native context is torn down here only once the refcount reaches zero —
+/// i.e. after every [`RenderTarget`]/[`File`]/[`Artboard`]/[`StateMachine`] has
+/// already destroyed its own native object.
+struct ContextInner {
+    ptr: *mut sys::RiveRenderContext,
+}
+
+impl Drop for ContextInner {
+    fn drop(&mut self) {
+        // SAFETY: `ptr` was created by the shim and is destroyed exactly once,
+        // when the last `Rc<ContextInner>` drops. All dependent native objects
+        // (targets/files/artboards/scenes) have already been destroyed because
+        // their handles each held an `Rc<ContextInner>` released only after they
+        // ran their own `*_destroy`.
+        unsafe { sys::rive_render_context_destroy(self.ptr) };
+    }
+}
+
 /// A self-managed Vulkan device hosting the native Rive render context.
 ///
-/// In M0 the context creates and owns its own `VkInstance`/`VkDevice`. Honors
-/// the `RIVE_GPU` (GPU-name filter) and `RIVE_FORCE_ATOMIC` environment
-/// variables read by the shim at creation time.
+/// In M0/M1a the context creates and owns its own `VkInstance`/`VkDevice`. Honors
+/// the `RIVE_GPU` (GPU-name filter) and `RIVE_FORCE_ATOMIC` environment variables
+/// read by the shim at creation time.
+///
+/// `!Send + !Sync`: use from one thread (a Bevy `NonSend` resource).
 pub struct Context {
-    ptr: *mut sys::RiveRenderContext,
+    inner: Rc<ContextInner>,
 }
 
 impl Context {
@@ -119,7 +165,15 @@ impl Context {
         if ptr.is_null() {
             return Err(Error::ContextCreation(last_error()));
         }
-        Ok(Self { ptr })
+        Ok(Self {
+            inner: Rc::new(ContextInner { ptr }),
+        })
+    }
+
+    /// Raw context pointer (valid while `self` — or any handle derived from it —
+    /// is alive).
+    fn raw(&self) -> *mut sys::RiveRenderContext {
+        self.inner.ptr
     }
 
     /// Creates an offscreen `width`x`height` render target on this context.
@@ -128,9 +182,10 @@ impl Context {
     ///
     /// Returns [`Error::TargetCreation`] if the dimensions are zero or the GPU
     /// allocation fails.
-    pub fn offscreen_target(&self, width: u32, height: u32) -> Result<RenderTarget<'_>> {
-        // SAFETY: `self.ptr` is a live context for the duration of `&self`.
-        let ptr = unsafe { sys::rive_render_target_create_offscreen(self.ptr, width, height) };
+    pub fn offscreen_target(&self, width: u32, height: u32) -> Result<RenderTarget> {
+        // SAFETY: `self.raw()` is a live context for the duration of the call,
+        // and the returned target keeps it alive via its `Rc` clone.
+        let ptr = unsafe { sys::rive_render_target_create_offscreen(self.raw(), width, height) };
         if ptr.is_null() {
             return Err(Error::TargetCreation {
                 width,
@@ -142,7 +197,7 @@ impl Context {
             ptr,
             width,
             height,
-            _ctx: PhantomData,
+            ctx: Rc::clone(&self.inner),
         })
     }
 
@@ -154,15 +209,16 @@ impl Context {
     ///
     /// Returns [`Error::FileLoad`] if the data is malformed or an unsupported
     /// version.
-    pub fn load_file(&self, bytes: &[u8]) -> Result<File<'_>> {
-        // SAFETY: `bytes` is a valid slice borrowed only for this call.
-        let ptr = unsafe { sys::rive_file_load(self.ptr, bytes.as_ptr(), bytes.len()) };
+    pub fn load_file(&self, bytes: &[u8]) -> Result<File> {
+        // SAFETY: `bytes` is a valid slice borrowed only for this call; the
+        // returned file keeps the context alive via its `Rc` clone.
+        let ptr = unsafe { sys::rive_file_load(self.raw(), bytes.as_ptr(), bytes.len()) };
         if ptr.is_null() {
             return Err(Error::FileLoad(last_error()));
         }
         Ok(File {
             ptr,
-            _ctx: PhantomData,
+            _ctx: Rc::clone(&self.inner),
         })
     }
 
@@ -177,12 +233,18 @@ impl Context {
     /// frame is already in progress).
     pub fn begin_frame<'a>(
         &'a self,
-        target: &'a RenderTarget<'a>,
+        target: &'a RenderTarget,
         clear_rgba: [f32; 4],
     ) -> Result<Frame<'a>> {
+        // The Rc graph proves *some* context is alive, but not that `target`
+        // belongs to *this* one. Driving this context's renderer against a target
+        // bound to another context's VkDevice is undefined behavior, so reject it.
+        if !Rc::ptr_eq(&self.inner, &target.ctx) {
+            return Err(Error::ContextMismatch);
+        }
         let [r, g, b, a] = clear_rgba;
         // SAFETY: context and target are live for `'a`.
-        let status = unsafe { sys::rive_frame_begin(self.ptr, target.ptr, r, g, b, a) };
+        let status = unsafe { sys::rive_frame_begin(self.raw(), target.ptr, r, g, b, a) };
         if status != sys::RIVE_OK {
             return Err(Error::Frame(last_error()));
         }
@@ -194,16 +256,13 @@ impl Context {
     }
 
     /// Returns the raw FFI context pointer (escape hatch for future interop).
+    ///
+    /// The pointer is valid only while this `Context` (or a handle derived from
+    /// it) is alive, and must not be used to begin/flush a frame while a [`Frame`]
+    /// is live or from another thread. Intended for M1b's wgpu interop.
     #[must_use]
     pub fn as_raw(&self) -> *mut sys::RiveRenderContext {
-        self.ptr
-    }
-}
-
-impl Drop for Context {
-    fn drop(&mut self) {
-        // SAFETY: `self.ptr` was created by the shim and is destroyed once.
-        unsafe { sys::rive_render_context_destroy(self.ptr) };
+        self.inner.ptr
     }
 }
 
@@ -214,14 +273,18 @@ impl std::fmt::Debug for Context {
 }
 
 /// An offscreen render target plus its CPU readback buffer.
-pub struct RenderTarget<'ctx> {
+///
+/// Keeps its [`Context`] alive; `!Send + !Sync`.
+pub struct RenderTarget {
     ptr: *mut sys::RiveRenderTarget,
     width: u32,
     height: u32,
-    _ctx: PhantomData<&'ctx Context>,
+    /// The owning context. Keeps the device alive *and* identifies which context
+    /// this target belongs to (checked in [`Context::begin_frame`]).
+    ctx: Rc<ContextInner>,
 }
 
-impl RenderTarget<'_> {
+impl RenderTarget {
     /// Width in pixels.
     #[must_use]
     pub fn width(&self) -> u32 {
@@ -269,20 +332,24 @@ impl RenderTarget<'_> {
     }
 
     /// Returns the raw FFI render-target pointer (escape hatch for future interop).
+    ///
+    /// Valid only while this `RenderTarget` is alive; do not use it with a
+    /// different [`Context`] than the one that created it. Intended for M1b.
     #[must_use]
     pub fn as_raw(&self) -> *mut sys::RiveRenderTarget {
         self.ptr
     }
 }
 
-impl Drop for RenderTarget<'_> {
+impl Drop for RenderTarget {
     fn drop(&mut self) {
-        // SAFETY: created by the shim, destroyed once, while the context lives.
+        // SAFETY: created by the shim, destroyed once; the `_ctx` `Rc` (dropped
+        // after this body) keeps the context alive until after this destroy.
         unsafe { sys::rive_render_target_destroy(self.ptr) };
     }
 }
 
-impl std::fmt::Debug for RenderTarget<'_> {
+impl std::fmt::Debug for RenderTarget {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RenderTarget")
             .field("width", &self.width)
@@ -292,90 +359,115 @@ impl std::fmt::Debug for RenderTarget<'_> {
 }
 
 /// An imported `.riv` file.
-pub struct File<'ctx> {
+///
+/// Keeps its [`Context`] alive; `!Send + !Sync`.
+pub struct File {
     ptr: *mut sys::RiveFile,
-    _ctx: PhantomData<&'ctx Context>,
+    _ctx: Rc<ContextInner>,
 }
 
-impl<'ctx> File<'ctx> {
+impl File {
     /// Instantiates the file's default artboard.
     ///
     /// # Errors
     ///
     /// Returns [`Error::NoArtboard`] if the file contains no artboards.
-    pub fn default_artboard(&self) -> Result<Artboard<'ctx>> {
+    pub fn default_artboard(&self) -> Result<Artboard> {
         // SAFETY: `self.ptr` is a live file handle.
         let ptr = unsafe { sys::rive_file_artboard_default(self.ptr) };
         if ptr.is_null() {
             return Err(Error::NoArtboard(last_error()));
         }
         Ok(Artboard {
-            ptr,
-            _ctx: PhantomData,
+            inner: Rc::new(ArtboardInner {
+                ptr,
+                ctx: Rc::clone(&self._ctx),
+            }),
         })
     }
 }
 
-impl Drop for File<'_> {
+impl Drop for File {
     fn drop(&mut self) {
         // SAFETY: created by the shim, destroyed once. Any live Artboard keeps
-        // the underlying rive::File alive via its own reference.
+        // the underlying rive::File data alive via its own native reference, so
+        // dropping the File handle before an Artboard is safe.
         unsafe { sys::rive_file_destroy(self.ptr) };
     }
 }
 
-impl std::fmt::Debug for File<'_> {
+impl std::fmt::Debug for File {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("File").finish_non_exhaustive()
     }
 }
 
-/// An artboard instance, drawable into a [`Frame`].
-pub struct Artboard<'ctx> {
+/// Owns a native artboard instance, shared via `Rc` so a [`StateMachine`] can
+/// keep it alive (the native `rive::Scene` points back at it non-owningly).
+struct ArtboardInner {
     ptr: *mut sys::RiveArtboard,
-    _ctx: PhantomData<&'ctx Context>,
+    /// The owning context. Keeps the device alive *and* identifies which context
+    /// this artboard belongs to (checked in [`Frame::draw`]).
+    ctx: Rc<ContextInner>,
 }
 
-impl Artboard<'_> {
+impl Drop for ArtboardInner {
+    fn drop(&mut self) {
+        // SAFETY: created by the shim, destroyed exactly once, when the last
+        // `Rc<ArtboardInner>` drops — which is after any `StateMachine` built
+        // from it has destroyed its scene (it held an `Rc<ArtboardInner>`).
+        unsafe { sys::rive_artboard_destroy(self.ptr) };
+    }
+}
+
+/// An artboard instance, drawable into a [`Frame`].
+///
+/// A cheap `Rc` handle: instantiating a [`StateMachine`] shares ownership of the
+/// same native artboard, so the artboard outlives the scene that points at it.
+/// `!Send + !Sync`.
+pub struct Artboard {
+    inner: Rc<ArtboardInner>,
+}
+
+impl Artboard {
     /// Instantiates the artboard's default state machine, falling back to its
     /// default scene (first state machine, else first animation, else static).
+    ///
+    /// The returned [`StateMachine`] shares ownership of this artboard, so the
+    /// artboard stays alive at least as long as the state machine.
     ///
     /// # Errors
     ///
     /// Returns [`Error::NoStateMachine`] if nothing is playable.
-    pub fn default_state_machine(&self) -> Result<StateMachine<'_>> {
-        // SAFETY: `self.ptr` is a live artboard handle.
-        let ptr = unsafe { sys::rive_artboard_state_machine_default(self.ptr) };
+    pub fn default_state_machine(&self) -> Result<StateMachine> {
+        // SAFETY: `self.inner.ptr` is a live artboard handle.
+        let ptr = unsafe { sys::rive_artboard_state_machine_default(self.inner.ptr) };
         if ptr.is_null() {
             return Err(Error::NoStateMachine(last_error()));
         }
         Ok(StateMachine {
             ptr,
-            _artboard: PhantomData,
+            _artboard: Rc::clone(&self.inner),
         })
     }
 }
 
-impl Drop for Artboard<'_> {
-    fn drop(&mut self) {
-        // SAFETY: created by the shim, destroyed once, while the context lives.
-        unsafe { sys::rive_artboard_destroy(self.ptr) };
-    }
-}
-
-impl std::fmt::Debug for Artboard<'_> {
+impl std::fmt::Debug for Artboard {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Artboard").finish_non_exhaustive()
     }
 }
 
 /// A state machine (or animation/scene) instance driving an [`Artboard`].
-pub struct StateMachine<'ab> {
+///
+/// Holds a shared reference to its [`Artboard`] so the native scene never
+/// outlives the artboard instance it points at. `!Send + !Sync`.
+pub struct StateMachine {
     ptr: *mut sys::RiveStateMachine,
-    _artboard: PhantomData<&'ab Artboard<'ab>>,
+    _artboard: Rc<ArtboardInner>,
 }
 
-impl StateMachine<'_> {
+impl StateMachine {
     /// Advances the state machine by `dt_seconds` and applies it to the artboard.
     pub fn advance(&mut self, dt_seconds: f32) {
         // SAFETY: `self.ptr` is a live state-machine handle.
@@ -383,14 +475,16 @@ impl StateMachine<'_> {
     }
 }
 
-impl Drop for StateMachine<'_> {
+impl Drop for StateMachine {
     fn drop(&mut self) {
-        // SAFETY: created by the shim, destroyed once, while its artboard lives.
+        // SAFETY: created by the shim, destroyed once. This body runs before the
+        // `_artboard` field drops, so the scene is torn down while its backing
+        // artboard instance is still alive.
         unsafe { sys::rive_state_machine_destroy(self.ptr) };
     }
 }
 
-impl std::fmt::Debug for StateMachine<'_> {
+impl std::fmt::Debug for StateMachine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StateMachine").finish_non_exhaustive()
     }
@@ -402,7 +496,7 @@ impl std::fmt::Debug for StateMachine<'_> {
 #[must_use = "a Frame must be flushed (or it is auto-submitted on drop)"]
 pub struct Frame<'a> {
     ctx: &'a Context,
-    _target: &'a RenderTarget<'a>,
+    _target: &'a RenderTarget,
     finished: bool,
 }
 
@@ -412,9 +506,13 @@ impl Frame<'_> {
     /// # Errors
     ///
     /// Returns [`Error::Frame`] if no frame is in progress.
-    pub fn draw(&self, artboard: &Artboard<'_>) -> Result<()> {
+    pub fn draw(&self, artboard: &Artboard) -> Result<()> {
+        // Reject an artboard built on a different context (cross-device UB).
+        if !Rc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
+            return Err(Error::ContextMismatch);
+        }
         // SAFETY: artboard and context are live; a frame is in progress.
-        let status = unsafe { sys::rive_artboard_draw(artboard.ptr, self.ctx.ptr) };
+        let status = unsafe { sys::rive_artboard_draw(artboard.inner.ptr, self.ctx.raw()) };
         if status != sys::RIVE_OK {
             return Err(Error::Frame(last_error()));
         }
@@ -429,7 +527,7 @@ impl Frame<'_> {
     pub fn flush(mut self) -> Result<()> {
         self.finished = true;
         // SAFETY: a frame is in progress on this live context.
-        let status = unsafe { sys::rive_frame_flush(self.ctx.ptr) };
+        let status = unsafe { sys::rive_frame_flush(self.ctx.raw()) };
         if status != sys::RIVE_OK {
             return Err(Error::Frame(last_error()));
         }
@@ -442,7 +540,7 @@ impl Drop for Frame<'_> {
         if !self.finished {
             // Submit so the context is not left mid-frame; ignore the result.
             // SAFETY: a frame is in progress on this live context.
-            unsafe { sys::rive_frame_flush(self.ctx.ptr) };
+            unsafe { sys::rive_frame_flush(self.ctx.raw()) };
         }
     }
 }
@@ -492,5 +590,47 @@ mod tests {
         unpremultiply_rgba8(&mut px);
         assert_eq!(px[3], 128);
         assert!(px[0] >= 254, "expected ~255, got {}", px[0]);
+    }
+
+    /// Mixing a handle from one context into another's frame must be rejected
+    /// (it would drive one VkDevice's objects through another — UB).
+    ///
+    /// `#[ignore]`d: it needs **two** real Vulkan devices, which WSL2's
+    /// non-conformant Dozen ICD cannot host (creating a second crashes). Run on
+    /// real hardware with `cargo test -p rive-renderer -- --ignored`.
+    #[test]
+    #[ignore = "needs two real Vulkan devices (not WSL2 Dozen)"]
+    fn cross_context_handles_are_rejected() {
+        let (Ok(ctx_a), Ok(ctx_b)) = (Context::new(), Context::new()) else {
+            eprintln!("skipping: needs two Vulkan devices");
+            return;
+        };
+        let target_b = ctx_b.offscreen_target(8, 8).expect("target on ctx_b");
+        // begin_frame on ctx_a with ctx_b's target must error, not run.
+        assert!(matches!(
+            ctx_a.begin_frame(&target_b, [0.0; 4]),
+            Err(Error::ContextMismatch)
+        ));
+
+        // draw with an artboard from another context must also error. Build a
+        // tiny valid frame on ctx_a, then try to draw ctx_b's artboard into it.
+        let bytes = std::fs::read("../../assets/coffee_loader.riv");
+        let Ok(bytes) = bytes else {
+            eprintln!("skipping draw check: asset not found");
+            return;
+        };
+        let artboard_b = ctx_b
+            .load_file(&bytes)
+            .and_then(|f| f.default_artboard())
+            .expect("artboard on ctx_b");
+        let target_a = ctx_a.offscreen_target(8, 8).expect("target on ctx_a");
+        let frame = ctx_a
+            .begin_frame(&target_a, [0.0; 4])
+            .expect("frame on ctx_a");
+        assert!(matches!(
+            frame.draw(&artboard_b),
+            Err(Error::ContextMismatch)
+        ));
+        frame.flush().ok();
     }
 }

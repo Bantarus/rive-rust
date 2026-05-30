@@ -1,0 +1,27 @@
+# Rust
+/target
+**/*.rs.bk
+Cargo.lock.bak
+
+# M0 example output
+/out.png
+/*.png
+
+# premake-fetched dependencies cache (Vulkan-Headers, VMA, vk-bootstrap, ply).
+# build.rs points $DEPENDENCIES here; it is large and reproducible, so not committed.
+/.rive-deps/
+
+# rive-runtime build artifacts (generated into the submodule's out/ tree by premake+make)
+/vendor/rive-runtime/out/
+/vendor/rive-runtime/**/out/
+/vendor/rive-runtime/dependencies/*_*/
+
+# Vendored premake5 binary + its bundled extras: fetched via tools/fetch_premake.sh
+# (pinned 5.0.0-beta2), not tracked. build.rs falls back to $PREMAKE5 / PATH.
+/tools/premake5
+/tools/*.so
+/tools/*.so.debug
+
+# Editor / OS
+.DS_Store
+*.swp

@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/rive-renderer-sys",
+    "crates/rive-renderer",
+]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.94"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bantarus/rive-rust"
+
+# Shared lint policy. Follows docs/rust-guidelines.txt (M-STATIC-VERIFICATION) at a
+# pragmatic baseline for a milestone-0 FFI scaffold: the always-on compiler lints plus
+# the high-signal clippy groups. The full `pedantic` + `restriction` set is intentionally
+# deferred — it is very noisy on hand-written FFI declarations and would obscure real
+# issues during bring-up. Tighten this once the API stabilises (tracked in BUILD.md).
+[workspace.lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+correctness = { level = "warn", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+undocumented_unsafe_blocks = "warn"
+
+[profile.dev]
+# The native rive-runtime static libs are always built in release inside build.rs,
+# so a debug Rust build still links optimised C++. Keep our own debug build cheap.
+opt-level = 0

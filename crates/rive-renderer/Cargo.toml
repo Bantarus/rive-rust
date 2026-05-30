@@ -1,0 +1,27 @@
+[package]
+name = "rive-renderer"
+version = "0.0.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Safe RAII wrapper over the native Rive Renderer (offscreen Vulkan), shaped for a future rive-rs Renderer impl."
+publish = false
+
+[dependencies]
+rive-renderer-sys = { path = "../rive-renderer-sys" }
+thiserror = "2"
+
+[dev-dependencies]
+# Used only by examples (applications), per docs/rust-guidelines.txt M-APP-ERROR.
+anyhow = "1"
+png = "0.17"
+
+# The M0 deliverable binary. Kept at the workspace-root `examples/` dir (per the
+# project layout) while still being runnable via `cargo run --example offscreen_png`.
+[[example]]
+name = "offscreen_png"
+path = "../../examples/offscreen_png.rs"
+
+[lints]
+workspace = true

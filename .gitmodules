@@ -1,0 +1,3 @@
+[submodule "vendor/rive-runtime"]
+	path = vendor/rive-runtime
+	url = https://github.com/rive-app/rive-runtime

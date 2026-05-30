@@ -1,0 +1,39 @@
+# Line-ending policy for a repo edited from both WSL2 and native Windows
+# (the tree is developed on Linux/ext4 and copied to E:\ for Windows builds).
+# Source is authoritative LF; Windows batch scripts are CRLF (cmd.exe's parser
+# is brittle with bare-LF in for/if/goto blocks); binary assets are untouched.
+
+# Default: detect text, normalize tracked text to LF in the repository.
+* text=auto eol=lf
+
+# Explicit source types -> LF regardless of core.autocrlf on either OS.
+*.rs        text eol=lf
+*.toml      text eol=lf
+*.lock      text eol=lf
+*.md        text eol=lf
+*.txt       text eol=lf
+*.sh        text eol=lf
+*.lua       text eol=lf
+*.c         text eol=lf
+*.cpp       text eol=lf
+*.h         text eol=lf
+*.hpp       text eol=lf
+*.glsl      text eol=lf
+*.vert      text eol=lf
+*.frag      text eol=lf
+*.py        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+.gitignore  text eol=lf
+.gitmodules text eol=lf
+
+# Windows batch/cmd scripts -> CRLF in the working tree.
+*.cmd       text eol=crlf
+*.bat       text eol=crlf
+
+# Binary assets: never touch line endings, never diff as text.
+*.riv       binary
+*.png       binary
+*.so        binary
+*.zip       binary
+*.exe       binary

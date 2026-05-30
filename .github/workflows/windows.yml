@@ -1,0 +1,70 @@
+name: windows
+
+# Hermetic native-Windows build + run of the offscreen_png example.
+#
+# Encodes the M1.0 shader-provenance policy: on a CLEAN checkout (no Linux-synced
+# SPIR-V), the **Vulkan SDK** generates rive's Vulkan SPIR-V natively
+# (glslangValidator + spirv-opt) — there is no Linux->Windows build dependency.
+# rive builds with clang-cl (its default toolset) via premake vs2022 -> MSBuild;
+# Vulkan is loaded at runtime from the driver's vulkan-1.dll (no import lib).
+#
+# NOTE: authored without a CI runner to validate against — expect to tune action
+# versions / component IDs on the first run. The local dev loop (Linux + the
+# scripts/win.cmd relay reusing prebuilt SPIR-V) is the validated path.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendor/rive-runtime is pinned
+
+      - name: Rust toolchain (>= 1.94 MSRV, msvc)
+        uses: dtolnay/rust-toolchain@stable
+
+      # The policy's core: install the Vulkan SDK so rive's shader step generates
+      # SPIR-V on this clean checkout (sets VULKAN_SDK; win.cmd adds its Bin to PATH).
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.4.321.0 # match the Vulkan-Headers pin in premake5_pls_renderer.lua
+          install_runtime: false
+          cache: true
+
+      # rive's default toolset is clang-cl; ensure the VS "C++ Clang tools for
+      # Windows" component is present (the runner image usually already has it).
+      - name: Ensure clang-cl (VS ClangCL toolset)
+        shell: pwsh
+        run: |
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vs = & $vswhere -latest -property installationPath
+          if (-not (Test-Path "$vs\VC\Tools\Llvm\x64\bin\clang-cl.exe")) {
+            $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\setup.exe"
+            & $installer modify --installPath "$vs" `
+              --add Microsoft.VisualStudio.Component.VC.Llvm.Clang `
+              --add Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset `
+              --quiet --norestart --wait
+          }
+
+      - name: Install GNU make (rive's shader step shells out to make)
+        run: choco install make -y
+
+      - name: Vendor premake5 (beta7)
+        shell: cmd
+        run: tools\fetch_premake.cmd
+
+      - name: Build + run offscreen_png (native Vulkan)
+        shell: cmd
+        run: scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
+
+      - name: Upload render
+        uses: actions/upload-artifact@v4
+        with:
+          name: out_win.png
+          path: out_win.png

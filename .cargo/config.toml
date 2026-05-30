@@ -1,0 +1,7 @@
+# On Windows, link the static CRT (/MT). rive-runtime forces
+# staticruntime('on') + runtime('Release') (= /MT) on Windows regardless of
+# config, so the rive .libs, the cc/clang-cl shim (cc honors crt-static) and the
+# Rust binary must all use the static release CRT or the linker reports an
+# msvcrt/libcmt RuntimeLibrary mismatch (LNK2038). Linux is unaffected.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

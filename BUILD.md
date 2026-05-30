@@ -1,12 +1,18 @@
-# Building `rive-rust` (Milestone 0)
+# Building `rive-rust`
 
-Milestone 0 renders a `.riv` file's default state machine to an offscreen image
-using the **native Rive Renderer** (rive-runtime's PLS renderer, Vulkan backend),
-reads the pixels back, and writes a PNG. The shim manages its **own**
-`VkInstance`/`VkDevice` — there is no wgpu or Bevy yet.
+Renders a `.riv` file's default state machine to an offscreen image using the
+**native Rive Renderer** (rive-runtime's PLS renderer, Vulkan backend), reads the
+pixels back, and writes a PNG. The shim manages its **own** `VkInstance`/`VkDevice`
+— there is no wgpu or Bevy yet.
+
+Builds on **Linux** (clang — §1) and **native Windows** (clang-cl via the relay —
+§1b). M0 brought up Linux; M1.0 added Windows.
 
 ```
+# Linux:
 cargo run --example offscreen_png -- assets/coffee_loader.riv out.png
+# Windows (via the relay):
+scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
 ```
 
 ---
@@ -46,6 +52,65 @@ The Vulkan **headers** themselves are *not* required from the system: premake
 clones `KhronosGroup/Vulkan-Headers` (pinned `vulkan-sdk-1.4.321`) and
 `VulkanMemoryAllocator` (`v3.3.0`) into `.rive-deps/` and the shim compiles
 against those. `libvulkan-dev` is only needed for the loader's dev symlink.
+
+---
+
+## 1b. Building on Windows (native, M1.0)
+
+The same example builds and runs natively on Windows with the MSVC-family
+toolchain and the **native NVIDIA Vulkan** driver — **no Vulkan SDK** and **no
+rive-runtime patches**. Full detail + gotchas: **[docs/M1_0_REPORT.md](docs/M1_0_REPORT.md)**.
+
+### Prerequisites (Windows)
+
+| Tool | Notes |
+| --- | --- |
+| Visual Studio 2022 | **Desktop development with C++** + **C++ Clang tools for Windows** (clang-cl is rive's default toolset; `cl.exe` can't compile rive's sources) |
+| Rust (stable ≥ 1.94) | `x86_64-pc-windows-msvc` (`rustup update stable`) |
+| premake5 **beta7** | `tools\fetch_premake.cmd` → `tools/premake5.exe` (beta2 mis-emits `/weAll` for the VS generator) |
+| GNU make | e.g. `choco install make` (rive's shader step shells out to `make`) |
+| Git for Windows | provides `sh` for make's recipes, and `git` for dep clones |
+| python 3 | rive's shader minify |
+| Vulkan SDK | **on CI / clean checkouts** — `glslangValidator` + `spirv-opt` generate rive's SPIR-V. Skipped locally if the tree already has prebuilt SPIR-V (below) |
+| NVIDIA driver | provides `vulkan-1.dll` at runtime (loaded via `LoadLibraryA`) — no Vulkan import lib to link |
+
+**SPIR-V provenance (hermeticity).** rive's Vulkan SPIR-V comes from the Vulkan
+SDK (`glslangValidator`/`spirv-opt`) in rive's shader step. **CI** installs the
+SDK and generates it on a clean checkout (`.github/workflows/windows.yml`) — the
+hermetic path, no Linux dependency. As a **local optimization**, a working tree
+that already carries the prebuilt
+`renderer/out/rive-rust-m0/include/generated/shaders/spirv/*.h` (e.g. synced from
+a Linux build) skips that step. `build.rs` **fails early with a clear remedy** if
+neither the SDK nor prebuilt SPIR-V is present. The D3D shaders rive always builds
+on Windows use the Windows SDK's `fxc`; Vulkan is loaded at runtime via
+`LoadLibraryA("vulkan-1.dll")` (no import lib).
+
+> **Perf note:** rive is built `--config=debug` (no renderer optimization), so
+> M1.0/M1a timings are **not** meaningful. Building rive optimized is an **M2**
+> task (`lld-link` to consume release LTO bitcode, or `--config=release
+> --no-lto`) — see [docs/M1_0_REPORT.md](docs/M1_0_REPORT.md) §3b.
+
+### Build & run (via the relay)
+
+The canonical repo lives on the Linux/WSL2 side; copy it to a real Windows path
+(MSBuild/MSVC don't work over `\\wsl.localhost` UNC) and build there:
+
+```bash
+# from WSL2:
+scripts/sync_to_windows.sh        # rsync working tree -> E:\DEV\rive-rust
+cmd.exe /c "scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png"
+```
+
+```
+:: or from a native Windows terminal at E:\DEV\rive-rust:
+scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
+```
+
+`scripts\win.cmd` locates VS via `vswhere`, sources `vcvars64.bat` (x64), puts
+clang-cl + `make` + Git Bash `sh` on PATH, then forwards args to `cargo`.
+`.cargo/config.toml` links the static CRT (`+crt-static`) to match rive's forced
+`/MT`. On Windows `build.rs` runs `premake5 vs2022` → MSBuild (ClangCL/x64) and
+compiles the shim with clang-cl; it emits **no** Vulkan link directive.
 
 ---
 

@@ -16,9 +16,11 @@ Cargo.lock.bak
 /vendor/rive-runtime/**/out/
 /vendor/rive-runtime/dependencies/*_*/
 
-# Vendored premake5 binary + its bundled extras: fetched via tools/fetch_premake.sh
-# (pinned 5.0.0-beta2), not tracked. build.rs falls back to $PREMAKE5 / PATH.
+# Vendored premake5 binaries: Linux ELF via tools/fetch_premake.sh (beta2),
+# Windows .exe via tools/fetch_premake.cmd (beta7). Not tracked; build.rs falls
+# back to $PREMAKE5 / PATH. The fetch scripts themselves ARE tracked.
 /tools/premake5
+/tools/*.exe
 /tools/*.so
 /tools/*.so.debug
 

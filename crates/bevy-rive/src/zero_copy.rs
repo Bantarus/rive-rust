@@ -92,8 +92,8 @@ const VK_FORMAT_R8G8B8A8_UNORM: u32 = 37;
 /// offscreen blit-back lands in our image.
 const RIVE_TARGET_VK_USAGE: u32 = 0x10 | 0x04 | 0x02 | 0x01;
 
-/// Opaque dark gray (`0x303030`), straight RGBA — matches the M0/M1.0/M1a clear.
-const CLEAR_RGBA: [f32; 4] = [0.188, 0.188, 0.188, 1.0];
+// The rive clear color is shared with the M1a path via `crate::rive_clear_rgba()`
+// (honors the `RIVE_CLEAR_ALPHA` test knob), so both tiers clear identically.
 
 /// The shared (internal) texture rive renders into: **linear** `Rgba8Unorm`, so
 /// the WGSL/sampler sees rive's raw sRGB-encoded premultiplied bytes verbatim.
@@ -129,6 +129,18 @@ pub struct RiveZeroCopyPlugin;
 
 impl Plugin for RiveZeroCopyPlugin {
     fn build(&self, app: &mut App) {
+        // This tier holds rive's `!Send` objects as a NonSend render-world resource,
+        // which is only sound if the render world runs on the main thread — i.e.
+        // pipelined rendering must be DISABLED. We cannot remove an already-added
+        // plugin from here, so surface a loud error if it is still present.
+        if app.is_plugin_added::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>() {
+            error!(
+                "rive zero-copy: PipelinedRenderingPlugin is ENABLED — this tier requires it \
+                 disabled (it owns rive's !Send handles as a main-thread NonSend resource). \
+                 Build DefaultPlugins with `.disable::<PipelinedRenderingPlugin>()`."
+            );
+        }
+
         // Asset + loader (reuse the frozen M1a types via a tiny private plugin so
         // the `.riv` AssetLoader is registered exactly once and identically).
         RivePlugin::register_asset(app);
@@ -142,13 +154,19 @@ impl Plugin for RiveZeroCopyPlugin {
             return;
         };
         render_app
-            .init_resource::<RiveRenderState>()
             .init_resource::<ExtractedRives>()
             .add_systems(ExtractSchedule, extract_rive_instances)
             .add_systems(
                 bevy::render::Render,
                 extract_shared_handles_once.in_set(bevy::render::RenderSystems::Prepare),
             );
+        // RiveGpu holds rive's `!Send` handles → a NonSend render-world resource
+        // (NOT a `Resource`, which would require `Send + Sync`). Sound because this
+        // tier disables pipelined rendering, so the render world runs on the main
+        // thread — no cross-thread move or drop, hence no `unsafe Send` needed.
+        render_app
+            .world_mut()
+            .init_non_send_resource::<RiveRenderState>();
 
         // The fill node, ordered before all 2D sampling (StartMainPass precedes
         // the opaque + transparent sprite passes).
@@ -202,6 +220,23 @@ pub fn install_interlock_device_callback(app: &mut App) {
                 let pixel = has(ash::ext::fragment_shader_interlock::NAME);
                 let raster = has(ash::ext::rasterization_order_attachment_access::NAME);
 
+                // Enable BOTH interlock paths the device advertises — NOT either/or.
+                // rive's raster-ordering mode keys off
+                // `rasterizationOrderColorAttachmentAccess`; `fragmentShaderPixelInterlock`
+                // feeds its (lower-priority) clockwise mode. This was previously an
+                // `if pixel else if raster`, so on a device with both (NVIDIA) the
+                // raster-order extension was NEVER enabled — the root cause of the
+                // observed Atomics PLS mode. rive prefers raster-ordering when present.
+                if raster {
+                    args.extensions
+                        .push(ash::ext::rasterization_order_attachment_access::NAME);
+                    let f = Box::leak(Box::new(
+                        vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT::default()
+                            .rasterization_order_color_attachment_access(true),
+                    ));
+                    let info = core::mem::take(args.create_info);
+                    *args.create_info = info.push_next(f);
+                }
                 if pixel {
                     args.extensions
                         .push(ash::ext::fragment_shader_interlock::NAME);
@@ -211,21 +246,32 @@ pub fn install_interlock_device_callback(app: &mut App) {
                     ));
                     let info = core::mem::take(args.create_info);
                     *args.create_info = info.push_next(f);
-                    feats.insert::<RiveInterlock>();
-                } else if raster {
-                    args.extensions
-                        .push(ash::ext::rasterization_order_attachment_access::NAME);
-                    let f = Box::leak(Box::new(
-                        vk::PhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT::default()
-                            .rasterization_order_color_attachment_access(true),
-                    ));
-                    let info = core::mem::take(args.create_info);
-                    *args.create_info = info.push_next(f);
+                }
+                if pixel || raster {
                     feats.insert::<RiveInterlock>();
                 }
                 // `fragmentStoresAndAtomics` / `fillModeNonSolid` are part of the
                 // core VkPhysicalDeviceFeatures wgpu already requests — do not
                 // duplicate here; we read the enabled set back at extraction.
+
+                // EVIDENCE (PLS feature-survival experiment): walk + log the FINAL
+                // pNext chain and the interlock extensions we hand wgpu. If the mode
+                // is still not RasterOrdering, this distinguishes "wgpu dropped our
+                // extension/feature during its VkDeviceCreateInfo rebuild" from
+                // "enabled, but rive chose another mode". The raw walk is covered by
+                // the enclosing `unsafe` block (same as the enumerate above).
+                let mut chain = Vec::new();
+                let mut p = args.create_info.p_next;
+                while !p.is_null() {
+                    let base = p as *const vk::BaseOutStructure;
+                    chain.push((*base).s_type);
+                    p = (*base).p_next as *const c_void;
+                }
+                info!(
+                    "rive zero-copy: device-create callback pushed interlock exts \
+                     (raster={raster}, pixel={pixel}); final pNext sType chain wgpu \
+                     will pass to vkCreateDevice = {chain:?}"
+                );
             },
         );
     }
@@ -396,12 +442,11 @@ impl RiveBlitPipeline {
 
 /// The render-world owner of rive's `!Send` objects.
 ///
-/// SAFETY / INVARIANT: every field is created and touched **only on the render
-/// thread**, inside [`extract_shared_handles_once`] / [`RiveFillNode::run`], which
-/// the render schedule runs serialized. No other system aliases the `RefCell`.
-/// This mirrors how Bevy makes wgpu objects `Send` via `WgpuWrapper`. The rive
-/// handles are `Arc`-refcounted, so even a cross-thread *drop* by the pipelined
-/// renderer's SubApp ferry is sound (atomic decrement).
+/// Held as a `NonSend` render-world resource (see [`RiveRenderState`]). This tier
+/// disables pipelined rendering, so the render schedule — and the *drop* of this
+/// resource — run on the **main thread**; the rive handles' non-atomic `Rc`
+/// refcount is therefore sound and no `unsafe Send` is needed. Touched only inside
+/// [`extract_shared_handles_once`] / [`RiveFillNode::run`].
 struct RiveGpu {
     /// The external rive context on wgpu's device. Lazily created in the node.
     ctx: Option<Context>,
@@ -416,18 +461,14 @@ struct RiveGpu {
     logged_mode: bool,
 }
 
-/// Render-world resource wrapping the `!Send` [`RiveGpu`] behind a `RefCell`
-/// (the node has `&World` only). `unsafe impl Send + Sync` is justified by the
-/// single-render-thread invariant documented on [`RiveGpu`].
-#[derive(Resource)]
+/// `NonSend` render-world resource wrapping the `!Send` [`RiveGpu`] behind a
+/// `RefCell` for interior mutability (the node gets `&World`, so it can only take
+/// `&RiveRenderState` and must `borrow_mut`). Being `NonSend` — not a `Resource`
+/// (which would require `Send + Sync`) — is exactly what lets it hold the
+/// `!Send + !Sync` rive handles **without** an `unsafe Send` assertion. Sound
+/// because this tier runs the render world on the main thread (pipelined rendering
+/// disabled), so the resource is only ever accessed and dropped on one thread.
 struct RiveRenderState(RefCell<RiveGpu>);
-
-// SAFETY: see the invariant on `RiveGpu`. All access is single-threaded on the
-// render thread; the `Arc` refcount inside the rive handles makes drops atomic.
-unsafe impl Send for RiveRenderState {}
-// SAFETY: `RefCell` is `!Sync`, but the only borrower is `RiveFillNode::run`,
-// which runs once per frame on the render thread with no aliasing access.
-unsafe impl Sync for RiveRenderState {}
 
 impl Default for RiveRenderState {
     fn default() -> Self {
@@ -588,11 +629,20 @@ fn extract_shared_handles_once(
 
     let from_marker = additional.is_some_and(|a| a.has::<RiveInterlock>());
     if handles.interlock || from_marker {
+        // Report the features actually enabled (mirrors the device's enabled
+        // extension set). rive's raster-ordering mode requires
+        // `rasterization_order_color_attachment_access`; `fragment_shader_pixel_interlock`
+        // only feeds its lower-priority clockwise mode — so the latter alone does
+        // NOT yield raster-order (the earlier "expecting raster-order" log was wrong).
         info!(
-            "rive zero-copy: interlock extension enabled (pixel/raster) — expecting raster-order PLS"
+            "rive zero-copy: interlock enabled — rasterization_order_color_attachment_access={} \
+             (rive uses RasterOrdering iff this is true), fragment_shader_pixel_interlock={} \
+             (clockwise mode only)",
+            handles.features.rasterization_order_color_attachment_access,
+            handles.features.fragment_shader_pixel_interlock,
         );
     } else {
-        warn!("rive zero-copy: no interlock extension — rive will use the atomic PLS fallback");
+        warn!("rive zero-copy: no interlock extension enabled — rive uses the atomic PLS fallback");
     }
     commands.insert_resource(handles);
 }
@@ -662,14 +712,15 @@ impl Node for RiveFillNode {
         let Some(handles) = world.get_resource::<RiveSharedHandles>() else {
             return Ok(());
         };
-        let Some(state) = world.get_resource::<RiveRenderState>() else {
+        let Some(state) = world.get_non_send_resource::<RiveRenderState>() else {
             return Ok(());
         };
         let gpu_images = world.resource::<RenderAssets<GpuImage>>();
         let render_device = render_context.render_device().clone();
 
-        // SAFETY (single-thread invariant): the node is the sole borrower of this
-        // RefCell, once per frame, on the render thread.
+        // The node is the sole borrower of this RefCell, once per frame, on the
+        // main thread (pipelined rendering is disabled for this tier, so the render
+        // world runs on the main thread — see RiveRenderState).
         let mut gpu = state.0.borrow_mut();
 
         // Lazily create the external rive context on wgpu's device.
@@ -721,6 +772,12 @@ impl Node for RiveFillNode {
         // RenderDevice exists (it cannot be created during plugin build()).
         let blit = blit.get_or_insert_with(|| RiveBlitPipeline::new(render_device.wgpu_device()));
 
+        // Whether at least one frame actually rendered this call. Gates the
+        // one-shot PLS-mode log so it reflects a real frame — `pls_mode()` is only
+        // meaningful after a `beginFrame`, and early node calls (before the asset +
+        // display image are ready) have an empty work-list.
+        let mut rendered_any = false;
+
         for item in &frame_items {
             let entity = item.entity;
             // Instantiate native objects + shared texture on first sight. Building
@@ -751,14 +808,23 @@ impl Node for RiveFillNode {
                 queue,
             };
             // SAFETY: `queue` is wgpu's graphics VkQueue on this context's device;
-            // the node runs on the render thread, serialized w.r.t. wgpu's own
+            // the node runs on the render schedule's thread (the main thread for
+            // this tier — pipelining disabled), serialized w.r.t. wgpu's own
             // submissions in graph order (we are before StartMainPass).
             if let Err(e) = unsafe {
-                ctx.render_external_frame(&inst.target, &inst.artboard, CLEAR_RGBA, submit)
+                ctx.render_external_frame(
+                    &inst.target,
+                    &inst.artboard,
+                    crate::rive_clear_rgba(),
+                    submit,
+                )
             } {
                 warn!("rive zero-copy: frame {entity:?} failed: {e}");
                 continue;
             }
+            // A frame's beginFrame + flush ran, so `pls_mode()` is now meaningful
+            // (it is captured at beginFrame). Gate the one-shot PLS log on this.
+            rendered_any = true;
 
             // DISPLAY: un-premultiply + sRGB-decode fullscreen pass from the shared
             // Rgba8Unorm texture (rive's premultiplied, sRGB-encoded bytes) into the
@@ -819,8 +885,9 @@ impl Node for RiveFillNode {
             }
         }
 
-        // Log the active interlock mode once (now that a frame has run).
-        if !*logged_mode {
+        // Log the active interlock mode once a real frame has rendered (so
+        // `pls_mode()` reflects a captured `beginFrame`, not an empty early call).
+        if rendered_any && !*logged_mode {
             info!(
                 "rive zero-copy: PLS mode = {:?}, raster-order supported = {}",
                 ctx.pls_mode(),

@@ -29,6 +29,7 @@ struct Cfg {
     size: u32,
     capture: Option<String>,
     warmup: u32,
+    speed: f32,
 }
 
 #[derive(Resource, Default)]
@@ -61,6 +62,13 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6);
+    // Test knob (default 1.0 = realtime). RIVE_SPEED=0 freezes the state machine at
+    // its initial pose, giving a deterministic, pose-matched frame for the
+    // M1a-vs-M1b transparent-content diff.
+    let speed = std::env::var("RIVE_SPEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0_f32);
 
     // The example lives in the workspace-root `examples/` dir but is compiled as a
     // target of `crates/bevy-rive`, so Bevy's default asset root (CARGO_MANIFEST_DIR)
@@ -80,6 +88,7 @@ fn main() {
             size: 512,
             capture,
             warmup,
+            speed,
         })
         .init_resource::<CaptureState>()
         .add_systems(Startup, setup)
@@ -101,11 +110,9 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     ));
 
     let handle: Handle<RiveFile> = assets.load(cfg.riv.clone());
-    commands.spawn((
-        RiveAnimation::new(handle),
-        RiveTarget::new(cfg.size, cfg.size),
-        RiveEntity,
-    ));
+    let mut anim = RiveAnimation::new(handle);
+    anim.speed = cfg.speed;
+    commands.spawn((anim, RiveTarget::new(cfg.size, cfg.size), RiveEntity));
     // `attach_display` spawns the textured quad once the plugin writes the real
     // image handle back into RiveTarget.
 }

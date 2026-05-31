@@ -32,28 +32,34 @@
 //!
 //! Unlike a borrow-checked-against-`&Context` design, every handle here is
 //! **owned and `'static`**: it keeps the native Vulkan context alive by holding a
-//! shared (`Arc`) reference to it. This lets handles be stored in long-lived
+//! shared (`Rc`) reference to it. This lets handles be stored in long-lived
 //! containers (e.g. a Bevy `NonSend` resource) without naming a lifetime, which
-//! M1a's ECS bridge needs. Concretely:
+//! the ECS bridge needs. Concretely:
 //!
 //! * Every handle ([`RenderTarget`], [`File`], [`Artboard`], [`StateMachine`])
-//!   holds an `Arc` to the [`Context`]'s inner state, so the `VkDevice` is
+//!   holds an `Rc` to the [`Context`]'s inner state, so the `VkDevice` is
 //!   destroyed only after the **last** handle drops — regardless of drop order.
 //! * A [`StateMachine`] additionally keeps its [`Artboard`] alive (the native
 //!   `rive::Scene` holds a non-owning pointer back to the artboard instance, so
 //!   the scene must be destroyed first). A manual `Drop` body always runs before
-//!   the handle's fields drop, so each native `*_destroy` precedes the `Arc`
+//!   the handle's fields drop, so each native `*_destroy` precedes the `Rc`
 //!   decrement it guards — the required destruction order holds by construction.
 //!
 //! Because the handles hold raw pointers, they are **`!Send + !Sync`** and must
-//! be used from a single thread (in M0/M1a: a Bevy main-thread `NonSend`
-//! resource). The native renderer is not internally synchronized. The refcount
-//! is **`Arc`** (atomic), not `Rc`, even though the handles are `!Send`: M1b's
-//! zero-copy tier owns these objects in a render-world resource that Bevy's
-//! pipelined renderer may **drop on a different thread** than it ran on, so the
-//! refcount decrement must be atomic. That `unsafe`-`Send` wrapper lives in
-//! `bevy-rive` and upholds the single-thread-*use* invariant; the atomic
-//! refcount makes the cross-thread *drop* sound.
+//! be used **and dropped** from a single thread. The native renderer is not
+//! internally synchronized. Both M1a (a main-thread `NonSend` resource) and M1b
+//! (a `NonSend` render-world resource, with pipelined rendering disabled for the
+//! tier) keep the whole lifecycle — use *and* drop — on one thread, so a
+//! non-atomic `Rc` refcount is sound and **no `unsafe Send` is needed**.
+//!
+//! NOTE for a future cross-thread tier (e.g. M2 re-enabling pipelined rendering):
+//! the subtle hazard is the **drop** thread, not the use thread — Bevy decides
+//! when and where a ferried render-world `World` tears down, and that is the one
+//! thing a "single-threaded use" assertion cannot control. Satisfying `Send` for
+//! the *move* is not enough; the refcount decrement must be made sound too —
+//! either an atomic `Arc`, or an explicit main-thread teardown of the
+//! render-world rive resources. **Do not pair a non-atomic `Rc` with a ferried
+//! world.**
 //!
 //! # Color contract
 //!
@@ -62,18 +68,8 @@
 //! [`unpremultiply_rgba8`] before handing the bytes to a tool that expects
 //! straight alpha, or clear to an opaque color (then premultiplied == straight).
 
-// Every `Arc` in this crate wraps a `!Send`/`!Sync` native rive handle on purpose
-// (see "Ownership, lifetimes & threading" above): the atomic refcount exists for a
-// sound cross-thread *drop* by Bevy's pipelined renderer, while single-thread *use*
-// is upheld by the `unsafe Send` wrapper in `bevy-rive`.
-#![expect(
-    clippy::arc_with_non_send_sync,
-    reason = "intentional: Arc over !Send rive handles enables atomic cross-thread drop; \
-              single-thread use is upheld by bevy-rive's unsafe Send wrapper"
-)]
-
 use std::ffi::CStr;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use rive_renderer_sys as sys;
 
@@ -138,7 +134,7 @@ fn last_error() -> String {
 /// `Rc` so every handle can keep it alive; destroyed on the last drop.
 ///
 /// Private: the public surface is [`Context`] and the handle types, all of which
-/// hold an `Arc<ContextInner>`. A manual `Drop` runs before the (none) fields, so
+/// hold an `Rc<ContextInner>`. A manual `Drop` runs before the (none) fields, so
 /// the native context is torn down here only once the refcount reaches zero —
 /// i.e. after every [`RenderTarget`]/[`File`]/[`Artboard`]/[`StateMachine`] has
 /// already destroyed its own native object.
@@ -153,9 +149,9 @@ struct ContextInner {
 impl Drop for ContextInner {
     fn drop(&mut self) {
         // SAFETY: `ptr` was created by the shim and is destroyed exactly once,
-        // when the last `Arc<ContextInner>` drops. All dependent native objects
+        // when the last `Rc<ContextInner>` drops. All dependent native objects
         // (targets/files/artboards/scenes) have already been destroyed because
-        // their handles each held an `Arc<ContextInner>` released only after they
+        // their handles each held an `Rc<ContextInner>` released only after they
         // ran their own `*_destroy`.
         unsafe { sys::rive_render_context_destroy(self.ptr) };
     }
@@ -169,7 +165,7 @@ impl Drop for ContextInner {
 ///
 /// `!Send + !Sync`: use from one thread (a Bevy `NonSend` resource).
 pub struct Context {
-    inner: Arc<ContextInner>,
+    inner: Rc<ContextInner>,
 }
 
 impl Context {
@@ -186,7 +182,7 @@ impl Context {
             return Err(Error::ContextCreation(last_error()));
         }
         Ok(Self {
-            inner: Arc::new(ContextInner {
+            inner: Rc::new(ContextInner {
                 ptr,
                 external: false,
             }),
@@ -220,7 +216,7 @@ impl Context {
             ptr,
             width,
             height,
-            ctx: Arc::clone(&self.inner),
+            ctx: Rc::clone(&self.inner),
         })
     }
 
@@ -241,7 +237,7 @@ impl Context {
         }
         Ok(File {
             ptr,
-            _ctx: Arc::clone(&self.inner),
+            _ctx: Rc::clone(&self.inner),
         })
     }
 
@@ -262,7 +258,7 @@ impl Context {
         // The Rc graph proves *some* context is alive, but not that `target`
         // belongs to *this* one. Driving this context's renderer against a target
         // bound to another context's VkDevice is undefined behavior, so reject it.
-        if !Arc::ptr_eq(&self.inner, &target.ctx) {
+        if !Rc::ptr_eq(&self.inner, &target.ctx) {
             return Err(Error::ContextMismatch);
         }
         let [r, g, b, a] = clear_rgba;
@@ -338,7 +334,7 @@ impl Context {
         // SAFETY: `ptr` is the just-created external context.
         unsafe { sys::rive_render_context_set_queue_family(ptr, queue_family_index) };
         Ok(Self {
-            inner: Arc::new(ContextInner {
+            inner: Rc::new(ContextInner {
                 ptr,
                 external: true,
             }),
@@ -391,7 +387,7 @@ impl Context {
             });
         }
         // SAFETY: the caller upholds the handle-validity contract; the returned
-        // target keeps the context alive via its `Arc` clone.
+        // target keeps the context alive via its `Rc` clone.
         let ptr = unsafe {
             sys::rive_render_target_wrap_vk_image(
                 self.inner.ptr,
@@ -414,7 +410,7 @@ impl Context {
             ptr,
             width,
             height,
-            ctx: Arc::clone(&self.inner),
+            ctx: Rc::clone(&self.inner),
         })
     }
 
@@ -446,8 +442,7 @@ impl Context {
         clear_rgba: [f32; 4],
         submit: ExternalFrameSubmit,
     ) -> Result<()> {
-        if !Arc::ptr_eq(&self.inner, &target.ctx) || !Arc::ptr_eq(&self.inner, &artboard.inner.ctx)
-        {
+        if !Rc::ptr_eq(&self.inner, &target.ctx) || !Rc::ptr_eq(&self.inner, &artboard.inner.ctx) {
             return Err(Error::ContextMismatch);
         }
         let [r, g, b, a] = clear_rgba;
@@ -620,7 +615,7 @@ pub struct RenderTarget {
     height: u32,
     /// The owning context. Keeps the device alive *and* identifies which context
     /// this target belongs to (checked in [`Context::begin_frame`]).
-    ctx: Arc<ContextInner>,
+    ctx: Rc<ContextInner>,
 }
 
 impl RenderTarget {
@@ -729,7 +724,7 @@ impl std::fmt::Debug for RenderTarget {
 /// Keeps its [`Context`] alive; `!Send + !Sync`.
 pub struct File {
     ptr: *mut sys::RiveFile,
-    _ctx: Arc<ContextInner>,
+    _ctx: Rc<ContextInner>,
 }
 
 impl File {
@@ -745,9 +740,9 @@ impl File {
             return Err(Error::NoArtboard(last_error()));
         }
         Ok(Artboard {
-            inner: Arc::new(ArtboardInner {
+            inner: Rc::new(ArtboardInner {
                 ptr,
-                ctx: Arc::clone(&self._ctx),
+                ctx: Rc::clone(&self._ctx),
             }),
         })
     }
@@ -774,14 +769,14 @@ struct ArtboardInner {
     ptr: *mut sys::RiveArtboard,
     /// The owning context. Keeps the device alive *and* identifies which context
     /// this artboard belongs to (checked in [`Frame::draw`]).
-    ctx: Arc<ContextInner>,
+    ctx: Rc<ContextInner>,
 }
 
 impl Drop for ArtboardInner {
     fn drop(&mut self) {
         // SAFETY: created by the shim, destroyed exactly once, when the last
-        // `Arc<ArtboardInner>` drops — which is after any `StateMachine` built
-        // from it has destroyed its scene (it held an `Arc<ArtboardInner>`).
+        // `Rc<ArtboardInner>` drops — which is after any `StateMachine` built
+        // from it has destroyed its scene (it held an `Rc<ArtboardInner>`).
         unsafe { sys::rive_artboard_destroy(self.ptr) };
     }
 }
@@ -792,7 +787,7 @@ impl Drop for ArtboardInner {
 /// same native artboard, so the artboard outlives the scene that points at it.
 /// `!Send + !Sync`.
 pub struct Artboard {
-    inner: Arc<ArtboardInner>,
+    inner: Rc<ArtboardInner>,
 }
 
 impl Artboard {
@@ -813,7 +808,7 @@ impl Artboard {
         }
         Ok(StateMachine {
             ptr,
-            _artboard: Arc::clone(&self.inner),
+            _artboard: Rc::clone(&self.inner),
         })
     }
 }
@@ -830,7 +825,7 @@ impl std::fmt::Debug for Artboard {
 /// outlives the artboard instance it points at. `!Send + !Sync`.
 pub struct StateMachine {
     ptr: *mut sys::RiveStateMachine,
-    _artboard: Arc<ArtboardInner>,
+    _artboard: Rc<ArtboardInner>,
 }
 
 impl StateMachine {
@@ -874,7 +869,7 @@ impl Frame<'_> {
     /// Returns [`Error::Frame`] if no frame is in progress.
     pub fn draw(&self, artboard: &Artboard) -> Result<()> {
         // Reject an artboard built on a different context (cross-device UB).
-        if !Arc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
+        if !Rc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
             return Err(Error::ContextMismatch);
         }
         // SAFETY: artboard and context are live; a frame is in progress.

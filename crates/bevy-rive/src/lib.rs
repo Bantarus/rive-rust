@@ -84,9 +84,25 @@ pub use zero_copy::{install_interlock_device_callback, RiveZeroCopyPlugin};
 /// allocated [`Image`] (`image.texture_descriptor.format`), never hard-code it.
 pub(crate) const RIVE_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
-/// Opaque dark gray (`0x303030`), matching the M0/M1.0 PNG references. An opaque
-/// clear makes premultiplied == straight, so the composite is reference-exact.
-const CLEAR_RGBA: [f32; 4] = [0.188, 0.188, 0.188, 1.0];
+/// The straight-RGBA clear rive renders behind the artboard. Default: opaque dark
+/// gray (`0x303030`), matching the M0/M1.0 PNG references — an opaque clear makes
+/// premultiplied == straight, so the composite is reference-exact. The alpha is a
+/// **test knob** via `RIVE_CLEAR_ALPHA` (default `1.0`): `0.0` clears to transparent
+/// so antialiased edges + soft fills become partial-alpha, exercising the
+/// un-premultiply `c/a` divide that an opaque clear never reaches. Read once and
+/// shared by the M1a CPU path and the M1b zero-copy node, so both clear identically.
+pub(crate) fn rive_clear_rgba() -> [f32; 4] {
+    use std::sync::OnceLock;
+    static CLEAR: OnceLock<[f32; 4]> = OnceLock::new();
+    *CLEAR.get_or_init(|| {
+        let a = std::env::var("RIVE_CLEAR_ALPHA")
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(1.0)
+            .clamp(0.0, 1.0);
+        [0.188, 0.188, 0.188, a]
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Plugin.
@@ -369,7 +385,7 @@ fn build_instance(
 /// Advance → render → flush → readback for one instance. Disjoint field borrows
 /// keep the transient `Frame` borrow scoped to this call.
 fn render_instance(ctx: &Context, inst: &mut RiveInstance) -> rive_renderer::Result<()> {
-    let frame = ctx.begin_frame(&inst.target, CLEAR_RGBA)?;
+    let frame = ctx.begin_frame(&inst.target, rive_clear_rgba())?;
     frame.draw(&inst.artboard)?;
     frame.flush()?;
     inst.target.read_pixels(&mut inst.readback)?;

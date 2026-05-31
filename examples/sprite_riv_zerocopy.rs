@@ -38,6 +38,7 @@ struct Cfg {
     size: u32,
     capture: Option<String>,
     warmup: u32,
+    speed: f32,
 }
 
 #[derive(Resource, Default)]
@@ -62,6 +63,13 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(6);
+    // Test knob (default 1.0 = realtime). RIVE_SPEED=0 freezes the state machine at
+    // its initial pose, giving a deterministic, pose-matched frame for the
+    // M1a-vs-M1b transparent-content diff.
+    let speed = std::env::var("RIVE_SPEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0_f32);
 
     let asset_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string();
 
@@ -72,10 +80,21 @@ fn main() {
     // DefaultPlugins (RenderPlugin reads the settings resource during build).
     install_interlock_device_callback(&mut app);
 
-    app.add_plugins(DefaultPlugins.set(AssetPlugin {
-        file_path: asset_path,
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(AssetPlugin {
+                file_path: asset_path,
+                ..default()
+            })
+            // CORRECTNESS-TIER CHOICE (deliberate, reversible): disable pipelined
+            // rendering so the render world — which owns rive's `!Send` handles as a
+            // NonSend resource — runs on the main thread. This drops main/render
+            // overlap but eliminates every cross-thread hazard (no `unsafe Send`,
+            // plain `Rc` refcount). M2 may restore pipelining with a validated
+            // cross-thread strategy that makes the resource *drop* sound, not just
+            // the move (see the rive-renderer threading note).
+            .disable::<bevy::render::pipelined_rendering::PipelinedRenderingPlugin>(),
+    )
     // The zero-copy plugin registers the `.riv` asset + loader itself, plus the
     // render-world bridge. Use it INSTEAD of RivePlugin (no CPU-copy systems).
     .add_plugins(RiveZeroCopyPlugin)
@@ -85,6 +104,7 @@ fn main() {
         size: 512,
         capture,
         warmup,
+        speed,
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
@@ -103,11 +123,9 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     ));
 
     let handle: Handle<RiveFile> = assets.load(cfg.riv.clone());
-    commands.spawn((
-        RiveAnimation::new(handle),
-        RiveTarget::new(cfg.size, cfg.size),
-        RiveEntity,
-    ));
+    let mut anim = RiveAnimation::new(handle);
+    anim.speed = cfg.speed;
+    commands.spawn((anim, RiveTarget::new(cfg.size, cfg.size), RiveEntity));
 }
 
 /// Spawns the display sprite once the plugin has allocated the target image —

@@ -57,6 +57,14 @@ const BOOTSTRAP_SOURCES: &[&str] = &[
 const VULKAN_HEADERS_DIR: &str = "KhronosGroup_Vulkan-Headers_vulkan-sdk-1.4.321";
 const VMA_DIR: &str = "GPUOpen-LibrariesAndSDKs_VulkanMemoryAllocator_v3.3.0";
 
+/// How to build the rive static libs: the premake `--config` ("debug"/"release")
+/// and whether to append `--no-lto`. Bundled so the per-OS builders take one
+/// option object rather than two loose scalars.
+struct RiveLibBuild<'a> {
+    config: &'a str,
+    no_lto: bool,
+}
+
 fn main() {
     let manifest_dir = PathBuf::from(env_var("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
@@ -70,16 +78,19 @@ fn main() {
     let renderer_dir = rive_root.join("renderer");
     let premake_build_dir = rive_root.join("build");
     let deps_cache = workspace_root.join(".rive-deps");
-    // RIVE_BUILD_OUT is anchored to premake's working dir (renderer/), so the
-    // output must live under it; `--out` is concatenated and must be RELATIVE.
-    let out_rel = "out/rive-rust-m0";
-    let rive_out = renderer_dir.join(out_rel);
 
     // Rebuild triggers.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=shim/rive_shim.h");
     println!("cargo:rerun-if-changed=shim/rive_shim.cpp");
-    for var in ["CC", "CXX", "PREMAKE5", "RIVE_RUNTIME_CONFIG"] {
+    for var in [
+        "CC",
+        "CXX",
+        "PREMAKE5",
+        "RIVE_RUNTIME_CONFIG",
+        "RIVE_RUNTIME_NO_LTO",
+        "PROFILE",
+    ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
 
@@ -88,11 +99,59 @@ fn main() {
 
     let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let premake5 = find_premake5(&workspace_root, windows);
-    // Debug config: avoids release LTO (whose bitcode archives confuse the
-    // non-LLVM final linker). On Windows rive still forces /MT (release static
-    // runtime) regardless of config, so debug libs link against Rust's
-    // +crt-static cleanly. Override with RIVE_RUNTIME_CONFIG=release.
-    let rive_config = std::env::var("RIVE_RUNTIME_CONFIG").unwrap_or_else(|_| "debug".into());
+
+    // rive lib optimization config. Resolution order:
+    //   1. RIVE_RUNTIME_CONFIG ("debug"/"release") wins, universally.
+    //   2. else follow Cargo's PROFILE: `--release` -> release rive libs; dev -> debug.
+    // The M1a/M1b dev loop uses the dev profile, so it keeps fast debug rive libs; a
+    // `--release` build (e.g. the Windows perf relay) gets optimized rive libs. On
+    // Windows rive forces /MT (release static runtime) regardless of config, so both
+    // link against Rust's +crt-static cleanly.
+    let rive_config = std::env::var("RIVE_RUNTIME_CONFIG").unwrap_or_else(|_| {
+        match std::env::var("PROFILE").as_deref() {
+            Ok("release") => "release".to_string(),
+            _ => "debug".to_string(),
+        }
+    });
+
+    // LTO: OFF by default for release on BOTH OSes (debug never sets it). This keeps
+    // the final link working with each platform's default linker and needs no extra
+    // toolchain:
+    //   - Linux: rive's release LTO emits LLVM bitcode `.o`; the default `cc`->`ld`
+    //     (bfd/gold) can't consume bitcode without the LLVMgold plugin, so `--no-lto`
+    //     makes rive emit normal ELF objects ld links. (Verified: ELF, not bitcode.)
+    //   - Windows: rive's vs2022/ClangCL/MSBuild release ALREADY emits COFF objects
+    //     (verified: `64 86` COFF magic, not `BC` bitcode) that the default MSVC
+    //     `link.exe` consumes — premake's `LinkTimeOptimization` flag doesn't reach
+    //     clang-cl as `-flto` through MSBuild. So `--no-lto` is a harmless no-op here
+    //     that we pass anyway to be explicit/deterministic (no silent bitcode if a
+    //     future toolset starts honoring it). The anticipated "link.exe can't consume
+    //     LTO bitcode" fight therefore does NOT materialize on this path — no
+    //     `lld-link` needed. Non-LTO release is still a large step up from debug.
+    // Override (future cross-module-LTO experiment): RIVE_RUNTIME_NO_LTO=0 forces LTO
+    // ON — which then requires an LTO-capable final linker (set `linker = "lld-link"`
+    // in .cargo/config.toml on Windows, or an ld with the LLVMgold plugin on Linux).
+    // RIVE_RUNTIME_NO_LTO=1 forces it off. Unset = the per-config default below.
+    let no_lto = match std::env::var("RIVE_RUNTIME_NO_LTO") {
+        Ok(v) => !v.is_empty() && v != "0",
+        Err(_) => rive_config == "release",
+    };
+
+    // Per-config out dir so debug/release artifacts never mix (a bare config switch in
+    // one dir risks stale objects). Debug keeps the historical path verbatim, so
+    // existing synced trees (and the prebuilt SPIR-V headers there) are undisturbed.
+    // RIVE_BUILD_OUT is anchored to premake's CWD (renderer/), so `--out` is
+    // concatenated onto it and must be RELATIVE.
+    let out_rel = if rive_config == "release" {
+        "out/rive-rust-m0-release"
+    } else {
+        "out/rive-rust-m0"
+    };
+    let rive_out = renderer_dir.join(out_rel);
+    let lib_build = RiveLibBuild {
+        config: &rive_config,
+        no_lto,
+    };
 
     if windows {
         build_rive_libs_windows(
@@ -102,7 +161,7 @@ fn main() {
             &deps_cache,
             out_rel,
             &rive_out,
-            &rive_config,
+            &lib_build,
         );
     } else {
         build_rive_libs_unix(
@@ -112,7 +171,7 @@ fn main() {
             &deps_cache,
             out_rel,
             &rive_out,
-            &rive_config,
+            &lib_build,
         );
     }
 
@@ -132,7 +191,7 @@ fn build_rive_libs_unix(
     deps_cache: &Path,
     out_rel: &str,
     rive_out: &Path,
-    rive_config: &str,
+    build: &RiveLibBuild,
 ) {
     require_build_tools_unix();
 
@@ -140,7 +199,9 @@ fn build_rive_libs_unix(
     let cc = std::env::var("CC").unwrap_or_else(|_| "clang".into());
     let cxx = std::env::var("CXX").unwrap_or_else(|_| "clang++".into());
 
-    // premake5 generates gmake2 Makefiles (and runs the shader build).
+    // premake5 generates gmake2 Makefiles (and runs the shader build). `--no-lto`
+    // (a release-only rive option) is appended for non-LTO linkers; `Option<&str>`
+    // is a 0-or-1 element iterator, so it is a no-op when LTO stays on.
     run(
         Command::new(premake5)
             .current_dir(renderer_dir)
@@ -150,13 +211,14 @@ fn build_rive_libs_unix(
             .env("CXX", &cxx)
             .args([
                 "gmake2",
-                &format!("--config={rive_config}"),
+                &format!("--config={}", build.config),
                 &format!("--out={out_rel}"),
                 "--with_vulkan",
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--no-download-progress",
-            ]),
+            ])
+            .args(build.no_lto.then_some("--no-lto")),
         "premake5 gmake2 (generate Makefiles + shaders)",
     );
 
@@ -184,7 +246,7 @@ fn build_rive_libs_windows(
     deps_cache: &Path,
     out_rel: &str,
     rive_out: &Path,
-    rive_config: &str,
+    build: &RiveLibBuild,
 ) {
     require_build_tools_windows(premake5, rive_out);
 
@@ -202,13 +264,14 @@ fn build_rive_libs_windows(
             .env("DEPENDENCIES", deps_cache)
             .args([
                 "vs2022",
-                &format!("--config={rive_config}"),
+                &format!("--config={}", build.config),
                 &format!("--out={out_rel}"),
                 "--with_vulkan",
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--no-download-progress",
-            ]),
+            ])
+            .args(build.no_lto.then_some("--no-lto")),
         "premake5 vs2022 (generate solution + shaders)",
     );
 

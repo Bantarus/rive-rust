@@ -39,6 +39,11 @@ struct Cfg {
     capture: Option<String>,
     warmup: u32,
     speed: f32,
+    /// M2.0: when `RIVE_PERF` is set, auto-exit after this many frames so a perf
+    /// run terminates on its own once the render-world collector has logged its
+    /// summary (it summarizes after ~warmup + `RIVE_PERF_FRAMES` rendered frames).
+    /// `None` outside perf mode (the app runs until closed / capture exit).
+    perf_exit_frames: Option<u32>,
 }
 
 #[derive(Resource, Default)]
@@ -65,11 +70,22 @@ fn main() {
         .unwrap_or(6);
     // Test knob (default 1.0 = realtime). RIVE_SPEED=0 freezes the state machine at
     // its initial pose, giving a deterministic, pose-matched frame for the
-    // M1a-vs-M1b transparent-content diff.
+    // M1a-vs-M1b transparent-content diff (and a fixed per-frame cost for perf).
     let speed = std::env::var("RIVE_SPEED")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0_f32);
+    // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
+    // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
+    // frame budget past that so the run self-terminates with the summary printed.
+    let perf_exit_frames = std::env::var_os("RIVE_PERF").map(|_| {
+        let target: u32 = std::env::var("RIVE_PERF_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300);
+        // 30 (collector warm-up) + target + 120 margin for main/render frame skew.
+        target.saturating_add(150)
+    });
 
     let asset_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string();
 
@@ -105,10 +121,14 @@ fn main() {
         capture,
         warmup,
         speed,
+        perf_exit_frames,
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
-    .add_systems(Update, (attach_display, drive_capture).chain())
+    .add_systems(
+        Update,
+        (attach_display, drive_capture, drive_perf_exit).chain(),
+    )
     .run();
 }
 
@@ -184,6 +204,20 @@ fn drive_capture(
 
     if state.requested && state.frames >= cfg.warmup + 30 {
         info!("rive: capture complete, exiting");
+        exit.write(AppExit::Success);
+    }
+}
+
+/// M2.0 perf mode: count frames and exit once the budget is reached, so a
+/// `RIVE_PERF` run self-terminates after the render-world collector has logged its
+/// summary. No-op unless `RIVE_PERF` was set (`perf_exit_frames` is `None`).
+fn drive_perf_exit(cfg: Res<Cfg>, mut frames: Local<u32>, mut exit: MessageWriter<AppExit>) {
+    let Some(budget) = cfg.perf_exit_frames else {
+        return;
+    };
+    *frames += 1;
+    if *frames >= budget {
+        info!("rive: perf budget ({budget} frames) reached, exiting");
         exit.write(AppExit::Success);
     }
 }

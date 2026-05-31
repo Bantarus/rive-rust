@@ -140,6 +140,25 @@ struct RiveRenderContext
     // valid only between beginFrame and flush). -1 until the first frame begins;
     // the pls_mode getter returns this so callers can query it after flush.
     int extLastInterlockMode = -1;
+    // Per-frame clockwiseFillOverride (M2.0 perf lever); seeded into each
+    // FrameDescriptor by rive_frame_begin_external.
+    bool extClockwise = false;
+
+    // ---- M2.0: GPU timestamp instrumentation (rive submit timing) ----------
+    // A 2-slot timestamp query pool + the query PFNs (NOT in rive's VulkanContext
+    // dispatch table, so resolved once via vkGetDeviceProcAddr). Set up lazily on
+    // the first submit; fully defensive — if anything is unavailable,
+    // extTimestampPeriod stays 0, no timestamps are written, and last_gpu_ms
+    // reports -1.
+    bool extGpuTimingTried = false;
+    VkQueryPool extQueryPool = VK_NULL_HANDLE;
+    PFN_vkCreateQueryPool extCreateQueryPool = nullptr;
+    PFN_vkDestroyQueryPool extDestroyQueryPool = nullptr;
+    PFN_vkGetQueryPoolResults extGetQueryPoolResults = nullptr;
+    PFN_vkCmdResetQueryPool extCmdResetQueryPool = nullptr;
+    PFN_vkCmdWriteTimestamp extCmdWriteTimestamp = nullptr;
+    float extTimestampPeriod = 0.0f; // ns per tick; 0 => GPU timing unavailable
+    double extLastGpuMs = -1.0;      // last measured rive GPU time (ms), -1 if none
 };
 
 struct RiveRenderTarget
@@ -281,6 +300,15 @@ extern "C" void rive_render_context_destroy(RiveRenderContext* ctx)
                 vk->DestroyCommandPool(ctx->extDevice, ctx->extPool, nullptr);
                 ctx->extPool = VK_NULL_HANDLE;
                 ctx->extCmdBuffer = VK_NULL_HANDLE;
+            }
+            // M2.0: the GPU-timing query pool (created via a resolved PFN, so freed
+            // via the matching one). The fence wait above means no query is in
+            // flight. Skipped cleanly if timing was never set up.
+            if (ctx->extQueryPool != VK_NULL_HANDLE &&
+                ctx->extDestroyQueryPool != nullptr)
+            {
+                ctx->extDestroyQueryPool(ctx->extDevice, ctx->extQueryPool, nullptr);
+                ctx->extQueryPool = VK_NULL_HANDLE;
             }
         }
         ctx->renderContext.reset(); // drops the VulkanContext ref (not the device)
@@ -765,6 +793,69 @@ bool ensure_ext_frame_objects(RiveRenderContext* ctx, VulkanContext* vk)
     return true;
 }
 
+// Lazily sets up GPU timestamp instrumentation (M2.0): resolves the query PFNs
+// (not in rive's dispatch table) via vkGetDeviceProcAddr, creates a 2-slot
+// timestamp query pool, and reads the device's timestampPeriod. Fully defensive:
+// on any failure it leaves extTimestampPeriod == 0 so the caller skips timing and
+// last_gpu_ms stays -1. Runs once (guarded by extGpuTimingTried). Never fails the
+// frame — timing is best-effort and orthogonal to rendering.
+void ensure_ext_gpu_timing(RiveRenderContext* ctx, VulkanContext* vk)
+{
+    if (ctx->extGpuTimingTried)
+    {
+        return;
+    }
+    ctx->extGpuTimingTried = true;
+
+    // Require reliable timestamps on all graphics/compute queues and a nonzero
+    // period (ns per tick). NVIDIA: timestampComputeAndGraphics == true, period 1.
+    VkPhysicalDeviceProperties props{};
+    vk->GetPhysicalDeviceProperties(ctx->extPhysicalDevice, &props);
+    if (props.limits.timestampPeriod <= 0.0f ||
+        props.limits.timestampComputeAndGraphics == VK_FALSE)
+    {
+        return;
+    }
+
+    // Resolve the query PFNs via the device loader (itself obtained from the
+    // instance loader the caller handed us). These are not in rive's dispatch table.
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        ctx->extGetInstanceProcAddr(ctx->extInstance, "vkGetDeviceProcAddr"));
+    if (gdpa == nullptr)
+    {
+        return;
+    }
+    ctx->extCreateQueryPool = reinterpret_cast<PFN_vkCreateQueryPool>(
+        gdpa(ctx->extDevice, "vkCreateQueryPool"));
+    ctx->extDestroyQueryPool = reinterpret_cast<PFN_vkDestroyQueryPool>(
+        gdpa(ctx->extDevice, "vkDestroyQueryPool"));
+    ctx->extGetQueryPoolResults = reinterpret_cast<PFN_vkGetQueryPoolResults>(
+        gdpa(ctx->extDevice, "vkGetQueryPoolResults"));
+    ctx->extCmdResetQueryPool = reinterpret_cast<PFN_vkCmdResetQueryPool>(
+        gdpa(ctx->extDevice, "vkCmdResetQueryPool"));
+    ctx->extCmdWriteTimestamp = reinterpret_cast<PFN_vkCmdWriteTimestamp>(
+        gdpa(ctx->extDevice, "vkCmdWriteTimestamp"));
+    if (ctx->extCreateQueryPool == nullptr || ctx->extDestroyQueryPool == nullptr ||
+        ctx->extGetQueryPoolResults == nullptr ||
+        ctx->extCmdResetQueryPool == nullptr || ctx->extCmdWriteTimestamp == nullptr)
+    {
+        return;
+    }
+
+    VkQueryPoolCreateInfo qpInfo{};
+    qpInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+    qpInfo.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qpInfo.queryCount = 2;
+    if (ctx->extCreateQueryPool(ctx->extDevice, &qpInfo, nullptr, &ctx->extQueryPool) !=
+        VK_SUCCESS)
+    {
+        ctx->extQueryPool = VK_NULL_HANDLE;
+        return;
+    }
+    // Success: timing is now enabled (extTimestampPeriod becomes the gate).
+    ctx->extTimestampPeriod = props.limits.timestampPeriod;
+}
+
 } // namespace
 
 extern "C" RiveRenderContext* rive_render_context_create_vulkan_external(
@@ -837,6 +928,21 @@ extern "C" void rive_render_context_set_queue_family(RiveRenderContext* ctx,
     if (ctx == nullptr)
         return;
     ctx->extQueueFamily = queueFamilyIndex;
+}
+
+extern "C" void rive_render_context_set_clockwise(RiveRenderContext* ctx,
+                                                  int32_t enabled)
+{
+    if (ctx == nullptr)
+        return;
+    ctx->extClockwise = (enabled != 0);
+}
+
+extern "C" double rive_render_context_last_gpu_ms(const RiveRenderContext* ctx)
+{
+    if (ctx == nullptr)
+        return -1.0;
+    return ctx->extLastGpuMs;
 }
 
 extern "C" int32_t rive_render_context_supports_raster_ordering(
@@ -984,6 +1090,9 @@ extern "C" RiveStatus rive_frame_begin_external(RiveRenderContext* ctx,
     frameDescriptor.renderTargetWidth = target->width;
     frameDescriptor.renderTargetHeight = target->height;
     frameDescriptor.loadAction = rive::gpu::LoadAction::clear;
+    // M2.0 perf lever: route the clockwise PLS override into this frame (default
+    // false -> rive picks rasterOrdering/atomics as before).
+    frameDescriptor.clockwiseFillOverride = ctx->extClockwise;
     frameDescriptor.clearColor =
         rive::colorARGB(to_u8(a), to_u8(r), to_u8(g), to_u8(b));
     ctx->renderContext->beginFrame(frameDescriptor);
@@ -1030,6 +1139,12 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
     }
     VkCommandBuffer cb = ctx->extCmdBuffer;
 
+    // GPU timing is best-effort (defensive, one-time setup); enabled only if the
+    // device + PFNs + query pool are all available.
+    ensure_ext_gpu_timing(ctx, vk);
+    const bool gpuTiming =
+        ctx->extTimestampPeriod > 0.0f && ctx->extQueryPool != VK_NULL_HANDLE;
+
     // Begin records into the reused command buffer (RESET_COMMAND_BUFFER pool ->
     // Begin implicitly resets it; the previous frame was fence-waited below).
     VkCommandBufferBeginInfo beginInfo{};
@@ -1042,6 +1157,15 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
         ctx->currentRenderer = nullptr;
         ctx->currentTarget = nullptr;
         return 1;
+    }
+
+    // GPU timing: reset the pool (required before reuse) and stamp the start of
+    // rive's recorded work (TOP_OF_PIPE).
+    if (gpuTiming)
+    {
+        ctx->extCmdResetQueryPool(cb, ctx->extQueryPool, 0, 2);
+        ctx->extCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                                  ctx->extQueryPool, 0);
     }
 
     // rive RECORDS its draws (and its own ->COLOR_ATTACHMENT barrier, via
@@ -1063,6 +1187,15 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
     target->lastAccess = vk->simpleImageMemoryBarrier(
         cb, target->renderTarget->targetLastAccess(), readAccess, target->extImage);
     target->renderTarget->updateLastAccess(target->lastAccess);
+
+    // GPU timing: stamp the end of rive's recorded work (after its draws + the
+    // post-flush barrier) at BOTTOM_OF_PIPE. Slot 0 (start) .. slot 1 (end) span
+    // rive's whole command buffer.
+    if (gpuTiming)
+    {
+        ctx->extCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+                                  ctx->extQueryPool, 1);
+    }
 
     if (vk->EndCommandBuffer(cb) != VK_SUCCESS)
     {
@@ -1091,6 +1224,28 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
         {
             set_error("rive external: vkWaitForFences failed");
             status = 1;
+        }
+        else if (gpuTiming)
+        {
+            // The fence is signaled, so rive's GPU work — and both timestamp
+            // writes — have completed; the results are available now. Read the two
+            // ticks and convert to milliseconds (period is ns/tick). Best-effort:
+            // any failure or a non-increasing pair reports -1 for this frame.
+            uint64_t ts[2] = {0, 0};
+            if (ctx->extGetQueryPoolResults(
+                    ctx->extDevice, ctx->extQueryPool, 0, 2, sizeof(ts), ts,
+                    sizeof(uint64_t),
+                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS &&
+                ts[1] > ts[0])
+            {
+                ctx->extLastGpuMs = static_cast<double>(ts[1] - ts[0]) *
+                                    static_cast<double>(ctx->extTimestampPeriod) /
+                                    1.0e6;
+            }
+            else
+            {
+                ctx->extLastGpuMs = -1.0;
+            }
         }
     }
 

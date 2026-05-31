@@ -34,6 +34,8 @@ style = { level = "warn", priority = -1 }
 undocumented_unsafe_blocks = "warn"
 
 [profile.dev]
-# The native rive-runtime static libs are always built in release inside build.rs,
-# so a debug Rust build still links optimised C++. Keep our own debug build cheap.
+# The native rive-runtime static libs follow Cargo's PROFILE (see
+# crates/rive-renderer-sys/build.rs): a dev build links DEBUG rive libs (fast to
+# build; the M1a/M1b dev loop), a `--release` build links optimized rive libs. Keep
+# our own Rust debug build cheap regardless.
 opt-level = 0

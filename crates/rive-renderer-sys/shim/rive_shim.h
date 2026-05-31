@@ -193,6 +193,13 @@ RiveRenderContext* rive_render_context_create_vulkan_external(
 void rive_render_context_set_queue_family(RiveRenderContext* ctx,
                                           uint32_t queueFamilyIndex);
 
+/* M2.0 perf lever: per-frame `clockwiseFillOverride` (rive FrameDescriptor). When
+ * nonzero, rive's select_interlock_mode prefers its clockwise PLS path (clockwise
+ * if the device supports it, else clockwiseAtomic) over atomics — relevant on
+ * desktop NVIDIA, which lacks the raster-order ext so its default path is atomics.
+ * Off by default; set once after create. Honored by rive_frame_begin_external. */
+void rive_render_context_set_clockwise(RiveRenderContext* ctx, int32_t enabled);
+
 /* Frame-independent: does the shared VkDevice give rive its clean raster-order
  * PLS path? 1 == yes, 0 == no (atomic/msaa fallback), -1 == null handle. Valid
  * any time after create. */
@@ -202,6 +209,14 @@ int32_t rive_render_context_supports_raster_ordering(const RiveRenderContext* ct
  * Valid ONLY between rive_frame_begin_external and rive_frame_submit_external.
  * -1 on null. */
 RivePlsMode rive_render_context_pls_mode(const RiveRenderContext* ctx);
+
+/* M2.0: GPU execution time (milliseconds) of the most recent external frame's
+ * rive command buffer, measured with VkQueryPool timestamps written around rive's
+ * recorded work (begin -> flush -> post-flush barrier). The blocking submit
+ * guarantees the result is ready on return. Returns -1.0 if GPU timing is
+ * unavailable (device lacks reliable timestamps, or the timestamp PFNs/pool could
+ * not be set up). */
+double rive_render_context_last_gpu_ms(const RiveRenderContext* ctx);
 
 /* Wrap a wgpu-ALLOCATED VkImage as a rive render target (ZERO COPY). The shim
  * does NOT allocate or free the image — wgpu owns it. If `vkImageView` is 0 the

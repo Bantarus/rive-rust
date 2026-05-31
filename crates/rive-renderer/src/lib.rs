@@ -341,6 +341,28 @@ impl Context {
         })
     }
 
+    /// Enables/disables rive's per-frame `clockwiseFillOverride` (M2.0 perf
+    /// lever). When on, `render_external_frame` asks rive to prefer its clockwise
+    /// PLS path (clockwise if the device supports it, else clockwiseAtomic) over
+    /// atomics — the relevant comparison on desktop NVIDIA, which has no
+    /// raster-order extension. Off by default; set once after create. Inspect the
+    /// resolved mode with [`Self::pls_mode`] after a frame.
+    pub fn set_clockwise(&self, enabled: bool) {
+        // SAFETY: `self.inner.ptr` is a live context; the shim only flips a bool.
+        unsafe { sys::rive_render_context_set_clockwise(self.inner.ptr, i32::from(enabled)) };
+    }
+
+    /// GPU execution time (milliseconds) of the most recent
+    /// [`Self::render_external_frame`]'s rive command buffer, measured with Vulkan
+    /// timestamps. Returns `None` if GPU timing is unavailable (no reliable device
+    /// timestamps, or the query setup failed) or no external frame has run yet.
+    #[must_use]
+    pub fn last_gpu_ms(&self) -> Option<f64> {
+        // SAFETY: `self.inner.ptr` is a live context.
+        let ms = unsafe { sys::rive_render_context_last_gpu_ms(self.inner.ptr) };
+        (ms >= 0.0).then_some(ms)
+    }
+
     /// `true` if the shared device gives rive its clean raster-order PLS path
     /// (vs the atomic/msaa fallback). Frame-independent; use at init for logging.
     #[must_use]

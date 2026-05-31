@@ -85,10 +85,13 @@ neither the SDK nor prebuilt SPIR-V is present. The D3D shaders rive always buil
 on Windows use the Windows SDK's `fxc`; Vulkan is loaded at runtime via
 `LoadLibraryA("vulkan-1.dll")` (no import lib).
 
-> **Perf note:** rive is built `--config=debug` (no renderer optimization), so
-> M1.0/M1a timings are **not** meaningful. Building rive optimized is an **M2**
-> task (`lld-link` to consume release LTO bitcode, or `--config=release
-> --no-lto`) — see [docs/M1_0_REPORT.md](docs/M1_0_REPORT.md) §3b.
+> **Perf note (updated M2.0):** a **dev** build links **debug** rive libs (fast
+> iteration; timings not meaningful). A **`--release`** build links **optimized**
+> rive libs — `build.rs` follows Cargo's `PROFILE`. On Windows the release libs
+> are optimized **COFF** that the default `link.exe` consumes (no `lld-link`
+> needed; rive's `LinkTimeOptimization` flag doesn't reach clang-cl through
+> MSBuild). On Linux, release adds `--no-lto` so `ld` gets ELF, not LLVM bitcode.
+> First real perf baseline: [docs/M2_0_REPORT.md](docs/M2_0_REPORT.md).
 
 ### Build & run (via the relay)
 
@@ -150,9 +153,12 @@ Artifacts land in `vendor/rive-runtime/renderer/out/rive-rust-m0/` and
 `.rive-deps/` (both git-ignored). A clean rebuild: `cargo clean` and delete
 those two directories.
 
-> The rive libs are built in **debug** by default. Debug avoids release LTO,
-> whose LLVM-bitcode archives can confuse a non-LLVM final linker. Override with
-> `RIVE_RUNTIME_CONFIG=release` once you've confirmed your linker handles LTO.
+> The rive libs follow Cargo's `PROFILE` (M2.0): a dev build → **debug** libs, a
+> `--release` build → **optimized release** libs, in separate out dirs. Release
+> disables rive's LTO by default (`RIVE_RUNTIME_NO_LTO`) so each platform's stock
+> linker handles the objects — Linux `ld` needs ELF not bitcode, and Windows
+> link.exe already gets COFF. Force the config with `RIVE_RUNTIME_CONFIG=release`.
+> See [docs/M2_0_REPORT.md](docs/M2_0_REPORT.md) §Task 1.
 
 ---
 

@@ -180,6 +180,14 @@ extern "C" {
         queue_family_index: u32,
     );
 
+    /// M2.0 perf lever: enable/disable rive's per-frame `clockwiseFillOverride`
+    /// (nonzero == on). Honored by [`rive_frame_begin_external`].
+    pub fn rive_render_context_set_clockwise(ctx: *mut RiveRenderContext, enabled: i32);
+
+    /// M2.0: GPU execution time (milliseconds) of the last external frame's rive
+    /// command buffer (Vulkan timestamps), or `-1.0` if GPU timing is unavailable.
+    pub fn rive_render_context_last_gpu_ms(ctx: *const RiveRenderContext) -> f64;
+
     /// 1 if the shared device gives rive the clean raster-order PLS path, 0 if
     /// not (atomic/msaa fallback), -1 on a null handle.
     pub fn rive_render_context_supports_raster_ordering(ctx: *const RiveRenderContext) -> i32;

@@ -304,6 +304,15 @@ struct RiveSharedHandles {
     /// `VK_ERROR_DEVICE_LOST` on submit. Native NVIDIA Vulkan runs interlock fine,
     /// so this is a dev/test escape hatch, not the production path.
     force_atomic: bool,
+    /// M2.0 perf lever (`RIVE_CLOCKWISE` env): opt into rive's per-frame
+    /// `clockwiseFillOverride`. On desktop NVIDIA (no raster-order ext) the default
+    /// path is atomics; this asks for the clockwise path instead, for an A/B.
+    clockwise: bool,
+    /// M2.0 perf instrumentation (`RIVE_PERF` env): collect per-frame CPU/GPU
+    /// timings and log a median+percentile summary after `perf_target` frames.
+    perf_enabled: bool,
+    /// Post-warmup frame count to summarize over (`RIVE_PERF_FRAMES`, default 300).
+    perf_target: u32,
 }
 
 /// Per-entity native render state (one rive instance bound to one shared texture).
@@ -440,6 +449,121 @@ impl RiveBlitPipeline {
     }
 }
 
+/// M2.0 per-frame perf collector for the rive fill node.
+///
+/// Collects, per frame: the **CPU wall time** of the rive submit call
+/// ([`Context::render_external_frame`], which blocks on the shim's fence — so it
+/// includes rive's GPU work *and* the blocking-fence stall the M2 sync rework will
+/// remove), and the **GPU time** of rive's command buffer (Vulkan timestamps, when
+/// available). After a warm-up, it gathers `target` samples then logs a
+/// median+percentile summary once. Enabled by `RIVE_PERF`.
+#[derive(Default)]
+struct PerfStats {
+    enabled: bool,
+    target: u32,
+    /// Warm-up frames to skip before collecting (first frames include lazy
+    /// pipeline/context/instance creation, so they are not representative).
+    warmup: u32,
+    seen: u32,
+    cpu_submit_us: Vec<f64>,
+    gpu_rive_ms: Vec<f64>,
+    summarized: bool,
+}
+
+impl PerfStats {
+    fn record(&mut self, cpu_submit_us: f64, gpu_rive_ms: Option<f64>) {
+        if !self.enabled || self.summarized {
+            return;
+        }
+        self.seen += 1;
+        if self.seen <= self.warmup {
+            return;
+        }
+        self.cpu_submit_us.push(cpu_submit_us);
+        if let Some(ms) = gpu_rive_ms {
+            self.gpu_rive_ms.push(ms);
+        }
+        if self.cpu_submit_us.len() as u32 >= self.target {
+            self.summarize();
+            self.summarized = true;
+        }
+    }
+
+    fn summarize(&self) {
+        let cpu = Summary::of(&self.cpu_submit_us);
+        let gpu = Summary::of(&self.gpu_rive_ms);
+        info!(
+            "rive zero-copy PERF (n={}): rive-submit CPU [us] {} | rive GPU [ms] {}",
+            cpu.n,
+            cpu.fmt_us(),
+            if gpu.n > 0 {
+                gpu.fmt_ms()
+            } else {
+                "unavailable".to_string()
+            },
+        );
+    }
+}
+
+/// median/percentile summary of a sample set (computed on a sorted copy).
+struct Summary {
+    n: usize,
+    p50: f64,
+    p90: f64,
+    p95: f64,
+    p99: f64,
+    min: f64,
+    max: f64,
+    mean: f64,
+}
+
+impl Summary {
+    fn of(samples: &[f64]) -> Self {
+        if samples.is_empty() {
+            return Self {
+                n: 0,
+                p50: 0.0,
+                p90: 0.0,
+                p95: 0.0,
+                p99: 0.0,
+                min: 0.0,
+                max: 0.0,
+                mean: 0.0,
+            };
+        }
+        let mut s = samples.to_vec();
+        s.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        // Nearest-rank percentile: ceil(p*n)-1, clamped.
+        let pct = |p: f64| {
+            let idx = ((p * s.len() as f64).ceil() as usize).saturating_sub(1);
+            s[idx.min(s.len() - 1)]
+        };
+        let mean = s.iter().sum::<f64>() / s.len() as f64;
+        Self {
+            n: s.len(),
+            p50: pct(0.50),
+            p90: pct(0.90),
+            p95: pct(0.95),
+            p99: pct(0.99),
+            min: s[0],
+            max: s[s.len() - 1],
+            mean,
+        }
+    }
+    fn fmt_us(&self) -> String {
+        format!(
+            "p50={:.1} p90={:.1} p95={:.1} p99={:.1} min={:.1} max={:.1} mean={:.1}",
+            self.p50, self.p90, self.p95, self.p99, self.min, self.max, self.mean
+        )
+    }
+    fn fmt_ms(&self) -> String {
+        format!(
+            "p50={:.3} p90={:.3} p95={:.3} p99={:.3} min={:.3} max={:.3} mean={:.3}",
+            self.p50, self.p90, self.p95, self.p99, self.min, self.max, self.mean
+        )
+    }
+}
+
 /// The render-world owner of rive's `!Send` objects.
 ///
 /// Held as a `NonSend` render-world resource (see [`RiveRenderState`]). This tier
@@ -459,6 +583,10 @@ struct RiveGpu {
     frame: u64,
     /// Set once we have logged the active PLS mode.
     logged_mode: bool,
+    /// Set once we have applied the clockwise override to the context.
+    clockwise_applied: bool,
+    /// M2.0 perf collector (configured from `RiveSharedHandles` on first frame).
+    perf: PerfStats,
 }
 
 /// `NonSend` render-world resource wrapping the `!Send` [`RiveGpu`] behind a
@@ -478,6 +606,8 @@ impl Default for RiveRenderState {
             instances: HashMap::new(),
             frame: 0,
             logged_mode: false,
+            clockwise_applied: false,
+            perf: PerfStats::default(),
         }))
     }
 }
@@ -614,6 +744,15 @@ fn extract_shared_handles_once(
         // VK_API_VERSION_1_1 default in VulkanFeatures is fine; rive only needs >= 1.1.
         features.api_version = 0x0040_1000;
 
+        // M2.0 perf knobs (read once at handle extraction).
+        let clockwise = std::env::var_os("RIVE_CLOCKWISE").is_some();
+        let perf_enabled = std::env::var_os("RIVE_PERF").is_some();
+        let perf_target = std::env::var("RIVE_PERF_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(300u32)
+            .max(1);
+
         RiveSharedHandles {
             instance: vk_instance.as_raw(),
             physical_device: vk_phys.as_raw(),
@@ -624,6 +763,9 @@ fn extract_shared_handles_once(
             features,
             interlock: pixel || raster,
             force_atomic,
+            clockwise,
+            perf_enabled,
+            perf_target,
         }
     };
 
@@ -756,12 +898,27 @@ impl Node for RiveFillNode {
         let frame_no = gpu.frame;
         let queue = handles.queue;
 
+        // One-time, now that the context exists: apply the M2.0 perf knobs (the
+        // clockwise PLS override + perf-collector config) carried on the handles.
+        if !gpu.clockwise_applied {
+            if let Some(ctx) = gpu.ctx.as_ref() {
+                ctx.set_clockwise(handles.clockwise);
+            }
+            gpu.perf.enabled = handles.perf_enabled;
+            gpu.perf.target = handles.perf_target;
+            // Skip the first frames (lazy context/pipeline/instance creation +
+            // shader compile) so the summary reflects steady state.
+            gpu.perf.warmup = 30;
+            gpu.clockwise_applied = true;
+        }
+
         // Split the borrow so we can read `ctx` while mutating `instances`.
         let RiveGpu {
             ctx,
             blit,
             instances,
             logged_mode,
+            perf,
             ..
         } = &mut *gpu;
         let Some(ctx) = ctx.as_ref() else {
@@ -807,24 +964,36 @@ impl Node for RiveFillNode {
                 safe_frame: frame_no.saturating_sub(1),
                 queue,
             };
+            // M2.0: CPU-time the rive submit. The call BLOCKS on the shim's fence,
+            // so this wall time includes rive's CPU-side flush/record, the submit,
+            // and the blocking-fence wait (the cost the M2 sync rework targets) —
+            // exactly the baseline. Start the timer before the SAFETY comment so the
+            // comment stays adjacent to the `unsafe` block (clippy adjacency).
+            let submit_t0 = std::time::Instant::now();
             // SAFETY: `queue` is wgpu's graphics VkQueue on this context's device;
             // the node runs on the render schedule's thread (the main thread for
             // this tier — pipelining disabled), serialized w.r.t. wgpu's own
             // submissions in graph order (we are before StartMainPass).
-            if let Err(e) = unsafe {
+            let submit_res = unsafe {
                 ctx.render_external_frame(
                     &inst.target,
                     &inst.artboard,
                     crate::rive_clear_rgba(),
                     submit,
                 )
-            } {
+            };
+            let submit_cpu_us = submit_t0.elapsed().as_secs_f64() * 1.0e6;
+            if let Err(e) = submit_res {
                 warn!("rive zero-copy: frame {entity:?} failed: {e}");
                 continue;
             }
             // A frame's beginFrame + flush ran, so `pls_mode()` is now meaningful
             // (it is captured at beginFrame). Gate the one-shot PLS log on this.
             rendered_any = true;
+            // M2.0: record the submit's CPU wall time + rive's GPU command-buffer
+            // time (Vulkan timestamps; None if unavailable). The fixed baseline
+            // scene is single-entity, so one submit == one frame here.
+            perf.record(submit_cpu_us, ctx.last_gpu_ms());
 
             // DISPLAY: un-premultiply + sRGB-decode fullscreen pass from the shared
             // Rgba8Unorm texture (rive's premultiplied, sRGB-encoded bytes) into the
@@ -887,11 +1056,20 @@ impl Node for RiveFillNode {
 
         // Log the active interlock mode once a real frame has rendered (so
         // `pls_mode()` reflects a captured `beginFrame`, not an empty early call).
+        // M2.0: also report the clockwise request and whether GPU timing is live,
+        // so a perf run's log is self-describing.
         if rendered_any && !*logged_mode {
             info!(
-                "rive zero-copy: PLS mode = {:?}, raster-order supported = {}",
+                "rive zero-copy: PLS mode = {:?}, raster-order supported = {}, \
+                 clockwise requested = {}, GPU timing = {}",
                 ctx.pls_mode(),
-                ctx.supports_raster_ordering()
+                ctx.supports_raster_ordering(),
+                handles.clockwise,
+                if ctx.last_gpu_ms().is_some() {
+                    "available"
+                } else {
+                    "unavailable"
+                },
             );
             *logged_mode = true;
         }

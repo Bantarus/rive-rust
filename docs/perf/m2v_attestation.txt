@@ -1,0 +1,54 @@
+M2 verification — Vulkan validation attestation of the rive↔wgpu zero-copy/sync interop.
+Native RTX 4090 via Mesa Dozen (Vulkan→D3D12, ATOMIC PLS path), debug build, WGPU_VALIDATION=1,
+synchronization validation ENABLED + CONFIRMED via VK_LAYER_SETTINGS_PATH (banner 'Current Enables:
+VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION' present in the representative log).
+Frozen pose, 30-frame warm-up. Per-cell results are the table below (the primary artifact); a
+representative raw log is kept: representative_dozen_atomics.log (all 8 cells were equivalent).
+===============================================================================
+cell         rendered  syncValOn SYNC-HAZARD  interop-VUID
+fifo_wm_op   yes       yes       none         none        
+fifo_wm_tr   yes       yes       none         none        
+fifo_fx_op   yes       yes       none         none        
+fifo_fx_tr   yes       yes       none         none        
+imm_wm_op    yes       yes       none         none        
+imm_wm_tr    yes       yes       none         none        
+imm_fx_op    yes       yes       none         none        
+imm_fx_tr    yes       yes       none         none        
+===============================================================================
+Interop VUIDs/hazards: NONE in any cell. The only validation error per run is
+VUID-vkCmdCopyBufferToImage-imageOffset-07738 (wgpu-internal PendingWrites uploading a Bevy 1x1x6
+cubemap; tripped by Dozen's invalid transfer granularity (0,0,0); absent on native) — OUT OF SCOPE.
+FIXED before this matrix: VUID-vkDestroyDevice-device-05137 (M2b timeline semaphore leaked at
+teardown) — now owned+destroyed by RiveFrameSync. Native interlock path: ATTESTED (section below).
+See docs/M2_VERIFICATION.md.
+
+===============================================================================
+NATIVE RTX 4090 (real NVIDIA Vulkan ICD, driver 591.86, release + WGPU_VALIDATION=1)
+Authoritative environment (Dozen is non-conformant). Interlock extension ENABLED on the device.
+Sync validation confirmed per cell (banner). Per-cell results are the table below; representative raw
+logs kept: representative_native_atomics.log + representative_native_interlock.log.
+===============================================================================
+cell         render   syncValOn PLS-mode    interop-VUID   spirv-codegen-VUID
+wm_fifo_op   yes      yes       Atomics     [none]         16x
+wm_fifo_tr   yes      yes       Atomics     [none]         16x
+fx_fifo_op   yes      yes       Atomics     [none]         16x
+fx_fifo_tr   yes      yes       Atomics     [none]         16x
+wm_imm_op    yes      yes       Atomics     [none]         16x
+wm_imm_tr    yes      yes       Atomics     [none]         16x
+fx_imm_op    yes      yes       Atomics     [none]         16x
+fx_imm_tr    yes      yes       Atomics     [none]         16x
+cw_fifo_op   yes      yes       Clockwise   [none]         16x
+cw_fifo_tr   yes      yes       Clockwise   [none]         16x
+===============================================================================
+Native interop result: ZERO interop VUIDs / SYNC-HAZARDs in any cell, on BOTH the default Atomics
+path AND the Clockwise/interlock path (cw_* cells, RIVE_CLOCKWISE — different barriers). No
+vkDestroyDevice semaphore VUID (the RiveFrameSync fix holds on native). The Dozen cubemap VUID is
+ABSENT (native granularity (1,1,1)). Byte-identical across sync modes: opaque md5 1de62920 (x4),
+transparent md5 58c894e0 (== committed M2b reference).
+
+The ONLY native VUID is VUID-StandaloneSpirv-None-10684 (16x/run): strict spirv-val flags explicit
+layout (Offset/MatrixStride) decorations on Function-storage variables in naga-compiled shaders
+(Bevy's matrix-bearing shaders). NOT our interop and NOT our un-premult blit (its WGSL has no
+struct/matrix/array in any function var — cannot trigger this VUID). The NVIDIA driver accepts it
+(renders byte-identical-correct). A pre-existing upstream wgpu/naga shader-codegen issue, OUT OF
+SCOPE for the sync-interop verification.

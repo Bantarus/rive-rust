@@ -1,0 +1,643 @@
+'\\wsl.localhost\Ubuntu-24.04\home\bantarus\DEV\rive-rust'
+CMD.EXE a t dmarr avec le chemin d'accs comme rpertoire en
+cours. Les chemins d'accs UNC ne sont pas prise en charge. Utilisation
+du rpertoire Windows par dfaut.
+[win.cmd] VS:   "C:\Program Files\Microsoft Visual Studio\2022\Community"
+[win.cmd] repo: "E:\DEV\rive-rust"
+[win.cmd] cargo run --release -p bevy-rive --features zero_copy --example sprite_riv_zerocopy
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:6:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/linear_animation.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/linear_animation_base.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/animation.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/animation_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core.hpp(50,40): warning: unused parameter 'context' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    50 |     virtual bool validate(CoreContext* context) { return true; }
+warning: rive-renderer-sys@0.0.0:       |                                        ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core.hpp(57,50): warning: unused parameter 'context' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    57 |     virtual StatusCode onAddedDirty(CoreContext* context)
+warning: rive-renderer-sys@0.0.0:       |                                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core.hpp(66,50): warning: unused parameter 'context' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    66 |     virtual StatusCode onAddedClean(CoreContext* context)
+warning: rive-renderer-sys@0.0.0:       |                                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core.hpp(71,44): warning: unused parameter 'importStack' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    71 |     virtual StatusCode import(ImportStack& importStack)
+warning: rive-renderer-sys@0.0.0:       |                                            ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:9:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_context.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/viewmodel/viewmodel_instance_value.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/viewmodel/viewmodel_instance_value_base.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/component.hpp(52,40): warning: unused parameter 'dirt' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    52 |     virtual void onDirty(ComponentDirt dirt) {}
+warning: rive-renderer-sys@0.0.0:       |                                        ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/component.hpp(53,39): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    53 |     virtual void update(ComponentDirt value) {}
+warning: rive-renderer-sys@0.0.0:       |                                       ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/keyframe_interpolator.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/keyframe_interpolator_base.hpp(29,47): warning: unused parameter 'object' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    29 |     void copy(const KeyFrameInterpolatorBase& object) {}
+warning: rive-renderer-sys@0.0.0:       |                                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/keyframe_interpolator_base.hpp(31,31): warning: unused parameter 'propertyKey' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/keyframe_interpolator_base.hpp(31,58): warning: unused parameter 'reader' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                                                          ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/drawable.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/drawable_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/node_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/transform_component.hpp:4:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(15,39): warning: unused parameter 'width' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    15 |     virtual Vec2D measureLayout(float width,
+warning: rive-renderer-sys@0.0.0:       |                                       ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(16,51): warning: unused parameter 'widthMode' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    16 |                                 LayoutMeasureMode widthMode,
+warning: rive-renderer-sys@0.0.0:       |                                                   ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(17,39): warning: unused parameter 'height' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    17 |                                 float height,
+warning: rive-renderer-sys@0.0.0:       |                                       ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(18,51): warning: unused parameter 'heightMode' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    18 |                                 LayoutMeasureMode heightMode)
+warning: rive-renderer-sys@0.0.0:       |                                                   ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(23,36): warning: unused parameter 'size' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    23 |     virtual void controlSize(Vec2D size,
+warning: rive-renderer-sys@0.0.0:       |                                    ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(24,46): warning: unused parameter 'widthScaleType' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    24 |                              LayoutScaleType widthScaleType,
+warning: rive-renderer-sys@0.0.0:       |                                              ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(25,46): warning: unused parameter 'heightScaleType' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    25 |                              LayoutScaleType heightScaleType,
+warning: rive-renderer-sys@0.0.0:       |                                              ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/intrinsically_sizeable.hpp(26,46): warning: unused parameter 'direction' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    26 |                              LayoutDirection direction)
+warning: rive-renderer-sys@0.0.0:       |                                              ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/drawable.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/drawable_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(17,34): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    17 |     void setComputedLocalX(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(18,34): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    18 |     void setComputedLocalY(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(19,34): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    19 |     void setComputedWorldX(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(20,34): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    20 |     void setComputedWorldY(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(21,33): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    21 |     void setComputedRootX(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                 ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(22,33): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    22 |     void setComputedRootY(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                 ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(23,33): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    23 |     void setComputedWidth(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                 ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/node.hpp(24,34): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    24 |     void setComputedHeight(float value) override {}
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/drawable.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/renderer.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/paint/image_sampler.hpp(60,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    60 |     const uint8_t asKey() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/drawable.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/renderer.hpp:19:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\utils/lite_rtti.hpp:18:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\utils/compile_time_string_hash.hpp(65,67): warning: unused parameter 'str' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    65 | template <> constexpr uint32_t crc32<std::size_t(-1)>(const char* str)
+warning: rive-renderer-sys@0.0.0:       |                                                                   ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/drawable.hpp:5:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/renderer.hpp(124,32): warning: unused parameter 'value' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   124 |     virtual void feather(float value) {} // Not supported on all renderers.
+warning: rive-renderer-sys@0.0.0:       |                                ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/renderer.hpp(191,59): warning: unused parameter 'path' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   191 |     virtual void addRenderPathBackwards(const RenderPath* path,
+warning: rive-renderer-sys@0.0.0:       |                                                           ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/renderer.hpp(192,54): warning: unused parameter 'transform' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   192 |                                         const Mat2D& transform)
+warning: rive-renderer-sys@0.0.0:       |                                                      ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:8:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout/layout_node_provider.hpp(29,42): warning: unused parameter 'index' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    29 |     virtual AABB layoutBoundsForNode(int index) { return layoutBounds(); }
+warning: rive-renderer-sys@0.0.0:       |                                          ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout/layout_node_provider.hpp(31,42): warning: unused parameter 'animate' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     virtual void updateLayoutBounds(bool animate = true) {};
+warning: rive-renderer-sys@0.0.0:       |                                          ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout/layout_node_provider.hpp(32,43): warning: unused parameter 'shouldForceUpdateLayoutBounds' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    32 |     virtual void markLayoutNodeDirty(bool shouldForceUpdateLayoutBounds = false)
+warning: rive-renderer-sys@0.0.0:       |                                           ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/artboard_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/layout_component.hpp:10:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/rectangle.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/shapes/rectangle_base.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/parametric_path.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/shapes/parametric_path_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/path.hpp:7:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/shape_paint_container.hpp:5:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/shape_paint_path.hpp(59,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    59 |     const bool hasRenderPath() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:17:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/text/text_value_run.hpp(24,22): warning: comparison of integers of different signs: 'uint32_t' (aka 'unsigned int') and 'int' [-Wsign-compare]
+warning: rive-renderer-sys@0.0.0:    24 |         if (m_length == -1)
+warning: rive-renderer-sys@0.0.0:       |             ~~~~~~~~ ^  ~~
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:18:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/event.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/event_base.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core/field_types/core_callback_type.hpp(11,37): warning: unused parameter 'event' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    11 |     virtual void reportEvent(Event* event, float secondsDelay = 0.0f) {}
+warning: rive-renderer-sys@0.0.0:       |                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/core/field_types/core_callback_type.hpp(11,50): warning: unused parameter 'secondsDelay' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    11 |     virtual void reportEvent(Event* event, float secondsDelay = 0.0f) {}
+warning: rive-renderer-sys@0.0.0:       |                                                  ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard.hpp:23:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/input/focus_node.hpp:8:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/input/focusable.hpp(193,39): warning: unused parameter 'outPosition' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   193 |     virtual bool worldPosition(Vec2D& outPosition) { return false; }
+warning: rive-renderer-sys@0.0.0:       |                                       ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/input/focusable.hpp(198,36): warning: unused parameter 'outBounds' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   198 |     virtual bool worldBounds(AABB& outBounds) { return false; }
+warning: rive-renderer-sys@0.0.0:       |                                    ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/backboard.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/backboard_base.hpp(30,36): warning: unused parameter 'object' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    30 |     void copy(const BackboardBase& object) {}
+warning: rive-renderer-sys@0.0.0:       |                                    ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/backboard_base.hpp(32,31): warning: unused parameter 'propertyKey' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    32 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/backboard_base.hpp(32,58): warning: unused parameter 'reader' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    32 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                                                          ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:9:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/viewmodel/data_enum.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/viewmodel/data_enum_base.hpp(30,35): warning: unused parameter 'object' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    30 |     void copy(const DataEnumBase& object) {}
+warning: rive-renderer-sys@0.0.0:       |                                   ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/viewmodel/data_enum_base.hpp(32,31): warning: unused parameter 'propertyKey' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    32 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/viewmodel/data_enum_base.hpp(32,58): warning: unused parameter 'reader' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    32 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                                                          ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:16:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/converters/data_converter.hpp:4:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(13,36): warning: unused parameter 'dataType' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    13 |     virtual bool isTypeOf(DataType dataType) const { return false; }
+warning: rive-renderer-sys@0.0.0:       |                                    ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(23,37): warning: unused parameter 'comparand' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    23 |     virtual bool compare(DataValue* comparand) { return false; }
+warning: rive-renderer-sys@0.0.0:       |                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(24,41): warning: unused parameter 'to' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    24 |     virtual void interpolate(DataValue* to, DataValue* data, float mix) {}
+warning: rive-renderer-sys@0.0.0:       |                                         ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(24,56): warning: unused parameter 'data' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    24 |     virtual void interpolate(DataValue* to, DataValue* data, float mix) {}
+warning: rive-renderer-sys@0.0.0:       |                                                        ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(24,68): warning: unused parameter 'mix' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    24 |     virtual void interpolate(DataValue* to, DataValue* data, float mix) {}
+warning: rive-renderer-sys@0.0.0:       |                                                                    ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/data_values/data_value.hpp(25,39): warning: unused parameter 'destination' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    25 |     virtual void copyValue(DataValue* destination) {}
+warning: rive-renderer-sys@0.0.0:       |                                       ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:22:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/file.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/converters/data_converter.hpp(15,60): warning: unused parameter 'dataBind' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    15 |     virtual DataValue* convert(DataValue* value, DataBind* dataBind)
+warning: rive-renderer-sys@0.0.0:       |                                                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/converters/data_converter.hpp(19,67): warning: unused parameter 'dataBind' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    19 |     virtual DataValue* reverseConvert(DataValue* value, DataBind* dataBind)
+warning: rive-renderer-sys@0.0.0:       |                                                                   ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:25:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp:11:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/linear_animation_instance.hpp:6:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/nested_animation.hpp:6:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/nested_artboard.hpp:5:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard_host.hpp(26,59): warning: unused parameter 'artboardInstance' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    26 |     virtual void markHostingLayoutDirty(ArtboardInstance* artboardInstance) {}
+warning: rive-renderer-sys@0.0.0:       |                                                           ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/artboard_host.hpp(45,59): warning: unused parameter 'viewModelInstance' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    45 |     virtual void relinkDataContext(rcp<ViewModelInstance> viewModelInstance) {}
+warning: rive-renderer-sys@0.0.0:       |                                                           ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:25:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp:11:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/linear_animation_instance.hpp:6:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/nested_animation.hpp:6:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/nested_artboard.hpp(72,44): warning: unused parameter 'index' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    72 |     ArtboardInstance* artboardInstance(int index = 0) override
+warning: rive-renderer-sys@0.0.0:       |                                            ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:25:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp:13:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_transition.hpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/state_transition_base.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_layer_component.hpp:4:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/state_machine_layer_component_base.hpp(29,53): warning: unused parameter 'object' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    29 |     void copy(const StateMachineLayerComponentBase& object) {}
+warning: rive-renderer-sys@0.0.0:       |                                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/state_machine_layer_component_base.hpp(31,31): warning: unused parameter 'propertyKey' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/animation/state_machine_layer_component_base.hpp(31,58): warning: unused parameter 'reader' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                                                          ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:25:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp:19:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/bindable_property_number.hpp:3:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/data_bind/bindable_property_number_base.hpp:4:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\include\rive/data_bind/bindable_property.hpp:3:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/data_bind/bindable_property_base.hpp(29,43): warning: unused parameter 'object' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    29 |     void copy(const BindablePropertyBase& object) {}
+warning: rive-renderer-sys@0.0.0:       |                                           ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/data_bind/bindable_property_base.hpp(31,31): warning: unused parameter 'propertyKey' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/generated/data_bind/bindable_property_base.hpp(31,58): warning: unused parameter 'reader' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    31 |     bool deserialize(uint16_t propertyKey, BinaryReader& reader) override
+warning: rive-renderer-sys@0.0.0:       |                                                          ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:25:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp(442,42): warning: unused parameter 'pointerId' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   442 |     virtual void enablePointerEvents(int pointerId = 0) {}
+warning: rive-renderer-sys@0.0.0:       |                                          ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/animation/state_machine_instance.hpp(443,43): warning: unused parameter 'pointerId' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   443 |     virtual void disablePointerEvents(int pointerId = 0) {}
+warning: rive-renderer-sys@0.0.0:       |                                           ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:37:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context.hpp(170,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:   170 |     const gpu::InterlockMode frameInterlockMode() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:39:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp:11:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(48,29): warning: unused parameter 'encodedBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    48 |         Span<const uint8_t> encodedBytes)
+warning: rive-renderer-sys@0.0.0:       |                             ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(121,22): warning: unused parameter 'renderTargetUpdateBounds' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   121 |         const IAABB& renderTargetUpdateBounds,
+warning: rive-renderer-sys@0.0.0:       |                      ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(122,18): warning: unused parameter 'virtualTileWidth' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   122 |         uint32_t virtualTileWidth,
+warning: rive-renderer-sys@0.0.0:       |                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(123,18): warning: unused parameter 'virtualTileHeight' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   123 |         uint32_t virtualTileHeight,
+warning: rive-renderer-sys@0.0.0:       |                  ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(124,27): warning: unused parameter 'combinedDrawContents' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   124 |         gpu::DrawContents combinedDrawContents) const
+warning: rive-renderer-sys@0.0.0:       |                           ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(137,42): warning: unused parameter 'nextFrameNumber' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   137 |     virtual void prepareToFlush(uint64_t nextFrameNumber,
+warning: rive-renderer-sys@0.0.0:       |                                          ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(138,42): warning: unused parameter 'safeFrameNumber' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   138 |                                 uint64_t safeFrameNumber)
+warning: rive-renderer-sys@0.0.0:       |                                          ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(179,53): warning: unused parameter 'width' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   179 |     virtual void resizeTransientPLSBacking(uint32_t width,
+warning: rive-renderer-sys@0.0.0:       |                                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(180,53): warning: unused parameter 'height' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   180 |                                            uint32_t height,
+warning: rive-renderer-sys@0.0.0:       |                                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(181,53): warning: unused parameter 'planeCount' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   181 |                                            uint32_t planeCount)
+warning: rive-renderer-sys@0.0.0:       |                                                     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(185,55): warning: unused parameter 'width' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   185 |     virtual void resizeAtomicCoverageBacking(uint32_t width, uint32_t height) {}
+warning: rive-renderer-sys@0.0.0:       |                                                       ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(185,71): warning: unused parameter 'height' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   185 |     virtual void resizeAtomicCoverageBacking(uint32_t width, uint32_t height) {}
+warning: rive-renderer-sys@0.0.0:       |                                                                       ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/render_context_impl.hpp(219,44): warning: unused parameter 'commandBuffer' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   219 |     virtual void commitCommandBuffer(void* commandBuffer) {}
+warning: rive-renderer-sys@0.0.0:       |                                            ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:39:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(164,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   164 |     IMPLEMENT_PLS_BUFFER(FlushUniformBuffer, m_flushUniformBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(135,28): note: expanded from macro 'IMPLEMENT_PLS_BUFFER'
+warning: rive-renderer-sys@0.0.0:   135 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(165,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   165 |     IMPLEMENT_PLS_BUFFER(ImageDrawUniformBuffer, m_imageDrawUniformBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(135,28): note: expanded from macro 'IMPLEMENT_PLS_BUFFER'
+warning: rive-renderer-sys@0.0.0:   135 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(166,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   166 |     IMPLEMENT_PLS_STRUCTURED_BUFFER(PathBuffer, m_pathBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(153,28): note: expanded from macro 'IMPLEMENT_PLS_STRUCTURED_BUFFER'
+warning: rive-renderer-sys@0.0.0:   153 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(167,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   167 |     IMPLEMENT_PLS_STRUCTURED_BUFFER(PaintBuffer, m_paintBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(153,28): note: expanded from macro 'IMPLEMENT_PLS_STRUCTURED_BUFFER'
+warning: rive-renderer-sys@0.0.0:   153 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(168,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   168 |     IMPLEMENT_PLS_STRUCTURED_BUFFER(PaintAuxBuffer, m_paintAuxBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(153,28): note: expanded from macro 'IMPLEMENT_PLS_STRUCTURED_BUFFER'
+warning: rive-renderer-sys@0.0.0:   153 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(169,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   169 |     IMPLEMENT_PLS_STRUCTURED_BUFFER(ContourBuffer, m_contourBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(153,28): note: expanded from macro 'IMPLEMENT_PLS_STRUCTURED_BUFFER'
+warning: rive-renderer-sys@0.0.0:   153 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(170,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   170 |     IMPLEMENT_PLS_BUFFER(GradSpanBuffer, m_gradSpanBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(135,28): note: expanded from macro 'IMPLEMENT_PLS_BUFFER'
+warning: rive-renderer-sys@0.0.0:   135 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(171,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   171 |     IMPLEMENT_PLS_BUFFER(TessVertexSpanBuffer, m_tessSpanBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(135,28): note: expanded from macro 'IMPLEMENT_PLS_BUFFER'
+warning: rive-renderer-sys@0.0.0:   135 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(172,5): warning: unused parameter 'mapSizeInBytes' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   172 |     IMPLEMENT_PLS_BUFFER(TriangleVertexBuffer, m_triangleBuffer)
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_context_vulkan_impl.hpp(135,28): note: expanded from macro 'IMPLEMENT_PLS_BUFFER'
+warning: rive-renderer-sys@0.0.0:   135 |     void* map##Name(size_t mapSizeInBytes) override                            \
+warning: rive-renderer-sys@0.0.0:       |                            ^
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\crates\rive-renderer-sys\shim\rive_shim.cpp:40:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_target_vulkan.hpp(16,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    16 |     const VkFormat framebufferFormat() const { return m_framebufferFormat; }
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/render_target_vulkan.hpp(17,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    17 |     const VkImageUsageFlags targetUsageFlags() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: 89 warnings generated.
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_instance.cpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vkutil.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/gpu.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/paint/image_sampler.hpp(60,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    60 |     const uint8_t asKey() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_instance.cpp(74,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    74 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_instance.cpp(236,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   236 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_instance.cpp(269,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   269 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_instance.cpp(344,13): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   344 |             };
+warning: rive-renderer-sys@0.0.0:       |             ^
+warning: rive-renderer-sys@0.0.0: 5 warnings generated.
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp:7:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vkutil.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/gpu.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/paint/image_sampler.hpp(60,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    60 |     const uint8_t asKey() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(136,5): warning: missing field 'robustBufferAccess' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   136 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(247,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   247 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(258,5): warning: missing field 'flags' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   258 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(519,9): warning: missing field 'deviceName' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   519 |         };
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(641,17): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   641 |                 };
+warning: rive-renderer-sys@0.0.0:       |                 ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(649,13): warning: missing field 'features' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   649 |             };
+warning: rive-renderer-sys@0.0.0:       |             ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(684,13): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   684 |             };
+warning: rive-renderer-sys@0.0.0:       |             ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_device.cpp(692,9): warning: missing field 'features' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   692 |         };
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: 9 warnings generated.
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_library.cpp(69,31): warning: cast from 'FARPROC' (aka 'long long (*)()') to 'PFN_vkGetInstanceProcAddr' (aka 'void (*(*)(VkInstance_T *, const char *))()') converts to incompatible function type [-Wcast-function-type-mismatch]
+warning: rive-renderer-sys@0.0.0:    69 |     m_vkGetInstanceProcAddr = reinterpret_cast<PFN_vkGetInstanceProcAddr>(
+warning: rive-renderer-sys@0.0.0:       |                               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: rive-renderer-sys@0.0.0:    70 |         GetProcAddress(m_library, "vkGetInstanceProcAddr"));
+warning: rive-renderer-sys@0.0.0:       |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+warning: rive-renderer-sys@0.0.0: 1 warning generated.
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_debug_callbacks.cpp(18,63): warning: unused parameter 'message' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    18 | static bool should_error_message_be_fully_ignored(const char* message)
+warning: rive-renderer-sys@0.0.0:       |                                                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_debug_callbacks.cpp(82,44): warning: unused parameter 'messageSeverity' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    82 |     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
+warning: rive-renderer-sys@0.0.0:       |                                            ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_debug_callbacks.cpp(85,11): warning: unused parameter 'pUserData' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:    85 |     void* pUserData)
+warning: rive-renderer-sys@0.0.0:       |           ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_debug_callbacks.cpp(133,34): warning: unused parameter 'pUserData' [-Wunused-parameter]
+warning: rive-renderer-sys@0.0.0:   133 |                            void* pUserData)
+warning: rive-renderer-sys@0.0.0:       |                                  ^
+warning: rive-renderer-sys@0.0.0: 4 warnings generated.
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/include\rive_vk_bootstrap/vulkan_device.hpp:10:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vulkan_context.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vkutil.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/gpu.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/paint/image_sampler.hpp(60,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    60 |     const uint8_t asKey() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(47,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    47 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(62,9): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    62 |         };
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(73,9): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    73 |         };
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(95,9): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    95 |         };
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(138,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   138 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(192,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   192 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(233,13): warning: missing field 'sType' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   233 |             },
+warning: rive-renderer-sys@0.0.0:       |             ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(263,5): warning: missing field 'bufferOffset' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   263 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(282,31): warning: missing field 'sType' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   282 |                               });
+warning: rive-renderer-sys@0.0.0:       |                               ^
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_frame_synchronizer.cpp(363,5): warning: missing field 'pNext' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:   363 |     };
+warning: rive-renderer-sys@0.0.0:       |     ^
+warning: rive-renderer-sys@0.0.0: 11 warnings generated.
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_headless_frame_synchronizer.cpp:5:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/include\rive_vk_bootstrap/vulkan_device.hpp:10:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vulkan_context.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/vulkan/vkutil.hpp:8:
+warning: rive-renderer-sys@0.0.0: In file included from E:\DEV\rive-rust\vendor/rive-runtime\renderer\include\rive/renderer/gpu.hpp:16:
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\include\rive/shapes/paint/image_sampler.hpp(60,5): warning: 'const' type qualifier on return type has no effect [-Wignored-qualifiers]
+warning: rive-renderer-sys@0.0.0:    60 |     const uint8_t asKey() const
+warning: rive-renderer-sys@0.0.0:       |     ^~~~~
+warning: rive-renderer-sys@0.0.0: E:\DEV\rive-rust\vendor/rive-runtime\renderer\rive_vk_bootstrap/src\vulkan_headless_frame_synchronizer.cpp(58,9): warning: missing field 'sType' initializer [-Wmissing-designated-field-initializers]
+warning: rive-renderer-sys@0.0.0:    58 |         },
+warning: rive-renderer-sys@0.0.0:       |         ^
+warning: rive-renderer-sys@0.0.0: 2 warnings generated.
+    Finished `release` profile [optimized] target(s) in 0.24s
+     Running `target\release\examples\sprite_riv_zerocopy.exe`
+Validation Information: [ WARNING-CreateInstance-status-message ] | MessageID = 0x23dfd876
+vkCreateInstance(): Khronos Validation Layer Active:
+    Current Enables: VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT.
+    Current Disables: None.
+
+Objects: 1
+    [0] VkInstance 0x224d7150e30
+
+2026-05-31T23:14:54.522462Z  INFO bevy_render::renderer: AdapterInfo { name: "NVIDIA GeForce RTX 4090", vendor: 4318, device: 9860, device_type: DiscreteGpu, driver: "NVIDIA", driver_info: "591.86", backend: Vulkan }
+2026-05-31T23:14:54.522578Z  INFO bevy_rive::zero_copy: rive zero-copy: device-create callback pushed interlock exts (raster=false, pixel=true); final pNext sType chain wgpu will pass to vkCreateDevice = [PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT]
+2026-05-31T23:14:54.634445Z  INFO bevy_render::batching::gpu_preprocessing: GPU preprocessing is fully supported on this device.
+2026-05-31T23:14:54.634508Z  INFO bevy_winit::system: Creating new window sprite_riv_zerocopy (0v0)
+2026-05-31T23:14:54.675107Z  INFO sprite_riv_zerocopy: rive zero-copy: spawning 1 instance(s)
+2026-05-31T23:14:54.811807Z  INFO bevy_rive::zero_copy: rive zero-copy: interlock enabled  rasterization_order_color_attachment_access=false (rive uses RasterOrdering iff this is true), fragment_shader_pixel_interlock=true (clockwise mode only)
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '27[%27]', the Workgroup storage class has a explicit layout from the ArrayStride decoration.
+  %26 = OpVariable %_ptr_Workgroup__arr__arr_float_uint_16_uint_16 Workgroup
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '24[%24]', the Workgroup storage class has a explicit layout from the ArrayStride decoration.
+  %23 = OpVariable %_ptr_Workgroup__arr__arr_float_uint_16_uint_16 Workgroup
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '24[%24]', the Workgroup storage class has a explicit layout from the ArrayStride decoration.
+  %23 = OpVariable %_ptr_Workgroup__arr__arr_float_uint_16_uint_16 Workgroup
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '28[%28]', the Workgroup storage class has a explicit layout from the ArrayStride decoration.
+  %27 = OpVariable %_ptr_Workgroup__arr__arr_float_uint_16_uint_16 Workgroup
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+2026-05-31T23:14:54.833447Z  INFO bevy_rive::zero_copy: rive zero-copy: un-premult pass recorded shared->display for 9v0 (GpuImage ready)
+2026-05-31T23:14:54.833526Z  INFO bevy_rive::zero_copy: rive zero-copy: PLS mode = Clockwise, raster-order supported = false, clockwise requested = true, sync = non-blocking + timeline-semaphore watermark (M2b, exact), GPU timing = unavailable
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '29[%29]', the Function storage class has a explicit layout from the Offset decoration.
+  %28 = OpVariable %_ptr_Function__struct_7 Function %30
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '64[%64]', the Function storage class has a explicit layout from the Offset decoration.
+  %63 = OpVariable %_ptr_Function__struct_16 Function %65
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '67[%67]', the Function storage class has a explicit layout from the MatrixStride decoration.
+  %66 = OpVariable %_ptr_Function__struct_12 Function %68
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+Validation Error: [ VUID-StandaloneSpirv-None-10684 ] | MessageID = 0xb210f7c2
+vkCreateShaderModule(): pCreateInfo->pCode (spirv-val produced an error):
+Invalid explicit layout decorations on type for operand '68[%68]', the Function storage class has a explicit layout from the MatrixStride decoration.
+  %67 = OpVariable %_ptr_Function__struct_12 Function %69
+
+Command to reproduce:
+	spirv-val <input.spv> --relax-block-layout --target-env vulkan1.3
+
+The Vulkan spec states: All variables must have valid explicit layout decorations as described in Shader Interfaces (https://docs.vulkan.org/spec/latest/appendices/spirvenv.html#VUID-StandaloneSpirv-None-10684)
+
+2026-05-31T23:14:55.362644Z  INFO bevy_render::view::window::screenshot: Screenshot saved to cap_nv_cw_fifo_op.png
+2026-05-31T23:14:55.807782Z  INFO sprite_riv_zerocopy: rive: capture complete, exiting

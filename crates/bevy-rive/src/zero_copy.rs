@@ -351,11 +351,41 @@ struct RiveSharedHandles {
     /// "≤ ring frames in flight" precondition entirely. `0` (the blocking path, or a
     /// device without timeline semaphores) falls back to `frame - RIVE_RING_SIZE`.
     ///
-    /// Created once (device-lifetime) and **intentionally never destroyed**: it is a
-    /// single semaphore for the whole app, and a `vkDestroySemaphore` at drop would
-    /// reintroduce exactly the teardown-ordering / drop-time device access the M1b
-    /// close-out removed. The device outlives it; the OS reclaims it at process exit.
+    /// Created once in `extract_shared_handles_once`; its lifetime is owned by
+    /// [`RiveFrameSync`], which destroys it on teardown (see that type).
     frame_sync_sema: u64,
+}
+
+/// Owns the M2b timeline semaphore and destroys it when the render world tears down —
+/// fixing `VUID-vkDestroyDevice-device-05137` (the validation gate caught the semaphore
+/// outliving the `VkDevice`). It retains a `wgpu::Device` **clone**, which keeps the
+/// underlying `VkDevice` alive across destruction regardless of render-world resource drop
+/// order, so this is order-independent and is NOT the M1b drop-time hazard (that was the
+/// `!Send` rive `Rc` state under pipelining; this is a plain `Send` wgpu handle, with
+/// pipelining off).
+#[derive(Resource)]
+struct RiveFrameSync {
+    sema: u64,
+    device: wgpu::Device,
+}
+
+impl Drop for RiveFrameSync {
+    fn drop(&mut self) {
+        if self.sema == 0 {
+            return;
+        }
+        // SAFETY: our retained `wgpu::Device` clone keeps the `VkDevice` alive across this
+        // call (it cannot be destroyed until this clone drops, which is after this body).
+        // `device_wait_idle` first so no in-flight submit still references the semaphore,
+        // then destroy it — VUID-vkDestroySemaphore + VUID-vkDestroyDevice clean.
+        unsafe {
+            if let Some(d) = self.device.as_hal::<Vk>() {
+                let raw = d.raw_device();
+                let _ = raw.device_wait_idle();
+                raw.destroy_semaphore(vk::Semaphore::from_raw(self.sema), None);
+            }
+        }
+    }
 }
 
 /// Per-entity native render state (one rive instance bound to one shared texture).
@@ -667,6 +697,12 @@ struct RiveGpu {
     frame: u64,
     /// Set once we have logged the active PLS mode.
     logged_mode: bool,
+    /// M2b: tracks whether the fixed-ring fallback's recycle precondition is currently
+    /// violated (a non-vsync present mode / high frame-latency). Lets the warning re-fire
+    /// when the live window config transitions INTO the unsafe regime at runtime (e.g. the
+    /// user toggles vsync off), instead of latching on the first frame. Unused while the
+    /// exact timeline-semaphore watermark is active (no present-mode precondition then).
+    recycle_unsafe_warned: bool,
     /// Set once we have applied the clockwise override to the context.
     clockwise_applied: bool,
     /// M2.0 perf collector (configured from `RiveSharedHandles` on first frame).
@@ -690,6 +726,7 @@ impl Default for RiveRenderState {
             instances: HashMap::new(),
             frame: 0,
             logged_mode: false,
+            recycle_unsafe_warned: false,
             clockwise_applied: false,
             perf: PerfStats::default(),
         }))
@@ -922,6 +959,14 @@ fn extract_shared_handles_once(
     } else {
         warn!("rive zero-copy: no interlock extension enabled — rive uses the atomic PLS fallback");
     }
+    if handles.frame_sync_sema != 0 {
+        // Give the timeline semaphore an owner that destroys it on teardown (its retained
+        // device clone keeps the VkDevice alive across that — see RiveFrameSync).
+        commands.insert_resource(RiveFrameSync {
+            sema: handles.frame_sync_sema,
+            device: device.wgpu_device().clone(),
+        });
+    }
     commands.insert_resource(handles);
 }
 
@@ -1057,6 +1102,7 @@ impl Node for RiveFillNode {
             blit,
             instances,
             logged_mode,
+            recycle_unsafe_warned,
             perf,
             ..
         } = &mut *gpu;
@@ -1328,18 +1374,23 @@ impl Node for RiveFillNode {
                     "unavailable"
                 },
             );
-            // Sync guard — only meaningful in the FIXED-RING fallback. M2b's exact
-            // timeline-semaphore watermark proves GPU completion regardless of frames
-            // in flight, so when it is active there is no present-mode precondition and
-            // no warning. We only reach here in the fallback (timeline semaphores
-            // unavailable), where `safe_frame = current - RIVE_RING_SIZE` is sound only
-            // while frames-in-flight ≤ RIVE_RING_SIZE: warn (once) if the live window
-            // config could exceed that (non-vsync present mode, or latency past the
-            // ring) — else rive could recycle a buffer the GPU still reads (silent
-            // corruption). RIVE_BLOCKING=1 is the safe fallback. See RIVE_RING_SIZE.
-            if !blocking && !watermark_active {
-                if let Some(windows) = world.get_resource::<ExtractedWindows>() {
-                    for w in windows.windows.values() {
+            *logged_mode = true;
+        }
+
+        // M2b sync guard — evaluated EVERY frame (not latched to the one-shot PLS log
+        // above), so a runtime present-mode change INTO the unsafe regime still warns.
+        // Only the FIXED-RING fallback has a precondition: the exact timeline-semaphore
+        // watermark proves GPU completion regardless of frames-in-flight, so when it is
+        // active there is nothing to warn about. In the fallback, `safe_frame = current -
+        // RIVE_RING_SIZE` is sound only while frames-in-flight ≤ RIVE_RING_SIZE; warn when
+        // the live window config could exceed that (non-vsync present mode, or latency
+        // past the ring) — else rive could recycle a pooled buffer the GPU still reads
+        // (silent corruption). RIVE_BLOCKING=1 is the safe fallback. See RIVE_RING_SIZE.
+        if !blocking && !watermark_active {
+            let unsafe_now = world
+                .get_resource::<ExtractedWindows>()
+                .is_some_and(|windows| {
+                    windows.windows.values().any(|w| {
                         let vsync = matches!(
                             w.present_mode,
                             PresentMode::Fifo | PresentMode::FifoRelaxed | PresentMode::AutoVsync
@@ -1350,21 +1401,21 @@ impl Node for RiveFillNode {
                         } else {
                             u64::MAX
                         };
-                        if in_flight > RIVE_RING_SIZE {
-                            warn!(
-                                "rive zero-copy: non-blocking sync assumes ≤ {RIVE_RING_SIZE} frames in \
-                                 flight, but window present_mode={:?} / desired_maximum_frame_latency={:?} \
-                                 may exceed it — rive can recycle a pooled buffer the GPU is still reading \
-                                 (silent corruption). Use PresentMode::Fifo with latency ≤ {}, or RIVE_BLOCKING=1.",
-                                w.present_mode,
-                                w.desired_maximum_frame_latency,
-                                RIVE_RING_SIZE - 1,
-                            );
-                        }
-                    }
-                }
+                        in_flight > RIVE_RING_SIZE
+                    })
+                });
+            // Warn once per entry into the unsafe regime; reset when safe again so a later
+            // transition re-warns.
+            if unsafe_now && !*recycle_unsafe_warned {
+                warn!(
+                    "rive zero-copy: non-blocking sync (fixed-ring fallback) assumes ≤ {RIVE_RING_SIZE} \
+                     frames in flight, but the window present mode / desired_maximum_frame_latency may \
+                     exceed it — rive can recycle a pooled buffer the GPU is still reading (silent \
+                     corruption). Use PresentMode::Fifo with latency ≤ {}, or RIVE_BLOCKING=1.",
+                    RIVE_RING_SIZE - 1,
+                );
             }
-            *logged_mode = true;
+            *recycle_unsafe_warned = unsafe_now;
         }
 
         // Drop instances whose entity is no longer extracted this frame.

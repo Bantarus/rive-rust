@@ -8,6 +8,28 @@ repository.workspace = true
 description = "Bevy plugin for the native Rive Renderer (offscreen render + CPU-copy bridge, M1a)."
 publish = false
 
+[features]
+default = []
+# M1b zero-copy Vulkan tier. Adds the render-world bridge: a Render Graph node
+# that drives the native Rive renderer directly into a wgpu-allocated VkImage
+# (no per-frame CPU readback), device sharing via Bevy's `raw_vulkan_init`
+# callback (to enable VK_EXT_fragment_shader_interlock), and raw Vulkan handle
+# extraction via `as_hal`. Without this feature, `bevy-rive` is the M1a CPU-copy
+# floor only and stays tiny (bevy_asset + bevy_image + bevy_log).
+#
+# Pulls `bevy/raw_vulkan_init` (which itself enables `wgpu/vulkan`) + the render
+# and core-pipeline crates (RenderApp, render graph, Core2d/Node2d labels), and
+# the wgpu-hal/ash crates for handle extraction. wgpu/wgpu-hal are pinned to
+# exactly Bevy 0.18.1's (27.0.1 / 27.0.4) so the hal types match across the FFI.
+zero_copy = [
+    "dep:wgpu",
+    "dep:wgpu-hal",
+    "dep:ash",
+    "bevy/bevy_render",
+    "bevy/bevy_core_pipeline",
+    "bevy/raw_vulkan_init",
+]
+
 [dependencies]
 rive-renderer = { path = "../rive-renderer" }
 # The plugin only defines an asset + loader, ECS components/systems, and fills a
@@ -22,6 +44,14 @@ bevy = { version = "0.18.1", default-features = false, features = [
 # this MUST be the exact version `bevy_image` 0.18.1 links, or `TextureFormat` is a distinct
 # type and `Image::new` rejects our format constant. Pinned exact; guarded by `cargo tree -d`.
 wgpu-types = "=27.0.1"
+
+# M1b zero-copy deps (optional; enabled by `zero_copy`). Pinned to Bevy 0.18.1's
+# exact wgpu/wgpu-hal so `wgpu::hal::vulkan::*` and our `wgpu_hal::vulkan::Api`
+# are the SAME types Bevy's RenderDevice exposes via `as_hal` (a version skew
+# would make the hal handle types distinct and reject the extraction).
+wgpu = { version = "=27.0.1", default-features = false, features = ["vulkan"], optional = true }
+wgpu-hal = { version = "=27.0.4", default-features = false, features = ["vulkan"], optional = true }
+ash = { version = "0.38", default-features = false, optional = true }
 
 [dev-dependencies]
 # The example is a full windowed app: window + winit + a Linux display backend +
@@ -48,6 +78,12 @@ image = "0.25"
 [[example]]
 name = "sprite_riv"
 path = "../../examples/sprite_riv.rs"
+
+# The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
+[[example]]
+name = "sprite_riv_zerocopy"
+path = "../../examples/sprite_riv_zerocopy.rs"
+required-features = ["zero_copy"]
 
 [lints]
 workspace = true

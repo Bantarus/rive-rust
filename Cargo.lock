@@ -408,9 +408,12 @@ dependencies = [
 name = "bevy-rive"
 version = "0.0.0"
 dependencies = [
+ "ash",
  "bevy",
  "image",
  "rive-renderer",
+ "wgpu",
+ "wgpu-hal",
  "wgpu-types",
 ]
 

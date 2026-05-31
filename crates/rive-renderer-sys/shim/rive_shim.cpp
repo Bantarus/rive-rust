@@ -32,6 +32,7 @@
 #include "rive/span.hpp"
 
 // PLS renderer + Vulkan backend.
+#include "rive/renderer/gpu.hpp" // InterlockMode, kBufferRingSize
 #include "rive/renderer/render_context.hpp"
 #include "rive/renderer/rive_renderer.hpp"
 #include "rive/renderer/vulkan/render_context_vulkan_impl.hpp"
@@ -51,6 +52,7 @@ using rive::gpu::RenderContextVulkanImpl;
 using rive::gpu::RenderTargetVulkanImpl;
 using rive::gpu::VulkanContext;
 using rive::gpu::vkutil::ImageAccess;
+using rive::gpu::vkutil::ImageView;
 
 namespace {
 
@@ -111,6 +113,33 @@ struct RiveRenderContext
     // One in-flight frame at a time (M0).
     rive::RiveRenderer* currentRenderer = nullptr; // owned between begin/flush
     RiveRenderTarget* currentTarget = nullptr;     // borrowed
+
+    // ---- M1b: external (wgpu-shared) tier ----------------------------------
+    // When `external` is true, the instance/device unique_ptrs above stay empty
+    // (wgpu owns them) and these borrowed handles drive the frame instead.
+    bool external = false;
+    VkInstance extInstance = VK_NULL_HANDLE;
+    VkPhysicalDevice extPhysicalDevice = VK_NULL_HANDLE;
+    VkDevice extDevice = VK_NULL_HANDLE;
+    uint32_t extQueueFamily = 0;
+    PFN_vkGetInstanceProcAddr extGetInstanceProcAddr = nullptr;
+    // Per-frame command pool + a single reused command buffer + a submit fence.
+    // One in-flight frame per context: submit BLOCKS on the fence before
+    // returning (M1b is correctness-first; pipelining is M2), so implicit
+    // reset-on-Begin of the reused command buffer is sound. The fence is
+    // shim-internal — the Rust side cannot cheaply build an ash::Device to make
+    // one, and every Vulkan PFN already lives in the VulkanContext dispatch
+    // table. Created lazily on first submit.
+    VkCommandPool extPool = VK_NULL_HANDLE;
+    VkCommandBuffer extCmdBuffer = VK_NULL_HANDLE;
+    VkFence extFence = VK_NULL_HANDLE;
+    // Frame-number watermark carried from begin to submit.
+    uint64_t extCurrentFrameNumber = 0;
+    uint64_t extSafeFrameNumber = 0;
+    // Interlock/PLS mode captured at beginFrame (rive's frameInterlockMode() is
+    // valid only between beginFrame and flush). -1 until the first frame begins;
+    // the pls_mode getter returns this so callers can query it after flush.
+    int extLastInterlockMode = -1;
 };
 
 struct RiveRenderTarget
@@ -120,6 +149,19 @@ struct RiveRenderTarget
     uint32_t width = 0;
     uint32_t height = 0;
     std::vector<uint8_t> pixels; // last flushed frame, RGBA8 premultiplied top-down
+
+    // ---- M1b: external (wgpu-shared) tier ----------------------------------
+    // When `external` is true, `sync`/`pixels` are unused and the rive target
+    // wraps a wgpu-owned VkImage (never freed here).
+    bool external = false;
+    VkImage extImage = VK_NULL_HANDLE;
+    VkImageView extView = VK_NULL_HANDLE;
+    // A view the shim created itself (when the caller passed view==0); kept alive
+    // so `extView` stays valid. Null when the caller supplied the view.
+    rive::rcp<ImageView> ownedView;
+    // Tracked layout of `extImage` across frames: seeds setTargetImageView each
+    // frame (UNDEFINED first frame, SHADER_READ_ONLY after our post-flush barrier).
+    ImageAccess lastAccess{};
 };
 
 struct RiveFile
@@ -217,8 +259,38 @@ extern "C" void rive_render_context_destroy(RiveRenderContext* ctx)
     // A frame may have been begun but never flushed; clean up its renderer.
     delete ctx->currentRenderer;
     ctx->currentRenderer = nullptr;
-    // Destruction order: render context (drops its VulkanContext ref), then
-    // device, then instance. Any RiveRenderTarget must already be destroyed.
+
+    if (ctx->external)
+    {
+        // External tier: we borrow the wgpu-owned device — never destroy it.
+        // We DO own the per-frame command pool; destroy it (which frees its
+        // command buffers) via the device dispatch table, which lives in the
+        // VulkanContext, BEFORE resetting renderContext drops that table.
+        if (ctx->impl != nullptr)
+        {
+            VulkanContext* vk = ctx->impl->vulkanContext();
+            // The fence is unsignaled or already waited (submit blocks), so
+            // destroying it here is safe. Destroy the pool last (it frees the cb).
+            if (ctx->extFence != VK_NULL_HANDLE)
+            {
+                vk->DestroyFence(ctx->extDevice, ctx->extFence, nullptr);
+                ctx->extFence = VK_NULL_HANDLE;
+            }
+            if (ctx->extPool != VK_NULL_HANDLE)
+            {
+                vk->DestroyCommandPool(ctx->extDevice, ctx->extPool, nullptr);
+                ctx->extPool = VK_NULL_HANDLE;
+                ctx->extCmdBuffer = VK_NULL_HANDLE;
+            }
+        }
+        ctx->renderContext.reset(); // drops the VulkanContext ref (not the device)
+        delete ctx;
+        return;
+    }
+
+    // Self-managed (M0/M1a) destruction order: render context (drops its
+    // VulkanContext ref), then device, then instance. Any RiveRenderTarget must
+    // already be destroyed.
     ctx->renderContext.reset();
     ctx->device.reset();
     ctx->instance.reset();
@@ -287,8 +359,18 @@ extern "C" void rive_render_target_destroy(RiveRenderTarget* target)
 {
     if (target == nullptr)
         return;
-    // Destroy the synchronizer first (it waits for in-flight command buffers),
-    // then drop the render target wrapper.
+    // External tier: the VkImage is wgpu-owned (never freed here). Drop any
+    // shim-created image view (the rcp releases it through the VulkanContext)
+    // and the rive target wrapper. No synchronizer.
+    if (target->external)
+    {
+        target->ownedView = nullptr;
+        target->renderTarget = nullptr;
+        delete target;
+        return;
+    }
+    // Self-managed: destroy the synchronizer first (it waits for in-flight
+    // command buffers), then drop the render target wrapper.
     target->sync.reset();
     target->renderTarget = nullptr;
     delete target;
@@ -479,6 +561,10 @@ extern "C" RiveStatus rive_frame_begin(RiveRenderContext* ctx,
     frameDescriptor.clearColor =
         rive::colorARGB(to_u8(a), to_u8(r), to_u8(g), to_u8(b));
     ctx->renderContext->beginFrame(frameDescriptor);
+    // Capture the interlock/PLS mode now — valid only between beginFrame and
+    // flush. The pls_mode getter returns this cached value after the frame.
+    ctx->extLastInterlockMode =
+        static_cast<int>(ctx->renderContext->frameInterlockMode());
 
     ctx->currentRenderer = new (std::nothrow) rive::RiveRenderer(
         ctx->renderContext.get());
@@ -591,4 +677,484 @@ extern "C" RiveStatus rive_render_target_read_pixels(RiveRenderTarget* target,
     }
     std::memcpy(out_rgba, target->pixels.data(), out_len);
     return RIVE_OK;
+}
+
+// ===========================================================================
+// M1b: external (wgpu-shared) Vulkan tier.
+// ===========================================================================
+
+// gpu::InterlockMode ordinals are part of the C ABI (RIVE_PLS_* in the header).
+// Pin them so a rive-runtime bump that reorders the enum fails the build here.
+static_assert(static_cast<int>(rive::gpu::InterlockMode::rasterOrdering) == RIVE_PLS_RASTER_ORDERING);
+static_assert(static_cast<int>(rive::gpu::InterlockMode::atomics) == RIVE_PLS_ATOMICS);
+static_assert(static_cast<int>(rive::gpu::InterlockMode::clockwise) == RIVE_PLS_CLOCKWISE);
+static_assert(static_cast<int>(rive::gpu::InterlockMode::clockwiseAtomic) == RIVE_PLS_CLOCKWISE_ATOMIC);
+static_assert(static_cast<int>(rive::gpu::InterlockMode::msaa) == RIVE_PLS_MSAA);
+static_assert(rive::gpu::INTERLOCK_MODE_COUNT == 5);
+
+namespace {
+
+// Vulkan handles cross the C ABI as uint64_t. On 64-bit hosts (the only target;
+// see the header) dispatchable handles are pointers and non-dispatchable handles
+// are either pointers or uint64_t — `(H)(uintptr_t)v` is correct for both.
+template <class H>
+H handle_from_u64(uint64_t v)
+{
+    return reinterpret_cast<H>(static_cast<uintptr_t>(v));
+}
+template <class H>
+uint64_t handle_to_u64(H h)
+{
+    return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(h));
+}
+
+// Lazily creates the per-frame command pool + a single reused command buffer +
+// the submit fence on the external context's queue family. Returns false (and
+// sets the error) on failure. The pool uses RESET_COMMAND_BUFFER so
+// vkBeginCommandBuffer implicitly resets the buffer each frame (one in-flight
+// frame per context; submit blocks on the fence before returning). The fence is
+// created UNSIGNALED; submit resets-then-waits it.
+bool ensure_ext_frame_objects(RiveRenderContext* ctx, VulkanContext* vk)
+{
+    if (ctx->extCmdBuffer != VK_NULL_HANDLE && ctx->extFence != VK_NULL_HANDLE)
+    {
+        return true;
+    }
+    if (ctx->extPool == VK_NULL_HANDLE)
+    {
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+        poolInfo.queueFamilyIndex = ctx->extQueueFamily;
+        if (vk->CreateCommandPool(ctx->extDevice, &poolInfo, nullptr, &ctx->extPool) !=
+            VK_SUCCESS)
+        {
+            set_error("rive external: vkCreateCommandPool failed");
+            ctx->extPool = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    if (ctx->extCmdBuffer == VK_NULL_HANDLE)
+    {
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = ctx->extPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        if (vk->AllocateCommandBuffers(ctx->extDevice, &allocInfo, &ctx->extCmdBuffer) !=
+            VK_SUCCESS)
+        {
+            set_error("rive external: vkAllocateCommandBuffers failed");
+            ctx->extCmdBuffer = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    if (ctx->extFence == VK_NULL_HANDLE)
+    {
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        fenceInfo.flags = 0; // unsignaled
+        if (vk->CreateFence(ctx->extDevice, &fenceInfo, nullptr, &ctx->extFence) !=
+            VK_SUCCESS)
+        {
+            set_error("rive external: vkCreateFence failed");
+            ctx->extFence = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
+extern "C" RiveRenderContext* rive_render_context_create_vulkan_external(
+    uint64_t instance,
+    uint64_t physicalDevice,
+    uint64_t device,
+    void* getInstanceProcAddr,
+    const RiveVulkanFeatures* features,
+    int32_t forceAtomic)
+{
+    if (instance == 0 || physicalDevice == 0 || device == 0 ||
+        getInstanceProcAddr == nullptr || features == nullptr)
+    {
+        set_error("rive_render_context_create_vulkan_external: invalid arguments");
+        return nullptr;
+    }
+
+    auto ctx = new (std::nothrow) RiveRenderContext();
+    if (ctx == nullptr)
+    {
+        set_error("out of memory allocating RiveRenderContext");
+        return nullptr;
+    }
+
+    // Mirror the caller's (wgpu-enabled) features into rive's struct field by
+    // field — never reinterpret-cast across the ABI boundary.
+    rive::gpu::VulkanFeatures vf{};
+    vf.apiVersion = features->apiVersion;
+    vf.independentBlend = features->independentBlend != 0;
+    vf.fillModeNonSolid = features->fillModeNonSolid != 0;
+    vf.fragmentStoresAndAtomics = features->fragmentStoresAndAtomics != 0;
+    vf.shaderClipDistance = features->shaderClipDistance != 0;
+    vf.rasterizationOrderColorAttachmentAccess =
+        features->rasterizationOrderColorAttachmentAccess != 0;
+    vf.fragmentShaderPixelInterlock = features->fragmentShaderPixelInterlock != 0;
+    vf.VK_KHR_portability_subset = features->vkKhrPortabilitySubset != 0;
+    vf.textureCompressionBC = features->textureCompressionBC != 0;
+    vf.textureCompressionASTC_LDR = features->textureCompressionASTC_LDR != 0;
+    vf.textureCompressionETC2 = features->textureCompressionETC2 != 0;
+
+    RenderContextVulkanImpl::ContextOptions ctxOpts;
+    ctxOpts.forceAtomicMode = (forceAtomic != 0);
+
+    ctx->renderContext = RenderContextVulkanImpl::MakeContext(
+        handle_from_u64<VkInstance>(instance),
+        handle_from_u64<VkPhysicalDevice>(physicalDevice),
+        handle_from_u64<VkDevice>(device),
+        vf,
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(getInstanceProcAddr),
+        ctxOpts);
+    if (ctx->renderContext == nullptr)
+    {
+        set_error("RenderContextVulkanImpl::MakeContext (external) failed");
+        delete ctx;
+        return nullptr;
+    }
+    ctx->impl = ctx->renderContext->static_impl_cast<RenderContextVulkanImpl>();
+    ctx->external = true;
+    ctx->extInstance = handle_from_u64<VkInstance>(instance);
+    ctx->extPhysicalDevice = handle_from_u64<VkPhysicalDevice>(physicalDevice);
+    ctx->extDevice = handle_from_u64<VkDevice>(device);
+    ctx->extGetInstanceProcAddr =
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(getInstanceProcAddr);
+    return ctx;
+}
+
+extern "C" void rive_render_context_set_queue_family(RiveRenderContext* ctx,
+                                                     uint32_t queueFamilyIndex)
+{
+    if (ctx == nullptr)
+        return;
+    ctx->extQueueFamily = queueFamilyIndex;
+}
+
+extern "C" int32_t rive_render_context_supports_raster_ordering(
+    const RiveRenderContext* ctx)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr)
+        return -1;
+    return ctx->renderContext->platformFeatures().supportsRasterOrderingMode ? 1 : 0;
+}
+
+extern "C" RivePlsMode rive_render_context_pls_mode(const RiveRenderContext* ctx)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr)
+        return -1;
+    // frameInterlockMode() is valid only between beginFrame and flush, so return
+    // the value captured at the last beginFrame (extLastInterlockMode) rather than
+    // querying live — the Bevy node queries pls_mode() after flush completes.
+    return static_cast<RivePlsMode>(ctx->extLastInterlockMode);
+}
+
+extern "C" RiveRenderTarget* rive_render_target_wrap_vk_image(
+    RiveRenderContext* ctx,
+    uint64_t vkImage,
+    uint64_t vkImageView,
+    uint32_t width,
+    uint32_t height,
+    uint32_t vkFormat,
+    uint32_t vkUsageFlags)
+{
+    if (ctx == nullptr || ctx->impl == nullptr || !ctx->external || vkImage == 0 ||
+        width == 0 || height == 0)
+    {
+        set_error("rive_render_target_wrap_vk_image: invalid arguments");
+        return nullptr;
+    }
+
+    auto target = new (std::nothrow) RiveRenderTarget();
+    if (target == nullptr)
+    {
+        set_error("out of memory allocating RiveRenderTarget");
+        return nullptr;
+    }
+    target->external = true;
+    target->width = width;
+    target->height = height;
+    target->extImage = handle_from_u64<VkImage>(vkImage);
+    // wgpu just allocated/owns the image; rive has not touched it yet.
+    target->lastAccess = ImageAccess{};
+
+    // Build (or adopt) the image view rive samples/renders through.
+    if (vkImageView != 0)
+    {
+        target->extView = handle_from_u64<VkImageView>(vkImageView);
+    }
+    else
+    {
+        VkImageViewCreateInfo ivci{};
+        ivci.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        ivci.image = target->extImage;
+        ivci.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivci.format = static_cast<VkFormat>(vkFormat);
+        ivci.components = {VK_COMPONENT_SWIZZLE_IDENTITY,
+                           VK_COMPONENT_SWIZZLE_IDENTITY,
+                           VK_COMPONENT_SWIZZLE_IDENTITY,
+                           VK_COMPONENT_SWIZZLE_IDENTITY};
+        ivci.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivci.subresourceRange.baseMipLevel = 0;
+        ivci.subresourceRange.levelCount = 1;
+        ivci.subresourceRange.baseArrayLayer = 0;
+        ivci.subresourceRange.layerCount = 1;
+        target->ownedView =
+            ctx->impl->vulkanContext()->makeExternalImageView(ivci, "rive_ext_target_view");
+        if (target->ownedView == nullptr)
+        {
+            set_error("rive external: makeExternalImageView failed");
+            delete target;
+            return nullptr;
+        }
+        target->extView = target->ownedView->vkImageView();
+    }
+
+    target->renderTarget = ctx->impl->makeRenderTarget(
+        width,
+        height,
+        static_cast<VkFormat>(vkFormat),
+        static_cast<VkImageUsageFlags>(vkUsageFlags));
+    if (target->renderTarget == nullptr)
+    {
+        set_error("RenderContextVulkanImpl::makeRenderTarget (external) failed");
+        delete target;
+        return nullptr;
+    }
+    return target;
+}
+
+extern "C" void rive_render_target_set_vk_image(RiveRenderTarget* target,
+                                                uint64_t vkImage,
+                                                uint64_t vkImageView)
+{
+    if (target == nullptr || !target->external)
+        return;
+    target->extImage = handle_from_u64<VkImage>(vkImage);
+    // A new image is in its initial (undefined) layout from rive's perspective.
+    target->lastAccess = ImageAccess{};
+    if (vkImageView != 0)
+    {
+        target->ownedView = nullptr;
+        target->extView = handle_from_u64<VkImageView>(vkImageView);
+    }
+    // If vkImageView==0 the caller keeps the previously-created view; a full
+    // recreate (on a genuine resize) goes through wrap_vk_image instead.
+}
+
+extern "C" RiveStatus rive_frame_begin_external(RiveRenderContext* ctx,
+                                                RiveRenderTarget* target,
+                                                float r, float g, float b, float a,
+                                                uint64_t currentFrameNumber,
+                                                uint64_t safeFrameNumber)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr || !ctx->external ||
+        target == nullptr || !target->external || target->renderTarget == nullptr)
+    {
+        set_error("rive_frame_begin_external: invalid arguments");
+        return 1;
+    }
+    if (ctx->currentRenderer != nullptr)
+    {
+        set_error("rive_frame_begin_external: a frame is already in progress");
+        return 1;
+    }
+    if (currentFrameNumber == 0)
+    {
+        set_error("rive_frame_begin_external: currentFrameNumber must be nonzero");
+        return 1;
+    }
+
+    // Bind the wgpu image into rive's render target for this frame, seeding the
+    // tracked prior layout (UNDEFINED first frame, SHADER_READ_ONLY after our
+    // previous post-flush barrier). rive's flush transitions it to COLOR itself.
+    target->renderTarget->setTargetImageView(target->extView,
+                                             target->extImage,
+                                             target->lastAccess);
+
+    RenderContext::FrameDescriptor frameDescriptor;
+    frameDescriptor.renderTargetWidth = target->width;
+    frameDescriptor.renderTargetHeight = target->height;
+    frameDescriptor.loadAction = rive::gpu::LoadAction::clear;
+    frameDescriptor.clearColor =
+        rive::colorARGB(to_u8(a), to_u8(r), to_u8(g), to_u8(b));
+    ctx->renderContext->beginFrame(frameDescriptor);
+    // Capture the interlock/PLS mode now — valid only between beginFrame and
+    // flush. The pls_mode getter returns this cached value after the frame.
+    ctx->extLastInterlockMode =
+        static_cast<int>(ctx->renderContext->frameInterlockMode());
+
+    ctx->currentRenderer =
+        new (std::nothrow) rive::RiveRenderer(ctx->renderContext.get());
+    if (ctx->currentRenderer == nullptr)
+    {
+        set_error("out of memory allocating RiveRenderer");
+        return 1;
+    }
+    ctx->currentTarget = target;
+    ctx->extCurrentFrameNumber = currentFrameNumber;
+    ctx->extSafeFrameNumber = safeFrameNumber;
+    return RIVE_OK;
+}
+
+extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
+                                                 RiveRenderTarget* target,
+                                                 uint64_t queue)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr || ctx->impl == nullptr ||
+        !ctx->external || target == nullptr || !target->external ||
+        ctx->currentTarget != target || queue == 0)
+    {
+        set_error("rive_frame_submit_external: no external frame in progress");
+        return 1;
+    }
+
+    VulkanContext* vk = ctx->impl->vulkanContext();
+    RiveStatus status = RIVE_OK;
+
+    if (!ensure_ext_frame_objects(ctx, vk))
+    {
+        // error already set
+        delete ctx->currentRenderer;
+        ctx->currentRenderer = nullptr;
+        ctx->currentTarget = nullptr;
+        return 1;
+    }
+    VkCommandBuffer cb = ctx->extCmdBuffer;
+
+    // Begin records into the reused command buffer (RESET_COMMAND_BUFFER pool ->
+    // Begin implicitly resets it; the previous frame was fence-waited below).
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vk->BeginCommandBuffer(cb, &beginInfo) != VK_SUCCESS)
+    {
+        set_error("rive external: vkBeginCommandBuffer failed");
+        delete ctx->currentRenderer;
+        ctx->currentRenderer = nullptr;
+        ctx->currentTarget = nullptr;
+        return 1;
+    }
+
+    // rive RECORDS its draws (and its own ->COLOR_ATTACHMENT barrier, via
+    // accessTargetImage) into `cb`. It does NOT submit.
+    RenderContext::FlushResources flushResources;
+    flushResources.renderTarget = target->renderTarget.get();
+    flushResources.externalCommandBuffer = reinterpret_cast<void*>(cb);
+    flushResources.currentFrameNumber = ctx->extCurrentFrameNumber;
+    flushResources.safeFrameNumber = ctx->extSafeFrameNumber;
+    ctx->renderContext->flush(flushResources);
+
+    // Post-flush: transition COLOR_ATTACHMENT -> SHADER_READ_ONLY for the wgpu
+    // sampling pass, and keep rive's own layout tracker in sync for next frame.
+    // (We do NOT record a ->COLOR barrier here; rive's flush already did.)
+    ImageAccess readAccess{};
+    readAccess.pipelineStages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    readAccess.accessMask = VK_ACCESS_SHADER_READ_BIT;
+    readAccess.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    target->lastAccess = vk->simpleImageMemoryBarrier(
+        cb, target->renderTarget->targetLastAccess(), readAccess, target->extImage);
+    target->renderTarget->updateLastAccess(target->lastAccess);
+
+    if (vk->EndCommandBuffer(cb) != VK_SUCCESS)
+    {
+        set_error("rive external: vkEndCommandBuffer failed");
+        status = 1;
+    }
+    else
+    {
+        // Reset the shim-internal fence, submit OUT-OF-BAND to the wgpu queue,
+        // then BLOCK on the fence so the shared image is fully written +
+        // transitioned to SHADER_READ_ONLY before this returns (M1b is
+        // correctness-first; transition_resources + pipelined fences are M2).
+        vk->ResetFences(ctx->extDevice, 1, &ctx->extFence);
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &cb;
+        if (vk->QueueSubmit(handle_from_u64<VkQueue>(queue), 1, &submitInfo,
+                            ctx->extFence) != VK_SUCCESS)
+        {
+            set_error("rive external: vkQueueSubmit failed");
+            status = 1;
+        }
+        else if (vk->WaitForFences(ctx->extDevice, 1, &ctx->extFence, VK_TRUE,
+                                   UINT64_MAX) != VK_SUCCESS)
+        {
+            set_error("rive external: vkWaitForFences failed");
+            status = 1;
+        }
+    }
+
+    delete ctx->currentRenderer;
+    ctx->currentRenderer = nullptr;
+    ctx->currentTarget = nullptr;
+    return status;
+}
+
+extern "C" uint64_t rive_render_target_vk_image(const RiveRenderTarget* target)
+{
+    if (target == nullptr || !target->external)
+        return 0;
+    return handle_to_u64(target->extImage);
+}
+
+extern "C" uint64_t rive_render_target_vk_image_view(const RiveRenderTarget* target)
+{
+    if (target == nullptr || !target->external)
+        return 0;
+    return handle_to_u64(target->extView);
+}
+
+// ---------------------------------------------------------------------------
+// Backend-tagged d3d12 / metal siblings — DESIGN ONLY (stubbed in M1b).
+// ---------------------------------------------------------------------------
+
+extern "C" RiveRenderContext* rive_render_context_create_d3d12_external(void*, void*, int32_t)
+{
+    set_error("rive d3d12 external context is not implemented in M1b (Vulkan only)");
+    return nullptr;
+}
+
+extern "C" RiveRenderTarget* rive_render_target_wrap_d3d12_resource(
+    RiveRenderContext*, void*, uint32_t, uint32_t, uint32_t)
+{
+    set_error("rive d3d12 external target is not implemented in M1b (Vulkan only)");
+    return nullptr;
+}
+
+extern "C" RiveStatus rive_frame_submit_external_d3d12(
+    RiveRenderContext*, RiveRenderTarget*, void*, void*, uint64_t)
+{
+    set_error("rive d3d12 external submit is not implemented in M1b (Vulkan only)");
+    return 1;
+}
+
+extern "C" RiveRenderContext* rive_render_context_create_metal_external(void*, void*)
+{
+    set_error("rive metal external context is not implemented in M1b (Vulkan only)");
+    return nullptr;
+}
+
+extern "C" RiveRenderTarget* rive_render_target_wrap_metal_texture(
+    RiveRenderContext*, void*, uint32_t, uint32_t, uint32_t)
+{
+    set_error("rive metal external target is not implemented in M1b (Vulkan only)");
+    return nullptr;
+}
+
+extern "C" RiveStatus rive_frame_submit_external_metal(RiveRenderContext*,
+                                                       RiveRenderTarget*,
+                                                       void*)
+{
+    set_error("rive metal external submit is not implemented in M1b (Vulkan only)");
+    return 1;
 }

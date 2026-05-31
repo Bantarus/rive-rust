@@ -27,6 +27,53 @@ pub type RiveStatus = i32;
 /// Success value for [`RiveStatus`].
 pub const RIVE_OK: RiveStatus = 0;
 
+/// rive's active PLS interlock mode (`gpu::InterlockMode` ordinal), as returned
+/// by [`rive_render_context_pls_mode`]. `-1` means a null handle / not in a frame.
+pub type RivePlsMode = i32;
+
+/// `gpu::InterlockMode::rasterOrdering` — the clean raster-order PLS path.
+pub const RIVE_PLS_RASTER_ORDERING: RivePlsMode = 0;
+/// `gpu::InterlockMode::atomics` — the atomic fallback (no interlock).
+pub const RIVE_PLS_ATOMICS: RivePlsMode = 1;
+/// `gpu::InterlockMode::clockwise`.
+pub const RIVE_PLS_CLOCKWISE: RivePlsMode = 2;
+/// `gpu::InterlockMode::clockwiseAtomic`.
+pub const RIVE_PLS_CLOCKWISE_ATOMIC: RivePlsMode = 3;
+/// `gpu::InterlockMode::msaa`.
+pub const RIVE_PLS_MSAA: RivePlsMode = 4;
+
+/// C-stable mirror of `rive::gpu::VulkanFeatures` (M1b external Vulkan tier).
+///
+/// The caller fills this from the features wgpu actually enabled on the shared
+/// `VkDevice`; the shim copies it field-by-field into rive's struct. Bools are
+/// `i32` (0 == false, nonzero == true) for a stable ABI.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct RiveVulkanFeatures {
+    /// Vulkan API version (e.g. `VK_API_VERSION_1_1`).
+    pub api_version: u32,
+    /// `VkPhysicalDeviceFeatures::independentBlend`.
+    pub independent_blend: i32,
+    /// `VkPhysicalDeviceFeatures::fillModeNonSolid`.
+    pub fill_mode_non_solid: i32,
+    /// `VkPhysicalDeviceFeatures::fragmentStoresAndAtomics` (required by rive).
+    pub fragment_stores_and_atomics: i32,
+    /// `VkPhysicalDeviceFeatures::shaderClipDistance`.
+    pub shader_clip_distance: i32,
+    /// `VK_EXT_rasterization_order_attachment_access`.
+    pub rasterization_order_color_attachment_access: i32,
+    /// `VK_EXT_fragment_shader_interlock` (pixel interlock).
+    pub fragment_shader_pixel_interlock: i32,
+    /// `VK_KHR_portability_subset` (nonconformant driver, e.g. MoltenVK).
+    pub vk_khr_portability_subset: i32,
+    /// BC texture compression.
+    pub texture_compression_bc: i32,
+    /// ASTC LDR texture compression.
+    pub texture_compression_astc_ldr: i32,
+    /// ETC2 texture compression.
+    pub texture_compression_etc2: i32,
+}
+
 /// Opaque self-managed Vulkan render context (owns its `VkInstance`/`VkDevice`).
 #[repr(C)]
 pub struct RiveRenderContext {
@@ -72,9 +119,7 @@ extern "C" {
     pub fn rive_render_target_destroy(target: *mut RiveRenderTarget);
     pub fn rive_render_target_width(target: *const RiveRenderTarget) -> u32;
     pub fn rive_render_target_height(target: *const RiveRenderTarget) -> u32;
-    pub fn rive_render_target_pixel_buffer_size(
-        target: *const RiveRenderTarget,
-    ) -> usize;
+    pub fn rive_render_target_pixel_buffer_size(target: *const RiveRenderTarget) -> usize;
 
     pub fn rive_file_load(
         ctx: *mut RiveRenderContext,
@@ -110,5 +155,129 @@ extern "C" {
         target: *mut RiveRenderTarget,
         out_rgba: *mut u8,
         out_len: usize,
+    ) -> RiveStatus;
+
+    // ---- M1b: external (wgpu-shared) Vulkan tier --------------------------
+    // Vulkan handles cross as `u64` (the ash/wgpu-hal raw handle value);
+    // 64-bit hosts only. See `shim/rive_shim.h` for the full contract.
+
+    /// Creates a rive `RenderContext` on a wgpu-owned Vulkan device (borrowed,
+    /// never destroyed by the shim). `get_instance_proc_addr` is a
+    /// `PFN_vkGetInstanceProcAddr` value. Returns null on failure.
+    pub fn rive_render_context_create_vulkan_external(
+        instance: u64,
+        physical_device: u64,
+        device: u64,
+        get_instance_proc_addr: *mut std::os::raw::c_void,
+        features: *const RiveVulkanFeatures,
+        force_atomic: i32,
+    ) -> *mut RiveRenderContext;
+
+    /// Sets the graphics queue-family index the shim allocates its per-frame
+    /// command pool on. Call once after creating an external context.
+    pub fn rive_render_context_set_queue_family(
+        ctx: *mut RiveRenderContext,
+        queue_family_index: u32,
+    );
+
+    /// 1 if the shared device gives rive the clean raster-order PLS path, 0 if
+    /// not (atomic/msaa fallback), -1 on a null handle.
+    pub fn rive_render_context_supports_raster_ordering(ctx: *const RiveRenderContext) -> i32;
+
+    /// The active interlock mode (valid only between begin and submit).
+    pub fn rive_render_context_pls_mode(ctx: *const RiveRenderContext) -> RivePlsMode;
+
+    /// Wraps a wgpu-allocated `VkImage` as a zero-copy rive render target. Pass
+    /// `vk_image_view == 0` to have the shim create a matching view. Returns
+    /// null on failure.
+    pub fn rive_render_target_wrap_vk_image(
+        ctx: *mut RiveRenderContext,
+        vk_image: u64,
+        vk_image_view: u64,
+        width: u32,
+        height: u32,
+        vk_format: u32,
+        vk_usage_flags: u32,
+    ) -> *mut RiveRenderTarget;
+
+    /// Rebinds the wgpu `VkImage`/view on an existing external target (e.g.
+    /// after a reprepare). Pass `vk_image_view == 0` to keep the current view.
+    pub fn rive_render_target_set_vk_image(
+        target: *mut RiveRenderTarget,
+        vk_image: u64,
+        vk_image_view: u64,
+    );
+
+    /// Begins a frame against a wrapped external target. The caller supplies the
+    /// frame-number watermark (`current_frame_number` must be nonzero).
+    pub fn rive_frame_begin_external(
+        ctx: *mut RiveRenderContext,
+        target: *mut RiveRenderTarget,
+        r: f32,
+        g: f32,
+        b: f32,
+        a: f32,
+        current_frame_number: u64,
+        safe_frame_number: u64,
+    ) -> RiveStatus;
+
+    /// Records rive's draws + the post-flush `COLOR -> SHADER_READ_ONLY` barrier
+    /// into a shim-owned command buffer, submits it out-of-band to `queue` with a
+    /// shim-internal fence, then **blocks** on that fence. On return the shared
+    /// image is fully rendered and in `SHADER_READ_ONLY_OPTIMAL` (M1b is
+    /// correctness-first; splitting submit/wait is M2).
+    pub fn rive_frame_submit_external(
+        ctx: *mut RiveRenderContext,
+        target: *mut RiveRenderTarget,
+        queue: u64,
+    ) -> RiveStatus;
+
+    /// The `VkImage` the external target currently points at (0 if not external).
+    pub fn rive_render_target_vk_image(target: *const RiveRenderTarget) -> u64;
+    /// The `VkImageView` the external target currently points at (0 if none).
+    pub fn rive_render_target_vk_image_view(target: *const RiveRenderTarget) -> u64;
+
+    // ---- Backend-tagged d3d12 / metal siblings (declared; stubbed in M1b) --
+
+    /// d3d12 external context (design-only; returns null in M1b).
+    pub fn rive_render_context_create_d3d12_external(
+        d3d12_device: *mut std::os::raw::c_void,
+        d3d12_command_queue: *mut std::os::raw::c_void,
+        force_atomic: i32,
+    ) -> *mut RiveRenderContext;
+    /// d3d12 external target (design-only; returns null in M1b).
+    pub fn rive_render_target_wrap_d3d12_resource(
+        ctx: *mut RiveRenderContext,
+        d3d12_resource: *mut std::os::raw::c_void,
+        width: u32,
+        height: u32,
+        dxgi_format: u32,
+    ) -> *mut RiveRenderTarget;
+    /// d3d12 external submit (design-only; returns nonzero in M1b).
+    pub fn rive_frame_submit_external_d3d12(
+        ctx: *mut RiveRenderContext,
+        target: *mut RiveRenderTarget,
+        d3d12_command_queue: *mut std::os::raw::c_void,
+        d3d12_fence: *mut std::os::raw::c_void,
+        fence_value: u64,
+    ) -> RiveStatus;
+    /// metal external context (design-only; returns null in M1b).
+    pub fn rive_render_context_create_metal_external(
+        mtl_device: *mut std::os::raw::c_void,
+        mtl_command_queue: *mut std::os::raw::c_void,
+    ) -> *mut RiveRenderContext;
+    /// metal external target (design-only; returns null in M1b).
+    pub fn rive_render_target_wrap_metal_texture(
+        ctx: *mut RiveRenderContext,
+        mtl_texture: *mut std::os::raw::c_void,
+        width: u32,
+        height: u32,
+        mtl_pixel_format: u32,
+    ) -> *mut RiveRenderTarget;
+    /// metal external submit (design-only; returns nonzero in M1b).
+    pub fn rive_frame_submit_external_metal(
+        ctx: *mut RiveRenderContext,
+        target: *mut RiveRenderTarget,
+        mtl_command_buffer: *mut std::os::raw::c_void,
     ) -> RiveStatus;
 }

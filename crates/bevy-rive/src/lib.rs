@@ -69,6 +69,13 @@ use wgpu_types::{Extent3d, TextureDimension, TextureFormat};
 
 use rive_renderer::{Artboard, Context, RenderTarget, StateMachine};
 
+// M1b zero-copy Vulkan tier (gated). Re-exports the plugin + the device-sharing
+// entry point; the frozen M1a ECS API above is unchanged and reused.
+#[cfg(feature = "zero_copy")]
+mod zero_copy;
+#[cfg(feature = "zero_copy")]
+pub use zero_copy::{install_interlock_device_callback, RiveZeroCopyPlugin};
+
 /// The texture format M1a allocates the [`RiveTarget::image`] in.
 ///
 /// **Not** part of the frozen surface and intentionally `pub(crate)`: the pixel
@@ -94,11 +101,23 @@ const CLEAR_RGBA: [f32; 4] = [0.188, 0.188, 0.188, 1.0];
 #[derive(Debug, Default)]
 pub struct RivePlugin;
 
+impl RivePlugin {
+    /// Registers the `.riv` [`RiveFile`] asset + its [`RivLoader`] on `app`.
+    ///
+    /// Factored out so the M1b [`RiveZeroCopyPlugin`] can register the exact same
+    /// asset + loader without also adding the M1a CPU-copy systems (which would
+    /// double-drive M1b entities). Idempotent: `init_asset` is a no-op if already
+    /// registered.
+    pub(crate) fn register_asset(app: &mut App) {
+        app.init_asset::<RiveFile>()
+            .register_asset_loader(RivLoader);
+    }
+}
+
 impl Plugin for RivePlugin {
     fn build(&self, app: &mut App) {
         // (1) Asset store + AssetEvent<RiveFile> + the `.riv` loader.
-        app.init_asset::<RiveFile>()
-            .register_asset_loader(RivLoader);
+        Self::register_asset(app);
 
         // (2) NonSend machinery (main-thread only). The Vulkan Context is created
         //     lazily on first use, so `build` is infallible and touches no GPU.

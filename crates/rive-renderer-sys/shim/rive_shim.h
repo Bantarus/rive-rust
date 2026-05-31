@@ -124,6 +124,178 @@ RiveStatus         rive_render_target_read_pixels(RiveRenderTarget* target,
                                                   uint8_t* out_rgba,
                                                   size_t out_len);
 
+/* ====================================================================== *
+ * M1b: external (wgpu-shared) Vulkan tier — ZERO-COPY shared VkImage.
+ *
+ * In M1b, wgpu owns the VkInstance/VkPhysicalDevice/VkDevice/VkQueue; the shim
+ * BORROWS them (never creates/destroys them) and renders the .riv directly into
+ * a wgpu-allocated VkImage. rive's flush RECORDS into a command buffer the shim
+ * allocates from its own per-frame pool; the shim then submits OUT-OF-BAND to
+ * the wgpu graphics queue with a caller-owned VkFence. rive itself never
+ * submits. The caller (Rust/Bevy) owns the pool family, the queue, and the
+ * fence lifecycle, and waits the fence before the sampling pass.
+ *
+ * All Vulkan handles cross this ABI as `uint64_t` (the integer value of the
+ * dispatchable/non-dispatchable handle, as exposed by wgpu-hal/ash), so the
+ * ABI itself carries no Vulkan headers. 64-bit hosts only (dispatchable handles
+ * are pointers).
+ * ====================================================================== */
+
+/* rive's PLS interlock mode (gpu::InterlockMode ordinals; pinned by
+ * static_assert in the .cpp). -1 == null handle / not currently in a frame. */
+typedef int32_t RivePlsMode;
+#define RIVE_PLS_RASTER_ORDERING  0
+#define RIVE_PLS_ATOMICS          1
+#define RIVE_PLS_CLOCKWISE        2
+#define RIVE_PLS_CLOCKWISE_ATOMIC 3
+#define RIVE_PLS_MSAA             4
+
+/* Mirror of rive::gpu::VulkanFeatures (vulkan_context.hpp). The caller fills
+ * this from what wgpu ACTUALLY enabled on the shared VkDevice. C-stable layout;
+ * the shim copies field-by-field into rive's struct (never reinterpret-casts).
+ * Bools are int32 (0/nonzero) for a stable ABI. */
+typedef struct RiveVulkanFeatures {
+    uint32_t apiVersion;                              /* e.g. VK_API_VERSION_1_1 (0x00401000) */
+    int32_t  independentBlend;
+    int32_t  fillModeNonSolid;
+    int32_t  fragmentStoresAndAtomics;               /* REQUIRED for core operation (atomic fallback) */
+    int32_t  shaderClipDistance;
+    int32_t  rasterizationOrderColorAttachmentAccess;/* EXT_rasterization_order_attachment_access */
+    int32_t  fragmentShaderPixelInterlock;           /* VK_EXT_fragment_shader_interlock */
+    int32_t  vkKhrPortabilitySubset;
+    int32_t  textureCompressionBC;
+    int32_t  textureCompressionASTC_LDR;
+    int32_t  textureCompressionETC2;
+} RiveVulkanFeatures;
+
+/* Create a rive RenderContext on a wgpu-OWNED Vulkan device. The shim does NOT
+ * create or destroy the instance/device — it only borrows them.
+ *
+ *   instance/physicalDevice/device : the wgpu-owned VkInstance/VkPhysicalDevice/VkDevice
+ *   getInstanceProcAddr            : PFN_vkGetInstanceProcAddr (a raw fn pointer value)
+ *   features                       : MUST mirror exactly what wgpu enabled on `device`
+ *   forceAtomic                    : if nonzero, ContextOptions.forceAtomicMode = true
+ *
+ * Returns NULL on failure. Destroy with rive_render_context_destroy (which, for
+ * an external context, resets only the RenderContext and never touches the
+ * device/instance). */
+RiveRenderContext* rive_render_context_create_vulkan_external(
+    uint64_t instance,
+    uint64_t physicalDevice,
+    uint64_t device,
+    void*    getInstanceProcAddr,            /* PFN_vkGetInstanceProcAddr */
+    const RiveVulkanFeatures* features,
+    int32_t  forceAtomic);
+
+/* The graphics queue-family index the shim allocates its per-frame command pool
+ * on. Call ONCE after creating an external context, before the first frame.
+ * (Stored on the context; the pool is created lazily on first submit.) */
+void rive_render_context_set_queue_family(RiveRenderContext* ctx,
+                                          uint32_t queueFamilyIndex);
+
+/* Frame-independent: does the shared VkDevice give rive its clean raster-order
+ * PLS path? 1 == yes, 0 == no (atomic/msaa fallback), -1 == null handle. Valid
+ * any time after create. */
+int32_t rive_render_context_supports_raster_ordering(const RiveRenderContext* ctx);
+
+/* Active per-frame interlock mode (gpu::InterlockMode ordinal; see RIVE_PLS_*).
+ * Valid ONLY between rive_frame_begin_external and rive_frame_submit_external.
+ * -1 on null. */
+RivePlsMode rive_render_context_pls_mode(const RiveRenderContext* ctx);
+
+/* Wrap a wgpu-ALLOCATED VkImage as a rive render target (ZERO COPY). The shim
+ * does NOT allocate or free the image — wgpu owns it. If `vkImageView` is 0 the
+ * shim creates a matching view (via makeExternalImageView) and owns THAT view
+ * only. `vkFormat` is the wgpu texture's VkFormat (Rgba8Unorm == 37 ==
+ * VK_FORMAT_R8G8B8A8_UNORM); `vkUsageFlags` is the VkImageUsageFlags wgpu
+ * created it with (must include INPUT_ATTACHMENT or both TRANSFER_SRC+DST per
+ * rive's render-target contract — the Rust side allocates
+ * RENDER_ATTACHMENT|TEXTURE_BINDING|COPY_DST|COPY_SRC).
+ *
+ * Returns NULL on failure. Destroy with rive_render_target_destroy (which, for
+ * an external target, drops the rive wrapper + any shim-created view, and never
+ * frees the wgpu image). */
+RiveRenderTarget* rive_render_target_wrap_vk_image(
+    RiveRenderContext* ctx,
+    uint64_t vkImage,
+    uint64_t vkImageView,
+    uint32_t width,
+    uint32_t height,
+    uint32_t vkFormat,
+    uint32_t vkUsageFlags);
+
+/* Rebind the wgpu VkImage/view on an existing external target (e.g. after the
+ * GpuImage was reprepared/resized). Pass vkImageView=0 to have the shim
+ * recreate the view. Resets the tracked layout to UNDEFINED. */
+void rive_render_target_set_vk_image(RiveRenderTarget* target,
+                                     uint64_t vkImage,
+                                     uint64_t vkImageView);
+
+/* Begin a frame against a wrapped external target. Like rive_frame_begin but
+ * with no synchronizer; the caller supplies the frame-number watermark:
+ *   currentFrameNumber : monotonically increasing, MUST be nonzero
+ *   safeFrameNumber    : highest frame the caller has OBSERVED the GPU finished
+ * Clear color is straight (non-premultiplied) RGBA in [0,1]. */
+RiveStatus rive_frame_begin_external(RiveRenderContext* ctx,
+                                     RiveRenderTarget* target,
+                                     float r, float g, float b, float a,
+                                     uint64_t currentFrameNumber,
+                                     uint64_t safeFrameNumber);
+
+/* (Draw with rive_artboard_draw — it is REUSED verbatim for both tiers.) */
+
+/* Record rive's draws + the post-flush COLOR->SHADER_READ_ONLY barrier into a
+ * command buffer the shim allocates from its per-frame pool (on the queue family
+ * set above), then vkEndCommandBuffer + vkQueueSubmit OUT-OF-BAND to `queue`
+ * with a shim-internal fence, then BLOCK on that fence. rive RECORDS; the shim
+ * owns begin/end/submit/wait. NO readback, NO pixel flip. On return the shared
+ * image is fully written and left in SHADER_READ_ONLY_OPTIMAL, ready to sample.
+ *
+ *   queue : the wgpu graphics VkQueue (the Rust side serializes against wgpu's
+ *           queue use; see the M1b report)
+ *
+ * The fence is internal (the Rust side cannot cheaply build an ash::Device to
+ * make one). M1b is correctness-first: this call is BLOCKING. Splitting submit
+ * from wait for pipelining is M2. */
+RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
+                                      RiveRenderTarget* target,
+                                      uint64_t queue);
+
+/* The VkImage / VkImageView the external target currently points at (0 if not
+ * external). Diagnostics. */
+uint64_t rive_render_target_vk_image(const RiveRenderTarget* target);
+uint64_t rive_render_target_vk_image_view(const RiveRenderTarget* target);
+
+/* ---- Backend-tagged d3d12 / metal siblings (DESIGN ONLY; stubbed in M1b) ----
+ *
+ * Declared so the cross-backend ABI shape is uniform and M2/M3 can implement
+ * them without ABI churn. In this build they set rive_last_error and return
+ * NULL / nonzero. The signatures encode each backend's submission model:
+ *   - Vulkan : VkCommandBuffer recorded by rive, submitted by us to a VkQueue
+ *              with a VkFence (above).
+ *   - D3D12  : rive records into its own command list; the caller drives an
+ *              ID3D12CommandQueue + ID3D12Fence/value (no external cmd buffer).
+ *   - Metal  : rive's FlushResources.externalCommandBuffer is id<MTLCommandBuffer>,
+ *              which self-submits via `commit`.
+ */
+RiveRenderContext* rive_render_context_create_d3d12_external(
+    void* d3d12Device, void* d3d12CommandQueue, int32_t forceAtomic);
+RiveRenderTarget*  rive_render_target_wrap_d3d12_resource(
+    RiveRenderContext* ctx, void* d3d12Resource,
+    uint32_t width, uint32_t height, uint32_t dxgiFormat);
+RiveStatus         rive_frame_submit_external_d3d12(
+    RiveRenderContext* ctx, RiveRenderTarget* target,
+    void* d3d12CommandQueue, void* d3d12Fence, uint64_t fenceValue);
+
+RiveRenderContext* rive_render_context_create_metal_external(
+    void* mtlDevice, void* mtlCommandQueue);
+RiveRenderTarget*  rive_render_target_wrap_metal_texture(
+    RiveRenderContext* ctx, void* mtlTexture,
+    uint32_t width, uint32_t height, uint32_t mtlPixelFormat);
+RiveStatus         rive_frame_submit_external_metal(
+    RiveRenderContext* ctx, RiveRenderTarget* target,
+    void* mtlCommandBuffer /* caller-owned id<MTLCommandBuffer> */);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

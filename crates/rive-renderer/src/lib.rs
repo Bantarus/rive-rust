@@ -32,22 +32,28 @@
 //!
 //! Unlike a borrow-checked-against-`&Context` design, every handle here is
 //! **owned and `'static`**: it keeps the native Vulkan context alive by holding a
-//! shared (`Rc`) reference to it. This lets handles be stored in long-lived
+//! shared (`Arc`) reference to it. This lets handles be stored in long-lived
 //! containers (e.g. a Bevy `NonSend` resource) without naming a lifetime, which
 //! M1a's ECS bridge needs. Concretely:
 //!
 //! * Every handle ([`RenderTarget`], [`File`], [`Artboard`], [`StateMachine`])
-//!   holds an `Rc` to the [`Context`]'s inner state, so the `VkDevice` is
+//!   holds an `Arc` to the [`Context`]'s inner state, so the `VkDevice` is
 //!   destroyed only after the **last** handle drops — regardless of drop order.
 //! * A [`StateMachine`] additionally keeps its [`Artboard`] alive (the native
 //!   `rive::Scene` holds a non-owning pointer back to the artboard instance, so
 //!   the scene must be destroyed first). A manual `Drop` body always runs before
-//!   the handle's fields drop, so each native `*_destroy` precedes the `Rc`
+//!   the handle's fields drop, so each native `*_destroy` precedes the `Arc`
 //!   decrement it guards — the required destruction order holds by construction.
 //!
-//! Because the handles hold `Rc` (and raw pointers), they are **`!Send + !Sync`**
-//! and must be used from a single thread (in Bevy: a `NonSend` resource on the
-//! main thread). The native renderer is not internally synchronized.
+//! Because the handles hold raw pointers, they are **`!Send + !Sync`** and must
+//! be used from a single thread (in M0/M1a: a Bevy main-thread `NonSend`
+//! resource). The native renderer is not internally synchronized. The refcount
+//! is **`Arc`** (atomic), not `Rc`, even though the handles are `!Send`: M1b's
+//! zero-copy tier owns these objects in a render-world resource that Bevy's
+//! pipelined renderer may **drop on a different thread** than it ran on, so the
+//! refcount decrement must be atomic. That `unsafe`-`Send` wrapper lives in
+//! `bevy-rive` and upholds the single-thread-*use* invariant; the atomic
+//! refcount makes the cross-thread *drop* sound.
 //!
 //! # Color contract
 //!
@@ -56,8 +62,18 @@
 //! [`unpremultiply_rgba8`] before handing the bytes to a tool that expects
 //! straight alpha, or clear to an opaque color (then premultiplied == straight).
 
+// Every `Arc` in this crate wraps a `!Send`/`!Sync` native rive handle on purpose
+// (see "Ownership, lifetimes & threading" above): the atomic refcount exists for a
+// sound cross-thread *drop* by Bevy's pipelined renderer, while single-thread *use*
+// is upheld by the `unsafe Send` wrapper in `bevy-rive`.
+#![expect(
+    clippy::arc_with_non_send_sync,
+    reason = "intentional: Arc over !Send rive handles enables atomic cross-thread drop; \
+              single-thread use is upheld by bevy-rive's unsafe Send wrapper"
+)]
+
 use std::ffi::CStr;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use rive_renderer_sys as sys;
 
@@ -122,20 +138,24 @@ fn last_error() -> String {
 /// `Rc` so every handle can keep it alive; destroyed on the last drop.
 ///
 /// Private: the public surface is [`Context`] and the handle types, all of which
-/// hold an `Rc<ContextInner>`. A manual `Drop` runs before the (none) fields, so
+/// hold an `Arc<ContextInner>`. A manual `Drop` runs before the (none) fields, so
 /// the native context is torn down here only once the refcount reaches zero —
 /// i.e. after every [`RenderTarget`]/[`File`]/[`Artboard`]/[`StateMachine`] has
 /// already destroyed its own native object.
 struct ContextInner {
     ptr: *mut sys::RiveRenderContext,
+    /// `true` for an M1b external (wgpu-shared) context; `false` for the M0/M1a
+    /// self-managed context. Gates which methods are valid and (shim-side) which
+    /// `Drop` semantics run.
+    external: bool,
 }
 
 impl Drop for ContextInner {
     fn drop(&mut self) {
         // SAFETY: `ptr` was created by the shim and is destroyed exactly once,
-        // when the last `Rc<ContextInner>` drops. All dependent native objects
+        // when the last `Arc<ContextInner>` drops. All dependent native objects
         // (targets/files/artboards/scenes) have already been destroyed because
-        // their handles each held an `Rc<ContextInner>` released only after they
+        // their handles each held an `Arc<ContextInner>` released only after they
         // ran their own `*_destroy`.
         unsafe { sys::rive_render_context_destroy(self.ptr) };
     }
@@ -149,7 +169,7 @@ impl Drop for ContextInner {
 ///
 /// `!Send + !Sync`: use from one thread (a Bevy `NonSend` resource).
 pub struct Context {
-    inner: Rc<ContextInner>,
+    inner: Arc<ContextInner>,
 }
 
 impl Context {
@@ -166,7 +186,10 @@ impl Context {
             return Err(Error::ContextCreation(last_error()));
         }
         Ok(Self {
-            inner: Rc::new(ContextInner { ptr }),
+            inner: Arc::new(ContextInner {
+                ptr,
+                external: false,
+            }),
         })
     }
 
@@ -197,7 +220,7 @@ impl Context {
             ptr,
             width,
             height,
-            ctx: Rc::clone(&self.inner),
+            ctx: Arc::clone(&self.inner),
         })
     }
 
@@ -218,7 +241,7 @@ impl Context {
         }
         Ok(File {
             ptr,
-            _ctx: Rc::clone(&self.inner),
+            _ctx: Arc::clone(&self.inner),
         })
     }
 
@@ -239,7 +262,7 @@ impl Context {
         // The Rc graph proves *some* context is alive, but not that `target`
         // belongs to *this* one. Driving this context's renderer against a target
         // bound to another context's VkDevice is undefined behavior, so reject it.
-        if !Rc::ptr_eq(&self.inner, &target.ctx) {
+        if !Arc::ptr_eq(&self.inner, &target.ctx) {
             return Err(Error::ContextMismatch);
         }
         let [r, g, b, a] = clear_rgba;
@@ -264,6 +287,322 @@ impl Context {
     pub fn as_raw(&self) -> *mut sys::RiveRenderContext {
         self.inner.ptr
     }
+
+    // -- M1b: external (wgpu-shared) Vulkan tier ----------------------------
+
+    /// Creates a Rive context on a **wgpu-owned** Vulkan device (M1b zero-copy
+    /// tier). The context borrows the device and never destroys it.
+    ///
+    /// Handles are extracted from wgpu via `wgpu-hal`/`ash` and passed as the
+    /// integer value of each Vulkan handle. `features` MUST mirror exactly what
+    /// wgpu enabled on `device` (read them off the hal device, do not guess), or
+    /// rive may build pipelines the device rejects.
+    ///
+    /// # Safety
+    ///
+    /// - `instance`/`physical_device`/`device` must be the live, matching Vulkan
+    ///   handles of a wgpu device that outlives this `Context` and every handle
+    ///   derived from it; the device must not be destroyed while they are alive.
+    /// - `get_instance_proc_addr` must be the device's `PFN_vkGetInstanceProcAddr`.
+    /// - All Rive GPU work for this context must run on one thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ContextCreation`] if rive could not build a context on
+    /// the supplied device.
+    pub unsafe fn from_wgpu_vulkan(
+        instance: u64,
+        physical_device: u64,
+        device: u64,
+        get_instance_proc_addr: *mut core::ffi::c_void,
+        features: &VulkanFeatures,
+        force_atomic: bool,
+        queue_family_index: u32,
+    ) -> Result<Self> {
+        let raw = features.to_sys();
+        // SAFETY: the caller upholds the handle-validity contract above; the shim
+        // copies `raw` by value and never retains the pointer.
+        let ptr = unsafe {
+            sys::rive_render_context_create_vulkan_external(
+                instance,
+                physical_device,
+                device,
+                get_instance_proc_addr,
+                &raw,
+                i32::from(force_atomic),
+            )
+        };
+        if ptr.is_null() {
+            return Err(Error::ContextCreation(last_error()));
+        }
+        // SAFETY: `ptr` is the just-created external context.
+        unsafe { sys::rive_render_context_set_queue_family(ptr, queue_family_index) };
+        Ok(Self {
+            inner: Arc::new(ContextInner {
+                ptr,
+                external: true,
+            }),
+        })
+    }
+
+    /// `true` if the shared device gives rive its clean raster-order PLS path
+    /// (vs the atomic/msaa fallback). Frame-independent; use at init for logging.
+    #[must_use]
+    pub fn supports_raster_ordering(&self) -> bool {
+        // SAFETY: `self.inner.ptr` is a live context.
+        unsafe { sys::rive_render_context_supports_raster_ordering(self.inner.ptr) == 1 }
+    }
+
+    /// The active interlock mode. Only meaningful **between** the begin and
+    /// submit of an external frame; outside one it reflects the previous frame.
+    #[must_use]
+    pub fn pls_mode(&self) -> PlsMode {
+        // SAFETY: `self.inner.ptr` is a live context.
+        PlsMode::from_raw(unsafe { sys::rive_render_context_pls_mode(self.inner.ptr) })
+    }
+
+    /// Wraps a **wgpu-allocated** `VkImage` as a zero-copy render target (M1b).
+    /// Pass `vk_image_view == 0` to have the shim create a matching view.
+    ///
+    /// # Safety
+    ///
+    /// `vk_image` (and `vk_image_view`, if nonzero) must be live handles of a
+    /// wgpu texture owned by **this** `Context`'s device, of the given
+    /// `vk_format`/`vk_usage_flags`, and must outlive the returned target.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TargetCreation`] if this is not an external context or
+    /// rive could not wrap the image.
+    pub unsafe fn wrap_vk_image(
+        &self,
+        vk_image: u64,
+        vk_image_view: u64,
+        width: u32,
+        height: u32,
+        vk_format: u32,
+        vk_usage_flags: u32,
+    ) -> Result<RenderTarget> {
+        if !self.inner.external {
+            return Err(Error::TargetCreation {
+                width,
+                height,
+                detail: "wrap_vk_image requires an external (wgpu-shared) context".into(),
+            });
+        }
+        // SAFETY: the caller upholds the handle-validity contract; the returned
+        // target keeps the context alive via its `Arc` clone.
+        let ptr = unsafe {
+            sys::rive_render_target_wrap_vk_image(
+                self.inner.ptr,
+                vk_image,
+                vk_image_view,
+                width,
+                height,
+                vk_format,
+                vk_usage_flags,
+            )
+        };
+        if ptr.is_null() {
+            return Err(Error::TargetCreation {
+                width,
+                height,
+                detail: last_error(),
+            });
+        }
+        Ok(RenderTarget {
+            ptr,
+            width,
+            height,
+            ctx: Arc::clone(&self.inner),
+        })
+    }
+
+    /// Drives one M1b frame: begin → draw `artboard` → record + **out-of-band
+    /// submit** to `queue` with `fence`. rive records its draws into a
+    /// shim-owned command buffer and the shim submits it; rive never submits
+    /// itself. Does **not** wait — the caller waits `fence` before sampling the
+    /// target image.
+    ///
+    /// `submit.queue` is the wgpu graphics `VkQueue` to submit rive's command
+    /// buffer to, out-of-band. The call **blocks** until rive's GPU work
+    /// completes (the shim waits an internal fence), so on success the target
+    /// image is ready to sample.
+    ///
+    /// # Safety
+    ///
+    /// `submit.queue` must be the wgpu graphics `VkQueue` of this context's
+    /// device. The caller is responsible for serializing use of that queue
+    /// against wgpu's own submissions.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::ContextMismatch`] if `target`/`artboard` belong to
+    /// another context, or [`Error::Frame`] if begin/draw/submit fails.
+    pub unsafe fn render_external_frame(
+        &self,
+        target: &RenderTarget,
+        artboard: &Artboard,
+        clear_rgba: [f32; 4],
+        submit: ExternalFrameSubmit,
+    ) -> Result<()> {
+        if !Arc::ptr_eq(&self.inner, &target.ctx) || !Arc::ptr_eq(&self.inner, &artboard.inner.ctx)
+        {
+            return Err(Error::ContextMismatch);
+        }
+        let [r, g, b, a] = clear_rgba;
+        // SAFETY: context and target are live for the call; the caller upholds
+        // the queue/fence contract.
+        let begin = unsafe {
+            sys::rive_frame_begin_external(
+                self.inner.ptr,
+                target.ptr,
+                r,
+                g,
+                b,
+                a,
+                submit.current_frame,
+                submit.safe_frame,
+            )
+        };
+        if begin != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        // A frame is now in progress. Always reach `submit` so the context is not
+        // left wedged mid-frame, then surface the first error.
+        // SAFETY: a frame is in progress on this live context; artboard is live.
+        let draw = unsafe { sys::rive_artboard_draw(artboard.inner.ptr, self.inner.ptr) };
+        let draw_err = (draw != sys::RIVE_OK).then(last_error);
+        // SAFETY: a frame is in progress; queue per the caller contract.
+        let submit_status =
+            unsafe { sys::rive_frame_submit_external(self.inner.ptr, target.ptr, submit.queue) };
+        if let Some(e) = draw_err {
+            return Err(Error::Frame(e));
+        }
+        if submit_status != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        Ok(())
+    }
+}
+
+/// Per-frame submission parameters for [`Context::render_external_frame`] (M1b).
+///
+/// Bundles rive's frame-number watermark with the wgpu queue the shim submits
+/// rive's command buffer to. The fence is shim-internal (the submit blocks), so
+/// the caller supplies only the queue.
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalFrameSubmit {
+    /// Monotonically increasing, **nonzero** frame number for this frame.
+    pub current_frame: u64,
+    /// Highest frame number the caller has observed the GPU finish (rive recycles
+    /// pooled resources up to this watermark). With the blocking submit this is
+    /// `current_frame - 1`.
+    pub safe_frame: u64,
+    /// The wgpu graphics `VkQueue` handle (as a `u64`) to submit rive's command
+    /// buffer to, out-of-band.
+    pub queue: u64,
+}
+
+/// rive's active PLS interlock mode (see [`Context::pls_mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PlsMode {
+    /// Clean raster-order PLS (interlock present) — the preferred path.
+    RasterOrdering,
+    /// Atomic fallback (no interlock).
+    Atomics,
+    /// Clockwise fill via raster-order hardware.
+    Clockwise,
+    /// Experimental atomic-without-barriers path.
+    ClockwiseAtomic,
+    /// MSAA path.
+    Msaa,
+    /// Unknown / not currently in a frame.
+    Unknown,
+}
+
+impl PlsMode {
+    fn from_raw(v: sys::RivePlsMode) -> Self {
+        match v {
+            sys::RIVE_PLS_RASTER_ORDERING => PlsMode::RasterOrdering,
+            sys::RIVE_PLS_ATOMICS => PlsMode::Atomics,
+            sys::RIVE_PLS_CLOCKWISE => PlsMode::Clockwise,
+            sys::RIVE_PLS_CLOCKWISE_ATOMIC => PlsMode::ClockwiseAtomic,
+            sys::RIVE_PLS_MSAA => PlsMode::Msaa,
+            _ => PlsMode::Unknown,
+        }
+    }
+}
+
+/// Safe mirror of `rive::gpu::VulkanFeatures` for [`Context::from_wgpu_vulkan`].
+///
+/// Fill this from the features wgpu **actually enabled** on the shared device
+/// (read `enabled_device_extensions()` off the hal device); a mismatch makes
+/// rive emit pipelines the device rejects. `fragment_stores_and_atomics` is
+/// required by rive for core operation.
+#[derive(Debug, Clone, Copy)]
+pub struct VulkanFeatures {
+    /// Vulkan API version (e.g. `0x0040_1000` for 1.1).
+    pub api_version: u32,
+    /// `independentBlend`.
+    pub independent_blend: bool,
+    /// `fillModeNonSolid`.
+    pub fill_mode_non_solid: bool,
+    /// `fragmentStoresAndAtomics` (required).
+    pub fragment_stores_and_atomics: bool,
+    /// `shaderClipDistance`.
+    pub shader_clip_distance: bool,
+    /// `VK_EXT_rasterization_order_attachment_access`.
+    pub rasterization_order_color_attachment_access: bool,
+    /// `VK_EXT_fragment_shader_interlock`.
+    pub fragment_shader_pixel_interlock: bool,
+    /// `VK_KHR_portability_subset`.
+    pub vk_khr_portability_subset: bool,
+    /// BC texture compression.
+    pub texture_compression_bc: bool,
+    /// ASTC LDR texture compression.
+    pub texture_compression_astc_ldr: bool,
+    /// ETC2 texture compression.
+    pub texture_compression_etc2: bool,
+}
+
+impl Default for VulkanFeatures {
+    fn default() -> Self {
+        Self {
+            api_version: 0x0040_1000, // VK_API_VERSION_1_1
+            independent_blend: false,
+            fill_mode_non_solid: false,
+            fragment_stores_and_atomics: false,
+            shader_clip_distance: false,
+            rasterization_order_color_attachment_access: false,
+            fragment_shader_pixel_interlock: false,
+            vk_khr_portability_subset: false,
+            texture_compression_bc: false,
+            texture_compression_astc_ldr: false,
+            texture_compression_etc2: false,
+        }
+    }
+}
+
+impl VulkanFeatures {
+    fn to_sys(self) -> sys::RiveVulkanFeatures {
+        sys::RiveVulkanFeatures {
+            api_version: self.api_version,
+            independent_blend: i32::from(self.independent_blend),
+            fill_mode_non_solid: i32::from(self.fill_mode_non_solid),
+            fragment_stores_and_atomics: i32::from(self.fragment_stores_and_atomics),
+            shader_clip_distance: i32::from(self.shader_clip_distance),
+            rasterization_order_color_attachment_access: i32::from(
+                self.rasterization_order_color_attachment_access,
+            ),
+            fragment_shader_pixel_interlock: i32::from(self.fragment_shader_pixel_interlock),
+            vk_khr_portability_subset: i32::from(self.vk_khr_portability_subset),
+            texture_compression_bc: i32::from(self.texture_compression_bc),
+            texture_compression_astc_ldr: i32::from(self.texture_compression_astc_ldr),
+            texture_compression_etc2: i32::from(self.texture_compression_etc2),
+        }
+    }
 }
 
 impl std::fmt::Debug for Context {
@@ -281,7 +620,7 @@ pub struct RenderTarget {
     height: u32,
     /// The owning context. Keeps the device alive *and* identifies which context
     /// this target belongs to (checked in [`Context::begin_frame`]).
-    ctx: Rc<ContextInner>,
+    ctx: Arc<ContextInner>,
 }
 
 impl RenderTarget {
@@ -339,6 +678,33 @@ impl RenderTarget {
     pub fn as_raw(&self) -> *mut sys::RiveRenderTarget {
         self.ptr
     }
+
+    /// Rebinds the wgpu `VkImage`/view on an external (M1b) target — e.g. after
+    /// Bevy re-prepared the `GpuImage` at the same size. Pass `vk_image_view ==
+    /// 0` to keep the current view. Resets the tracked layout to undefined.
+    ///
+    /// # Safety
+    ///
+    /// `vk_image` (and `vk_image_view`, if nonzero) must be live handles of a
+    /// wgpu texture owned by this target's context device.
+    pub unsafe fn set_vk_image(&self, vk_image: u64, vk_image_view: u64) {
+        // SAFETY: `self.ptr` is a live target; the caller upholds handle validity.
+        unsafe { sys::rive_render_target_set_vk_image(self.ptr, vk_image, vk_image_view) };
+    }
+
+    /// The `VkImage` this external target currently points at (0 if not external).
+    #[must_use]
+    pub fn vk_image(&self) -> u64 {
+        // SAFETY: `self.ptr` is a live target.
+        unsafe { sys::rive_render_target_vk_image(self.ptr) }
+    }
+
+    /// The `VkImageView` this external target currently points at (0 if none).
+    #[must_use]
+    pub fn vk_image_view(&self) -> u64 {
+        // SAFETY: `self.ptr` is a live target.
+        unsafe { sys::rive_render_target_vk_image_view(self.ptr) }
+    }
 }
 
 impl Drop for RenderTarget {
@@ -363,7 +729,7 @@ impl std::fmt::Debug for RenderTarget {
 /// Keeps its [`Context`] alive; `!Send + !Sync`.
 pub struct File {
     ptr: *mut sys::RiveFile,
-    _ctx: Rc<ContextInner>,
+    _ctx: Arc<ContextInner>,
 }
 
 impl File {
@@ -379,9 +745,9 @@ impl File {
             return Err(Error::NoArtboard(last_error()));
         }
         Ok(Artboard {
-            inner: Rc::new(ArtboardInner {
+            inner: Arc::new(ArtboardInner {
                 ptr,
-                ctx: Rc::clone(&self._ctx),
+                ctx: Arc::clone(&self._ctx),
             }),
         })
     }
@@ -408,14 +774,14 @@ struct ArtboardInner {
     ptr: *mut sys::RiveArtboard,
     /// The owning context. Keeps the device alive *and* identifies which context
     /// this artboard belongs to (checked in [`Frame::draw`]).
-    ctx: Rc<ContextInner>,
+    ctx: Arc<ContextInner>,
 }
 
 impl Drop for ArtboardInner {
     fn drop(&mut self) {
         // SAFETY: created by the shim, destroyed exactly once, when the last
-        // `Rc<ArtboardInner>` drops — which is after any `StateMachine` built
-        // from it has destroyed its scene (it held an `Rc<ArtboardInner>`).
+        // `Arc<ArtboardInner>` drops — which is after any `StateMachine` built
+        // from it has destroyed its scene (it held an `Arc<ArtboardInner>`).
         unsafe { sys::rive_artboard_destroy(self.ptr) };
     }
 }
@@ -426,7 +792,7 @@ impl Drop for ArtboardInner {
 /// same native artboard, so the artboard outlives the scene that points at it.
 /// `!Send + !Sync`.
 pub struct Artboard {
-    inner: Rc<ArtboardInner>,
+    inner: Arc<ArtboardInner>,
 }
 
 impl Artboard {
@@ -447,7 +813,7 @@ impl Artboard {
         }
         Ok(StateMachine {
             ptr,
-            _artboard: Rc::clone(&self.inner),
+            _artboard: Arc::clone(&self.inner),
         })
     }
 }
@@ -464,7 +830,7 @@ impl std::fmt::Debug for Artboard {
 /// outlives the artboard instance it points at. `!Send + !Sync`.
 pub struct StateMachine {
     ptr: *mut sys::RiveStateMachine,
-    _artboard: Rc<ArtboardInner>,
+    _artboard: Arc<ArtboardInner>,
 }
 
 impl StateMachine {
@@ -508,7 +874,7 @@ impl Frame<'_> {
     /// Returns [`Error::Frame`] if no frame is in progress.
     pub fn draw(&self, artboard: &Artboard) -> Result<()> {
         // Reject an artboard built on a different context (cross-device UB).
-        if !Rc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
+        if !Arc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
             return Err(Error::ContextMismatch);
         }
         // SAFETY: artboard and context are live; a frame is in progress.

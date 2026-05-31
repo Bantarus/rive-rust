@@ -1,0 +1,44 @@
+# M2a Step 1 — raw perf artifacts (NON-BLOCKING record-into-wgpu path)
+# native RTX 4090, WGPU_BACKEND=vulkan, release rive libs; octopus_loop.riv @ 512x512; n=300 after 30-frame warmup.
+# Re-captured 2026-05-31T14:33:22Z via scripts/win.cmd, full run logs de-ANSI'd.
+# fence wait = 0 by construction (no blocking fence). GPU timing unavailable (no completion signal to read
+# timestamps). rive's GPU COMMAND-BUFFER CONTENTS are identical to Step 0 (Step 0's GPU exec time still applies),
+# but rive's CPU flush() COST GROWS in this path at high N (N=32 ~929us->1732-2779us p50; N=128 ~5455us->
+# 6987-12389us p50) -- so at high N the flush, not the removed fence, is the bottleneck. Run-to-run variance is
+# high at N>=32 (two passes below); N=1/N=8 are stable.
+# Correctness: frozen-pose capture is md5-IDENTICAL to the RIVE_BLOCKING path, opaque + transparent.
+
+## /tmp/m2a_nbr_n1_p1.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=1): frame CPU [us] p50=127.6 p90=140.9 p95=157.7 p99=239.1 min=81.6 max=647.0 mean=126.0 | rive flush [us] p50=83.6 p90=93.9 p95=108.2 p99=183.7 min=55.3 max=603.3 mean=83.9 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n1_p2.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=1): frame CPU [us] p50=126.7 p90=140.2 p95=151.8 p99=180.1 min=78.6 max=390.8 mean=121.0 | rive flush [us] p50=83.5 p90=92.7 p95=101.2 p99=134.4 min=53.2 max=344.4 mean=81.5 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n1_s1.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=1): frame CPU [us] p50=121.6 p90=143.3 p95=162.9 p99=222.3 min=79.0 max=328.8 mean=120.3 | rive flush [us] p50=83.1 p90=95.3 p95=109.6 p99=137.1 min=54.4 max=199.7 mean=81.4 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n8.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=8): frame CPU [us] p50=389.6 p90=635.8 p95=671.0 p99=750.2 min=337.9 max=773.4 mean=441.4 | rive flush [us] p50=258.2 p90=401.4 p95=430.1 p99=463.3 min=218.8 max=517.4 mean=288.4 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n32.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=32): frame CPU [us] p50=3735.9 p90=4518.6 p95=4881.0 p99=5240.4 min=1940.4 max=5736.4 mean=3404.1 | rive flush [us] p50=2779.0 p90=3427.8 p95=3618.4 p99=3949.9 min=1506.4 max=4142.4 mean=2563.7 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n128.log
+rive zero-copy: PLS mode = Atomics, raster-order supported = false, clockwise requested = false, sync = non-blocking (M2a record-into-wgpu), GPU timing = unavailable
+rive zero-copy PERF (frames=300, instances=128): frame CPU [us] p50=16022.4 p90=17833.9 p95=22340.2 p99=27311.5 min=7960.0 max=27967.9 mean=15519.5 | rive flush [us] p50=12388.6 p90=14173.5 p95=18424.1 p99=23220.1 min=6220.7 max=23904.1 mean=12472.0 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## second-pass (multi-instance run-to-run variance characterization)
+## /tmp/m2a_nbr_n8_p2.log
+rive zero-copy PERF (frames=300, instances=8): frame CPU [us] p50=378.1 p90=627.4 p95=656.7 p99=695.0 min=334.6 max=789.7 mean=429.2 | rive flush [us] p50=251.6 p90=390.4 p95=416.6 p99=476.0 min=220.0 max=509.1 mean=281.3 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n32_p2.log
+rive zero-copy PERF (frames=300, instances=32): frame CPU [us] p50=2199.7 p90=2724.0 p95=2877.5 p99=3354.3 min=1892.7 max=3659.3 mean=2283.8 | rive flush [us] p50=1732.1 p90=2157.1 p95=2271.1 p99=2648.9 min=1463.3 max=2853.0 mean=1796.6 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+
+## /tmp/m2a_nbr_n128_p2.log
+rive zero-copy PERF (frames=300, instances=128): frame CPU [us] p50=8921.7 p90=14876.9 p95=16109.3 p99=17156.1 min=7854.8 max=18555.8 mean=10838.8 | rive flush [us] p50=6987.1 p90=12945.1 p95=14156.0 p99=15052.9 min=6164.0 max=16240.5 mean=8996.6 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable
+

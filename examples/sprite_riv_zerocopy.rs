@@ -14,6 +14,9 @@
 //!   RIVE_RIV=octopus_loop.riv     which file to play (default)
 //!   RIVE_CAPTURE=cap.png          after a few frames, screenshot the window then exit
 //!   RIVE_CAPTURE_FRAMES=6         warm-up frames before capture (default 6)
+//!   RIVE_INSTANCES=N              spawn N independent rive instances in a grid
+//!                                 (default 1) — the M2a multi-instance perf regime;
+//!                                 each renders into its own shared VkImage + sprite.
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the
@@ -39,6 +42,9 @@ struct Cfg {
     capture: Option<String>,
     warmup: u32,
     speed: f32,
+    /// M2a: number of independent rive instances to spawn (grid-laid). 1 by
+    /// default; the multi-instance perf regime uses 8 / 32 / 128.
+    instances: u32,
     /// M2.0: when `RIVE_PERF` is set, auto-exit after this many frames so a perf
     /// run terminates on its own once the render-world collector has logged its
     /// summary (it summarizes after ~warmup + `RIVE_PERF_FRAMES` rendered frames).
@@ -58,6 +64,16 @@ struct RiveEntity;
 #[derive(Component)]
 struct DisplayQuad;
 
+/// Grid slot index of a rive instance (M2a multi-instance), used to lay its
+/// display sprite out in a grid.
+#[derive(Component)]
+struct RiveSlot(u32);
+
+/// Marks a rive entity whose display sprite has been spawned, so `attach_display`
+/// attaches each instance exactly once.
+#[derive(Component)]
+struct DisplayAttached;
+
 fn main() {
     let riv = std::env::var("RIVE_RIV")
         .unwrap_or_else(|_| "octopus_loop.riv".into())
@@ -75,6 +91,13 @@ fn main() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0_f32);
+    // M2a multi-instance perf regime: spawn N independent rive instances. Clamped
+    // to a sane ceiling so a typo can't try to allocate thousands of 512² targets.
+    let instances = std::env::var("RIVE_INSTANCES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32)
+        .clamp(1, 1024);
     // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
     // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
     // frame budget past that so the run self-terminates with the summary printed.
@@ -121,6 +144,7 @@ fn main() {
         capture,
         warmup,
         speed,
+        instances,
         perf_exit_frames,
     })
     .init_resource::<CaptureState>()
@@ -143,34 +167,61 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     ));
 
     let handle: Handle<RiveFile> = assets.load(cfg.riv.clone());
-    let mut anim = RiveAnimation::new(handle);
-    anim.speed = cfg.speed;
-    commands.spawn((anim, RiveTarget::new(cfg.size, cfg.size), RiveEntity));
+    // M2a: spawn N independent rive instances (each its own artboard, state
+    // machine, shared VkImage, and display image). N=1 is the M1b/M2.0 baseline;
+    // 8/32/128 exercise the multi-instance perf regime. All share the single loaded
+    // RiveFile asset (a cheap handle clone); the render node builds per-entity
+    // native objects on first sight.
+    info!("rive zero-copy: spawning {} instance(s)", cfg.instances);
+    for i in 0..cfg.instances {
+        let mut anim = RiveAnimation::new(handle.clone());
+        anim.speed = cfg.speed;
+        commands.spawn((
+            anim,
+            RiveTarget::new(cfg.size, cfg.size),
+            RiveEntity,
+            RiveSlot(i),
+        ));
+    }
 }
 
-/// Spawns the display sprite once the plugin has allocated the target image —
-/// identical to M1a. The image is filled by the render-graph node each frame
-/// (in place, a stable texture), so a `Sprite` displays the live animation.
+/// Spawns a display sprite for each rive instance once the plugin has allocated
+/// its target image — laid out in a grid (M2a multi-instance). Each instance is
+/// attached exactly once (marked `DisplayAttached`). The images are filled by the
+/// render-graph node each frame (in place, stable textures), so the sprites show
+/// the live animations. At N=1 this is the M1a display, centered.
 fn attach_display(
     mut commands: Commands,
-    query: Query<&RiveTarget, With<RiveEntity>>,
-    mut done: Local<bool>,
+    cfg: Res<Cfg>,
+    query: Query<(Entity, &RiveTarget, &RiveSlot), Without<DisplayAttached>>,
 ) {
-    if *done {
-        return;
+    for (entity, target, slot) in &query {
+        if target.image == Handle::default() {
+            continue; // image not allocated yet
+        }
+        commands.spawn((
+            Sprite::from_image(target.image.clone()),
+            grid_transform(slot.0, cfg.instances, cfg.size as f32),
+            DisplayQuad,
+        ));
+        commands.entity(entity).insert(DisplayAttached);
     }
-    let Ok(target) = query.single() else {
-        return;
-    };
-    if target.image == Handle::default() {
-        return;
-    }
-    commands.spawn((
-        Sprite::from_image(target.image.clone()),
-        Transform::IDENTITY,
-        DisplayQuad,
-    ));
-    *done = true;
+}
+
+/// Lays instance `index` of `total` in a centered grid, scaling each cell so the
+/// whole grid fits a nominal 1200×680 viewport. Cosmetic only — the perf cost is
+/// the rive fill, not the sprite size; at N=1 the scale is 1.0 (identity display).
+fn grid_transform(index: u32, total: u32, cell_px: f32) -> Transform {
+    let cols = (total as f32).sqrt().ceil().max(1.0);
+    let rows = ((total as f32) / cols).ceil().max(1.0);
+    let cell = (1200.0_f32 / cols).min(680.0_f32 / rows);
+    let scale = if total > 1 { cell / cell_px } else { 1.0 };
+    let col = index as f32 % cols;
+    let row = (index as f32 / cols).floor();
+    // Center the grid on the origin (the 2D camera sits at 0,0); +y is up.
+    let x = (col - (cols - 1.0) / 2.0) * cell;
+    let y = -(row - (rows - 1.0) / 2.0) * cell;
+    Transform::from_translation(Vec3::new(x, y, 0.0)).with_scale(Vec3::splat(scale))
 }
 
 /// In capture mode: after `warmup` frames (gated on the display sprite existing),
@@ -187,7 +238,9 @@ fn drive_capture(
     let Some(path) = cfg.capture.as_ref() else {
         return;
     };
-    let Ok(target) = query.single() else {
+    // Capture is a single-window screenshot (correctness runs use N=1); with N>1
+    // it still captures the whole grid. Use the first instance to gate readiness.
+    let Some(target) = query.iter().next() else {
         return;
     };
     if target.image == Handle::default() || quad.is_empty() {

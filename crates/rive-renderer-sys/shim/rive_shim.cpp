@@ -8,6 +8,7 @@
 
 #include "rive_shim.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -159,6 +160,14 @@ struct RiveRenderContext
     PFN_vkCmdWriteTimestamp extCmdWriteTimestamp = nullptr;
     float extTimestampPeriod = 0.0f; // ns per tick; 0 => GPU timing unavailable
     double extLastGpuMs = -1.0;      // last measured rive GPU time (ms), -1 if none
+
+    // ---- M2a: CPU sub-span timings (fence-vs-flush split) ------------------
+    // Wall time (microseconds, steady_clock) of the last external frame's rive
+    // CPU flush and the blocking fence wait, measured around the exact calls in
+    // render_external_frame. -1 until the first frame; surfaced via getters so the
+    // perf collector can attribute the ~650us submit wall to flush vs fence.
+    double extLastFlushUs = -1.0;
+    double extLastFenceWaitUs = -1.0;
 };
 
 struct RiveRenderTarget
@@ -945,6 +954,20 @@ extern "C" double rive_render_context_last_gpu_ms(const RiveRenderContext* ctx)
     return ctx->extLastGpuMs;
 }
 
+extern "C" double rive_render_context_last_flush_us(const RiveRenderContext* ctx)
+{
+    if (ctx == nullptr)
+        return -1.0;
+    return ctx->extLastFlushUs;
+}
+
+extern "C" double rive_render_context_last_fence_wait_us(const RiveRenderContext* ctx)
+{
+    if (ctx == nullptr)
+        return -1.0;
+    return ctx->extLastFenceWaitUs;
+}
+
 extern "C" int32_t rive_render_context_supports_raster_ordering(
     const RiveRenderContext* ctx)
 {
@@ -1175,7 +1198,13 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
     flushResources.externalCommandBuffer = reinterpret_cast<void*>(cb);
     flushResources.currentFrameNumber = ctx->extCurrentFrameNumber;
     flushResources.safeFrameNumber = ctx->extSafeFrameNumber;
+    // M2a: time rive's CPU-side flush (command-buffer record) in isolation, so the
+    // perf collector can attribute the submit wall to flush vs the blocking fence.
+    const auto flushT0 = std::chrono::steady_clock::now();
     ctx->renderContext->flush(flushResources);
+    ctx->extLastFlushUs = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - flushT0)
+                              .count();
 
     // Post-flush: transition COLOR_ATTACHMENT -> SHADER_READ_ONLY for the wgpu
     // sampling pass, and keep rive's own layout tracker in sync for next frame.
@@ -1219,32 +1248,43 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
             set_error("rive external: vkQueueSubmit failed");
             status = 1;
         }
-        else if (vk->WaitForFences(ctx->extDevice, 1, &ctx->extFence, VK_TRUE,
-                                   UINT64_MAX) != VK_SUCCESS)
+        else
         {
-            set_error("rive external: vkWaitForFences failed");
-            status = 1;
-        }
-        else if (gpuTiming)
-        {
-            // The fence is signaled, so rive's GPU work — and both timestamp
-            // writes — have completed; the results are available now. Read the two
-            // ticks and convert to milliseconds (period is ns/tick). Best-effort:
-            // any failure or a non-increasing pair reports -1 for this frame.
-            uint64_t ts[2] = {0, 0};
-            if (ctx->extGetQueryPoolResults(
-                    ctx->extDevice, ctx->extQueryPool, 0, 2, sizeof(ts), ts,
-                    sizeof(uint64_t),
-                    VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS &&
-                ts[1] > ts[0])
+            // M2a: time the blocking fence wait in isolation — this is the per-frame
+            // stall the non-blocking-sync rework removes (Step 0 fence-vs-flush
+            // split). Measured around the exact WaitForFences call.
+            const auto fenceT0 = std::chrono::steady_clock::now();
+            const VkResult waitRes =
+                vk->WaitForFences(ctx->extDevice, 1, &ctx->extFence, VK_TRUE, UINT64_MAX);
+            ctx->extLastFenceWaitUs = std::chrono::duration<double, std::micro>(
+                                          std::chrono::steady_clock::now() - fenceT0)
+                                          .count();
+            if (waitRes != VK_SUCCESS)
             {
-                ctx->extLastGpuMs = static_cast<double>(ts[1] - ts[0]) *
-                                    static_cast<double>(ctx->extTimestampPeriod) /
-                                    1.0e6;
+                set_error("rive external: vkWaitForFences failed");
+                status = 1;
             }
-            else
+            else if (gpuTiming)
             {
-                ctx->extLastGpuMs = -1.0;
+                // The fence is signaled, so rive's GPU work — and both timestamp
+                // writes — have completed; the results are available now. Read the
+                // two ticks and convert to milliseconds (period is ns/tick).
+                // Best-effort: any failure or a non-increasing pair reports -1.
+                uint64_t ts[2] = {0, 0};
+                if (ctx->extGetQueryPoolResults(
+                        ctx->extDevice, ctx->extQueryPool, 0, 2, sizeof(ts), ts,
+                        sizeof(uint64_t),
+                        VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WAIT_BIT) == VK_SUCCESS &&
+                    ts[1] > ts[0])
+                {
+                    ctx->extLastGpuMs = static_cast<double>(ts[1] - ts[0]) *
+                                        static_cast<double>(ctx->extTimestampPeriod) /
+                                        1.0e6;
+                }
+                else
+                {
+                    ctx->extLastGpuMs = -1.0;
+                }
             }
         }
     }
@@ -1253,6 +1293,73 @@ extern "C" RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
     ctx->currentRenderer = nullptr;
     ctx->currentTarget = nullptr;
     return status;
+}
+
+// M2a non-blocking sync: record rive's frame into a CALLER-PROVIDED, already-open
+// command buffer (wgpu's own, obtained via as_hal_mut().raw_handle()), then return
+// WITHOUT submitting or fencing. rive's draws ride wgpu's single per-frame submit,
+// GPU-ordered before the later wgpu pass that samples the image — no CPU stall,
+// no separate VkQueue submit, no vkWaitForFences. Contrast rive_frame_submit_external
+// (the M1b blocking path), which owns its command buffer + fence and blocks.
+//
+// Correctness contract upheld by the caller (the bevy-rive node):
+//   * `cmdBuffer` is wgpu's open primary command buffer for THIS frame; we never
+//     Begin/End/submit it (wgpu does, at finish()).
+//   * The post-flush barrier leaves the image in SHADER_READ_ONLY_OPTIMAL — which
+//     equals wgpu's tracked RESOURCE layout — so wgpu emits no destructive barrier
+//     when it samples (steady state); rive's barrier provides write->read visibility.
+//   * safeFrameNumber (seeded at begin) must trail currentFrameNumber by rive's ring
+//     size, since there is no fence: a frame's resources are only safe to recycle
+//     once its GPU work has completed, which is bounded by frames-in-flight.
+extern "C" RiveStatus rive_frame_record_external(RiveRenderContext* ctx,
+                                                 RiveRenderTarget* target,
+                                                 uint64_t cmdBuffer)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr || ctx->impl == nullptr ||
+        !ctx->external || target == nullptr || !target->external ||
+        ctx->currentTarget != target || cmdBuffer == 0)
+    {
+        set_error("rive_frame_record_external: no external frame in progress");
+        return 1;
+    }
+
+    VulkanContext* vk = ctx->impl->vulkanContext();
+    VkCommandBuffer cb = handle_from_u64<VkCommandBuffer>(cmdBuffer);
+
+    // rive RECORDS its draws (and its own ->COLOR_ATTACHMENT barrier, via
+    // accessTargetImage) into wgpu's open buffer. It does NOT submit.
+    RenderContext::FlushResources flushResources;
+    flushResources.renderTarget = target->renderTarget.get();
+    flushResources.externalCommandBuffer = reinterpret_cast<void*>(cb);
+    flushResources.currentFrameNumber = ctx->extCurrentFrameNumber;
+    flushResources.safeFrameNumber = ctx->extSafeFrameNumber;
+    const auto flushT0 = std::chrono::steady_clock::now();
+    ctx->renderContext->flush(flushResources);
+    ctx->extLastFlushUs = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - flushT0)
+                              .count();
+    // No blocking fence in this path — that is the whole point of M2a.
+    ctx->extLastFenceWaitUs = 0.0;
+    // GPU timing needs a completion signal we don't have here (wgpu submits this
+    // buffer asynchronously); report unavailable. rive's recorded commands are
+    // identical to the blocking path, so Step 0's GPU baseline still applies.
+    ctx->extLastGpuMs = -1.0;
+
+    // Post-flush: transition COLOR_ATTACHMENT -> SHADER_READ_ONLY for wgpu's
+    // sampling pass, recorded into wgpu's buffer; keep rive's layout tracker in
+    // sync so the next frame's begin seeds the right prior layout.
+    ImageAccess readAccess{};
+    readAccess.pipelineStages = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+    readAccess.accessMask = VK_ACCESS_SHADER_READ_BIT;
+    readAccess.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    target->lastAccess = vk->simpleImageMemoryBarrier(
+        cb, target->renderTarget->targetLastAccess(), readAccess, target->extImage);
+    target->renderTarget->updateLastAccess(target->lastAccess);
+
+    delete ctx->currentRenderer;
+    ctx->currentRenderer = nullptr;
+    ctx->currentTarget = nullptr;
+    return RIVE_OK;
 }
 
 extern "C" uint64_t rive_render_target_vk_image(const RiveRenderTarget* target)

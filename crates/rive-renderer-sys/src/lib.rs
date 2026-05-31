@@ -188,6 +188,12 @@ extern "C" {
     /// command buffer (Vulkan timestamps), or `-1.0` if GPU timing is unavailable.
     pub fn rive_render_context_last_gpu_ms(ctx: *const RiveRenderContext) -> f64;
 
+    /// M2a: CPU sub-span timings (microseconds) of the last external frame —
+    /// rive's `flush()` and the blocking `vkWaitForFences` — for the fence-vs-flush
+    /// perf split. `-1.0` if no external frame has run yet.
+    pub fn rive_render_context_last_flush_us(ctx: *const RiveRenderContext) -> f64;
+    pub fn rive_render_context_last_fence_wait_us(ctx: *const RiveRenderContext) -> f64;
+
     /// 1 if the shared device gives rive the clean raster-order PLS path, 0 if
     /// not (atomic/msaa fallback), -1 on a null handle.
     pub fn rive_render_context_supports_raster_ordering(ctx: *const RiveRenderContext) -> i32;
@@ -238,6 +244,16 @@ extern "C" {
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,
         queue: u64,
+    ) -> RiveStatus;
+
+    /// M2a NON-BLOCKING path: records rive's draws + the `COLOR -> SHADER_READ_ONLY`
+    /// barrier into `cmd_buffer` (wgpu's own open primary `VkCommandBuffer`, as a u64
+    /// handle) and returns WITHOUT submit/fence. rive's work rides wgpu's per-frame
+    /// submit, GPU-ordered before the wgpu pass that samples the image — no CPU stall.
+    pub fn rive_frame_record_external(
+        ctx: *mut RiveRenderContext,
+        target: *mut RiveRenderTarget,
+        cmd_buffer: u64,
     ) -> RiveStatus;
 
     /// The `VkImage` the external target currently points at (0 if not external).

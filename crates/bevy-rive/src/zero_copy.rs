@@ -28,8 +28,11 @@
 //!    shared wgpu textures) live in [`RiveRenderState`] — a render-world resource
 //!    whose `!Send` interior is upheld by a strict single-thread invariant
 //!    (touched only inside the render-graph node / extract, which run serialized
-//!    on the render thread). The wrapper's handles are `Arc`-refcounted (atomic),
-//!    so a cross-thread *drop* by Bevy's pipelined renderer is sound.
+//!    on the render thread). The wrapper's handles are non-atomic `Rc`-refcounted,
+//!    so a cross-thread *drop* would be UNSOUND — which is exactly why this tier
+//!    holds them as a `NonSend` resource with pipelined rendering disabled. The
+//!    single-thread invariant (not atomics) is what makes them safe here; do not
+//!    re-enable pipelining without first switching the wrapper to atomic refcounts.
 //! 4. **Per-frame.** An `Extract` system copies `Send` per-entity data (the
 //!    display `Handle<Image>`, the `.riv` bytes, size, and `dt·speed`) into the
 //!    render world. The [`RiveFillNode`] render-graph node (ordered before
@@ -73,9 +76,12 @@ use bevy::render::{Extract, RenderApp};
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
 use bevy::render::renderer::raw_vulkan_init::{AdditionalVulkanFeatures, RawVulkanInitSettings};
 use bevy::render::renderer::{RenderAdapter, RenderInstance};
+use bevy::render::view::ExtractedWindows;
+use bevy::window::PresentMode;
 
 use rive_renderer::{
-    Artboard, Context, ExternalFrameSubmit, RenderTarget, StateMachine, VulkanFeatures,
+    Artboard, Context, ExternalFrameRecord, ExternalFrameSubmit, RenderTarget, StateMachine,
+    VulkanFeatures,
 };
 
 use crate::{RiveAnimation, RiveFile, RivePlugin, RiveTarget};
@@ -102,6 +108,24 @@ const SHARED_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 /// The display texture behind `RiveTarget.image`: `Rgba8UnormSrgb` straight-alpha,
 /// **identical to the M1a seam**, so the user's `Sprite` path is unchanged.
 const DISPLAY_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
+
+/// rive's transient-resource ring depth (`gpu::kBufferRingSize`). In the M2a
+/// non-blocking path there is no fence proving GPU completion, so `safe_frame =
+/// current - RIVE_RING_SIZE` is the ONLY signal telling rive a frame's pooled,
+/// host-mapped buffers are safe to recycle (rive's `acquire()` reuses a buffer iff
+/// its `lastFrameNumber <= safeFrameNumber`, then a CPU memcpy rewrites it). This is
+/// correct **only while frames-in-flight ≤ RIVE_RING_SIZE**: if the CPU outruns GPU
+/// completion by more than the ring, rive overwrites a buffer the GPU is still
+/// reading → silent content corruption. Bevy's default surface (Fifo / AutoVsync,
+/// `desired_maximum_frame_latency` 2 → a 3-image swapchain) caps the CPU at ~3
+/// frames ahead, matching the ring — so the default is safe, and that is what every
+/// M2a measurement ran under. Non-Fifo present modes (Immediate / Mailbox /
+/// AutoNoVsync) or a higher frame latency break the bound; the node emits a one-shot
+/// warning when it detects such a config, and `RIVE_BLOCKING=1` is the safe fallback.
+/// The robust fix — derive the watermark from wgpu's completed `SubmissionIndex` via
+/// `device.poll`, instead of a fixed offset — is M2 remainder. Must match rive's
+/// `kBufferRingSize`.
+const RIVE_RING_SIZE: u64 = 3;
 
 // ===========================================================================
 // Plugin.
@@ -313,6 +337,10 @@ struct RiveSharedHandles {
     perf_enabled: bool,
     /// Post-warmup frame count to summarize over (`RIVE_PERF_FRAMES`, default 300).
     perf_target: u32,
+    /// M2a fallback (`RIVE_BLOCKING` env): use the M1b blocking out-of-band submit +
+    /// fence instead of the default non-blocking record-into-wgpu path. Kept as a
+    /// selectable fallback and an A/B baseline measurable on a single build.
+    blocking_submit: bool,
 }
 
 /// Per-entity native render state (one rive instance bound to one shared texture).
@@ -449,14 +477,19 @@ impl RiveBlitPipeline {
     }
 }
 
-/// M2.0 per-frame perf collector for the rive fill node.
+/// M2a per-frame perf collector for the rive fill node.
 ///
-/// Collects, per frame: the **CPU wall time** of the rive submit call
-/// ([`Context::render_external_frame`], which blocks on the shim's fence — so it
-/// includes rive's GPU work *and* the blocking-fence stall the M2 sync rework will
-/// remove), and the **GPU time** of rive's command buffer (Vulkan timestamps, when
-/// available). After a warm-up, it gathers `target` samples then logs a
+/// Collects, **per frame** (summed across every rive instance rendered that
+/// frame): the CPU wall of the rive submit calls
+/// ([`Context::render_external_frame`]), split via the shim into rive's CPU
+/// `flush()` and the **blocking fence wait** (the stall the M2a sync rework
+/// removes), plus rive's GPU command-buffer time (Vulkan timestamps, when
+/// available). After a warm-up it gathers `target` frames then logs a
 /// median+percentile summary once. Enabled by `RIVE_PERF`.
+///
+/// Recording per *frame* (not per submit) lets one mechanism serve both Step 0
+/// measurements: at N=1 the frame totals are that instance's fence-vs-flush split;
+/// at N>1 the frame CPU total is the frame-time-vs-N scaling point.
 #[derive(Default)]
 struct PerfStats {
     enabled: bool,
@@ -465,13 +498,30 @@ struct PerfStats {
     /// pipeline/context/instance creation, so they are not representative).
     warmup: u32,
     seen: u32,
-    cpu_submit_us: Vec<f64>,
-    gpu_rive_ms: Vec<f64>,
+    /// Instance count of the most recent recorded frame (the run's N).
+    instances: u32,
+    /// Per-frame rive submit wall, summed over the frame's instances.
+    frame_cpu_us: Vec<f64>,
+    /// Per-frame rive CPU `flush()` total (shim-measured), summed over instances.
+    frame_flush_us: Vec<f64>,
+    /// Per-frame blocking fence-wait total (shim-measured), summed over instances.
+    frame_fence_us: Vec<f64>,
+    /// Per-frame rive GPU command-buffer total, summed over instances.
+    frame_gpu_ms: Vec<f64>,
     summarized: bool,
 }
 
 impl PerfStats {
-    fn record(&mut self, cpu_submit_us: f64, gpu_rive_ms: Option<f64>) {
+    /// Record one frame's aggregate timings (summed over `instances` submits).
+    /// `gpu_ms` is `None` if GPU timing was unavailable for any submit this frame.
+    fn record_frame(
+        &mut self,
+        instances: u32,
+        cpu_us: f64,
+        flush_us: f64,
+        fence_us: f64,
+        gpu_ms: Option<f64>,
+    ) {
         if !self.enabled || self.summarized {
             return;
         }
@@ -479,23 +529,32 @@ impl PerfStats {
         if self.seen <= self.warmup {
             return;
         }
-        self.cpu_submit_us.push(cpu_submit_us);
-        if let Some(ms) = gpu_rive_ms {
-            self.gpu_rive_ms.push(ms);
+        self.instances = instances;
+        self.frame_cpu_us.push(cpu_us);
+        self.frame_flush_us.push(flush_us);
+        self.frame_fence_us.push(fence_us);
+        if let Some(ms) = gpu_ms {
+            self.frame_gpu_ms.push(ms);
         }
-        if self.cpu_submit_us.len() as u32 >= self.target {
+        if self.frame_cpu_us.len() as u32 >= self.target {
             self.summarize();
             self.summarized = true;
         }
     }
 
     fn summarize(&self) {
-        let cpu = Summary::of(&self.cpu_submit_us);
-        let gpu = Summary::of(&self.gpu_rive_ms);
+        let cpu = Summary::of(&self.frame_cpu_us);
+        let flush = Summary::of(&self.frame_flush_us);
+        let fence = Summary::of(&self.frame_fence_us);
+        let gpu = Summary::of(&self.frame_gpu_ms);
         info!(
-            "rive zero-copy PERF (n={}): rive-submit CPU [us] {} | rive GPU [ms] {}",
+            "rive zero-copy PERF (frames={}, instances={}): frame CPU [us] {} | \
+             rive flush [us] {} | fence wait [us] {} | rive GPU [ms] {}",
             cpu.n,
+            self.instances,
             cpu.fmt_us(),
+            flush.fmt_us(),
+            fence.fmt_us(),
             if gpu.n > 0 {
                 gpu.fmt_ms()
             } else {
@@ -752,6 +811,9 @@ fn extract_shared_handles_once(
             .and_then(|s| s.parse().ok())
             .unwrap_or(300u32)
             .max(1);
+        // M2a: default to the non-blocking record-into-wgpu path; RIVE_BLOCKING=1
+        // selects the M1b blocking submit+fence (fallback / A-B baseline).
+        let blocking_submit = std::env::var_os("RIVE_BLOCKING").is_some();
 
         RiveSharedHandles {
             instance: vk_instance.as_raw(),
@@ -766,6 +828,7 @@ fn extract_shared_handles_once(
             clockwise,
             perf_enabled,
             perf_target,
+            blocking_submit,
         }
     };
 
@@ -897,6 +960,9 @@ impl Node for RiveFillNode {
         gpu.frame = gpu.frame.wrapping_add(1).max(1);
         let frame_no = gpu.frame;
         let queue = handles.queue;
+        // M2a: non-blocking record-into-wgpu by default; RIVE_BLOCKING uses the M1b
+        // blocking submit+fence path (needs `queue`).
+        let blocking = handles.blocking_submit;
 
         // One-time, now that the context exists: apply the M2.0 perf knobs (the
         // clockwise PLS override + perf-collector config) carried on the handles.
@@ -935,6 +1001,16 @@ impl Node for RiveFillNode {
         // display image are ready) have an empty work-list.
         let mut rendered_any = false;
 
+        // M2a per-frame perf accumulators (summed across this frame's instances).
+        let mut frame_instances = 0u32;
+        let mut frame_cpu_us = 0.0_f64;
+        let mut frame_flush_us = 0.0_f64;
+        let mut frame_fence_us = 0.0_f64;
+        let mut frame_gpu_ms = 0.0_f64;
+        // GPU timing is all-or-nothing per frame: if any submit lacked a timestamp,
+        // the frame's GPU total is not reported (avoids undercounting).
+        let mut frame_gpu_ok = true;
+
         for item in &frame_items {
             let entity = item.entity;
             // Instantiate native objects + shared texture on first sight. Building
@@ -955,32 +1031,77 @@ impl Node for RiveFillNode {
                 continue;
             };
 
-            // Advance + render rive into the shared VkImage out-of-band. This call
-            // BLOCKS until rive's GPU work completes (shim fences), leaving the
-            // shared texture in SHADER_READ_ONLY.
+            // Advance the state machine, then run rive's frame. Two paths:
+            //  * M2a non-blocking (default): RECORD rive's draws into wgpu's OWN open
+            //    command buffer (no submit, no fence) — rive's work rides wgpu's
+            //    per-frame submit, GPU-ordered before the un-premult pass below.
+            //  * M1b blocking (RIVE_BLOCKING=1): out-of-band submit + blocking fence,
+            //    kept as a selectable fallback and an A/B baseline on one build.
             inst.state_machine.advance(item.step);
-            let submit = ExternalFrameSubmit {
-                current_frame: frame_no,
-                safe_frame: frame_no.saturating_sub(1),
-                queue,
+
+            // For the non-blocking path, fetch wgpu's open primary command buffer for
+            // this frame; rive records into it via its own Vulkan dispatch.
+            let cmd_buffer = if blocking {
+                0
+            } else {
+                // SAFETY: `as_hal_mut` is `unsafe`; `raw_handle()` returns wgpu's open
+                // primary buffer for this frame. We read the handle only and do not
+                // end the buffer or touch the wgpu encoder until rive's record
+                // returns, per the `as_hal_mut` contract.
+                unsafe {
+                    render_context
+                        .command_encoder()
+                        .as_hal_mut::<Vk, _, _>(|enc| enc.map(|e| e.raw_handle().as_raw()))
+                }
+                .unwrap_or(0)
             };
-            // M2.0: CPU-time the rive submit. The call BLOCKS on the shim's fence,
-            // so this wall time includes rive's CPU-side flush/record, the submit,
-            // and the blocking-fence wait (the cost the M2 sync rework targets) —
-            // exactly the baseline. Start the timer before the SAFETY comment so the
-            // comment stays adjacent to the `unsafe` block (clippy adjacency).
+            if !blocking && cmd_buffer == 0 {
+                warn!("rive zero-copy: wgpu encoder is not Vulkan; cannot record {entity:?}");
+                continue;
+            }
+
+            // CPU-time the rive call. Non-blocking: rive's CPU flush/record only (the
+            // blocking-fence stall is gone). Blocking: flush + submit + the blocking
+            // fence wait (the M1b / Step-0 baseline). The shim's flush/fence sub-span
+            // timers (read just below) attribute the wall.
             let submit_t0 = std::time::Instant::now();
-            // SAFETY: `queue` is wgpu's graphics VkQueue on this context's device;
-            // the node runs on the render schedule's thread (the main thread for
-            // this tier — pipelining disabled), serialized w.r.t. wgpu's own
-            // submissions in graph order (we are before StartMainPass).
-            let submit_res = unsafe {
-                ctx.render_external_frame(
-                    &inst.target,
-                    &inst.artboard,
-                    crate::rive_clear_rgba(),
-                    submit,
-                )
+            let submit_res = if blocking {
+                let submit = ExternalFrameSubmit {
+                    current_frame: frame_no,
+                    safe_frame: frame_no.saturating_sub(1),
+                    queue,
+                };
+                // SAFETY: `queue` is wgpu's graphics VkQueue on this context's device;
+                // the node runs serialized on the render thread (pipelining disabled),
+                // before StartMainPass.
+                unsafe {
+                    ctx.render_external_frame(
+                        &inst.target,
+                        &inst.artboard,
+                        crate::rive_clear_rgba(),
+                        submit,
+                    )
+                }
+            } else {
+                let record = ExternalFrameRecord {
+                    current_frame: frame_no,
+                    // No fence proves GPU completion, so a frame's resources are safe
+                    // to recycle only once it has finished; trail by rive's ring size
+                    // (frames-in-flight bounded by the vsync surface).
+                    safe_frame: frame_no.saturating_sub(RIVE_RING_SIZE),
+                    command_buffer: cmd_buffer,
+                };
+                // SAFETY: `cmd_buffer` is wgpu's open buffer on this context's device;
+                // rive leaves the image in SHADER_READ_ONLY == wgpu's RESOURCE layout;
+                // the node is before StartMainPass on the render thread.
+                unsafe {
+                    ctx.record_external_frame(
+                        &inst.target,
+                        &inst.artboard,
+                        crate::rive_clear_rgba(),
+                        record,
+                    )
+                }
             };
             let submit_cpu_us = submit_t0.elapsed().as_secs_f64() * 1.0e6;
             if let Err(e) = submit_res {
@@ -990,10 +1111,18 @@ impl Node for RiveFillNode {
             // A frame's beginFrame + flush ran, so `pls_mode()` is now meaningful
             // (it is captured at beginFrame). Gate the one-shot PLS log on this.
             rendered_any = true;
-            // M2.0: record the submit's CPU wall time + rive's GPU command-buffer
-            // time (Vulkan timestamps; None if unavailable). The fixed baseline
-            // scene is single-entity, so one submit == one frame here.
-            perf.record(submit_cpu_us, ctx.last_gpu_ms());
+            // M2a: accumulate this submit into the per-frame perf totals. flush +
+            // fence-wait are the shim's CPU sub-span timers (the fence-vs-flush
+            // split); gpu_ms is rive's command-buffer time (Vulkan timestamps).
+            // Summed across instances and recorded once per frame below.
+            frame_instances += 1;
+            frame_cpu_us += submit_cpu_us;
+            frame_flush_us += ctx.last_flush_us().unwrap_or(0.0);
+            frame_fence_us += ctx.last_fence_wait_us().unwrap_or(0.0);
+            match ctx.last_gpu_ms() {
+                Some(ms) => frame_gpu_ms += ms,
+                None => frame_gpu_ok = false,
+            }
 
             // DISPLAY: un-premultiply + sRGB-decode fullscreen pass from the shared
             // Rgba8Unorm texture (rive's premultiplied, sRGB-encoded bytes) into the
@@ -1054,6 +1183,19 @@ impl Node for RiveFillNode {
             }
         }
 
+        // M2a: record this frame's aggregate perf (summed over instances), only
+        // when work actually ran — so warm-up / `seen` count real frames, not the
+        // empty early node calls before the asset + display image are ready.
+        if frame_instances > 0 {
+            perf.record_frame(
+                frame_instances,
+                frame_cpu_us,
+                frame_flush_us,
+                frame_fence_us,
+                frame_gpu_ok.then_some(frame_gpu_ms),
+            );
+        }
+
         // Log the active interlock mode once a real frame has rendered (so
         // `pls_mode()` reflects a captured `beginFrame`, not an empty early call).
         // M2.0: also report the clockwise request and whether GPU timing is live,
@@ -1061,16 +1203,54 @@ impl Node for RiveFillNode {
         if rendered_any && !*logged_mode {
             info!(
                 "rive zero-copy: PLS mode = {:?}, raster-order supported = {}, \
-                 clockwise requested = {}, GPU timing = {}",
+                 clockwise requested = {}, sync = {}, GPU timing = {}",
                 ctx.pls_mode(),
                 ctx.supports_raster_ordering(),
                 handles.clockwise,
+                if blocking {
+                    "blocking (M1b submit+fence)"
+                } else {
+                    "non-blocking (M2a record-into-wgpu)"
+                },
                 if ctx.last_gpu_ms().is_some() {
                     "available"
                 } else {
                     "unavailable"
                 },
             );
+            // M2a sync guard: the non-blocking watermark (safe_frame = current -
+            // RIVE_RING_SIZE) is sound only while frames-in-flight ≤ RIVE_RING_SIZE.
+            // Warn (once) if the live window config could exceed that — a non-vsync
+            // present mode, or a frame latency past the ring — since rive would then
+            // recycle a pooled buffer the GPU is still reading (silent corruption).
+            // RIVE_BLOCKING=1 is the safe fallback. See RIVE_RING_SIZE.
+            if !blocking {
+                if let Some(windows) = world.get_resource::<ExtractedWindows>() {
+                    for w in windows.windows.values() {
+                        let vsync = matches!(
+                            w.present_mode,
+                            PresentMode::Fifo | PresentMode::FifoRelaxed | PresentMode::AutoVsync
+                        );
+                        let latency = w.desired_maximum_frame_latency.map_or(2, |n| n.get());
+                        let in_flight = if vsync {
+                            u64::from(latency) + 1
+                        } else {
+                            u64::MAX
+                        };
+                        if in_flight > RIVE_RING_SIZE {
+                            warn!(
+                                "rive zero-copy: non-blocking sync assumes ≤ {RIVE_RING_SIZE} frames in \
+                                 flight, but window present_mode={:?} / desired_maximum_frame_latency={:?} \
+                                 may exceed it — rive can recycle a pooled buffer the GPU is still reading \
+                                 (silent corruption). Use PresentMode::Fifo with latency ≤ {}, or RIVE_BLOCKING=1.",
+                                w.present_mode,
+                                w.desired_maximum_frame_latency,
+                                RIVE_RING_SIZE - 1,
+                            );
+                        }
+                    }
+                }
+            }
             *logged_mode = true;
         }
 

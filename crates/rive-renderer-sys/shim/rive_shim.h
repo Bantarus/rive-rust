@@ -218,6 +218,17 @@ RivePlsMode rive_render_context_pls_mode(const RiveRenderContext* ctx);
  * not be set up). */
 double rive_render_context_last_gpu_ms(const RiveRenderContext* ctx);
 
+/* M2a: CPU-side sub-span timings of the most recent external frame, microseconds,
+ * for the fence-vs-flush perf split (Step 0). `flush_us` is rive's CPU-side
+ * RenderContext::flush() (command-buffer record + rive's own CPU work); the
+ * `fence_wait_us` is the blocking vkWaitForFences after the out-of-band submit
+ * (the cost the M2a non-blocking-sync rework targets). -1.0 if no external frame
+ * has run yet. The remainder of render_external_frame's wall (begin/end CB, the
+ * post-flush barrier, ResetFences, QueueSubmit, timestamp readback) is "other" =
+ * total - flush - fence_wait. */
+double rive_render_context_last_flush_us(const RiveRenderContext* ctx);
+double rive_render_context_last_fence_wait_us(const RiveRenderContext* ctx);
+
 /* Wrap a wgpu-ALLOCATED VkImage as a rive render target (ZERO COPY). The shim
  * does NOT allocate or free the image — wgpu owns it. If `vkImageView` is 0 the
  * shim creates a matching view (via makeExternalImageView) and owns THAT view
@@ -275,6 +286,22 @@ RiveStatus rive_frame_begin_external(RiveRenderContext* ctx,
 RiveStatus rive_frame_submit_external(RiveRenderContext* ctx,
                                       RiveRenderTarget* target,
                                       uint64_t queue);
+
+/* M2a NON-BLOCKING path. Like rive_frame_submit_external, but RECORDS rive's draws
+ * + the ->SHADER_READ_ONLY barrier into `cmdBuffer` — the CALLER's already-open
+ * command buffer (wgpu's own, from as_hal_mut().raw_handle()) — and returns WITHOUT
+ * begin/end/submit/fence. rive's work rides wgpu's single per-frame submit,
+ * GPU-ordered before the wgpu pass that samples the image; no CPU stall.
+ *
+ *   cmdBuffer : wgpu's open primary VkCommandBuffer for this frame (u64 handle).
+ *
+ * The caller must seed safeFrameNumber (at begin) to trail currentFrameNumber by
+ * rive's ring size (no fence → a frame is recyclable only once its GPU work has
+ * completed, bounded by frames-in-flight). On return the image is left in
+ * SHADER_READ_ONLY_OPTIMAL == wgpu's tracked RESOURCE layout. */
+RiveStatus rive_frame_record_external(RiveRenderContext* ctx,
+                                      RiveRenderTarget* target,
+                                      uint64_t cmdBuffer);
 
 /* The VkImage / VkImageView the external target currently points at (0 if not
  * external). Diagnostics. */

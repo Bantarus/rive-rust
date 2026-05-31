@@ -363,6 +363,27 @@ impl Context {
         (ms >= 0.0).then_some(ms)
     }
 
+    /// CPU wall time (microseconds) of rive's `flush()` during the most recent
+    /// [`Self::render_external_frame`] — the command-buffer record, isolated from
+    /// the blocking fence wait. `None` if no external frame has run yet (M2a Step 0
+    /// fence-vs-flush split).
+    #[must_use]
+    pub fn last_flush_us(&self) -> Option<f64> {
+        // SAFETY: `self.inner.ptr` is a live context.
+        let us = unsafe { sys::rive_render_context_last_flush_us(self.inner.ptr) };
+        (us >= 0.0).then_some(us)
+    }
+
+    /// CPU wall time (microseconds) of the blocking `vkWaitForFences` during the
+    /// most recent [`Self::render_external_frame`] — the per-frame stall the M2a
+    /// non-blocking-sync rework removes. `None` if no external frame has run yet.
+    #[must_use]
+    pub fn last_fence_wait_us(&self) -> Option<f64> {
+        // SAFETY: `self.inner.ptr` is a live context.
+        let us = unsafe { sys::rive_render_context_last_fence_wait_us(self.inner.ptr) };
+        (us >= 0.0).then_some(us)
+    }
+
     /// `true` if the shared device gives rive its clean raster-order PLS path
     /// (vs the atomic/msaa fallback). Frame-independent; use at init for logging.
     #[must_use]
@@ -501,6 +522,73 @@ impl Context {
         }
         Ok(())
     }
+
+    /// Drives one **non-blocking** M2a frame: begin → draw `artboard` → **record**
+    /// rive's draws + the `COLOR -> SHADER_READ_ONLY` barrier into wgpu's open
+    /// command buffer (`frame.command_buffer`). Unlike [`Self::render_external_frame`]
+    /// this does **not** submit or wait — rive's work rides wgpu's per-frame submit
+    /// and is GPU-ordered before the wgpu pass that samples the target image. Returns
+    /// immediately (no CPU stall); the blocking fence is gone.
+    ///
+    /// # Safety
+    ///
+    /// `frame.command_buffer` must be wgpu's open primary `VkCommandBuffer` for the
+    /// current frame, on this context's device, in the recording state, and must not
+    /// be ended/submitted until after this returns (wgpu does that at `finish`).
+    /// `frame.safe_frame` must trail `frame.current_frame` by at least rive's
+    /// resource-ring size — there is no fence proving GPU completion, so the caller
+    /// must bound frames-in-flight accordingly.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `target`/`artboard` belong to another context,
+    /// or [`Error::Frame`] if begin/draw/record fails.
+    pub unsafe fn record_external_frame(
+        &self,
+        target: &RenderTarget,
+        artboard: &Artboard,
+        clear_rgba: [f32; 4],
+        frame: ExternalFrameRecord,
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.inner, &target.ctx) || !Rc::ptr_eq(&self.inner, &artboard.inner.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        let [r, g, b, a] = clear_rgba;
+        // SAFETY: context and target are live for the call; the caller upholds the
+        // command-buffer and safe_frame contract.
+        let begin = unsafe {
+            sys::rive_frame_begin_external(
+                self.inner.ptr,
+                target.ptr,
+                r,
+                g,
+                b,
+                a,
+                frame.current_frame,
+                frame.safe_frame,
+            )
+        };
+        if begin != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        // A frame is in progress. Always reach `record` so the context is not left
+        // wedged mid-frame, then surface the first error.
+        // SAFETY: a frame is in progress on this live context; artboard is live.
+        let draw = unsafe { sys::rive_artboard_draw(artboard.inner.ptr, self.inner.ptr) };
+        let draw_err = (draw != sys::RIVE_OK).then(last_error);
+        // SAFETY: a frame is in progress; command_buffer is wgpu's open buffer per
+        // the caller contract.
+        let rec = unsafe {
+            sys::rive_frame_record_external(self.inner.ptr, target.ptr, frame.command_buffer)
+        };
+        if let Some(e) = draw_err {
+            return Err(Error::Frame(e));
+        }
+        if rec != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        Ok(())
+    }
 }
 
 /// Per-frame submission parameters for [`Context::render_external_frame`] (M1b).
@@ -519,6 +607,24 @@ pub struct ExternalFrameSubmit {
     /// The wgpu graphics `VkQueue` handle (as a `u64`) to submit rive's command
     /// buffer to, out-of-band.
     pub queue: u64,
+}
+
+/// Per-frame parameters for [`Context::record_external_frame`] (M2a non-blocking).
+///
+/// Like [`ExternalFrameSubmit`] but carries wgpu's open command buffer (rive records
+/// into it) instead of a queue: rive's work rides wgpu's submit, so there is no
+/// out-of-band submit and no fence.
+#[derive(Debug, Clone, Copy)]
+pub struct ExternalFrameRecord {
+    /// Monotonically increasing, **nonzero** frame number for this frame.
+    pub current_frame: u64,
+    /// Highest frame number whose GPU work has completed. WITHOUT a blocking fence
+    /// this must trail `current_frame` by at least rive's resource-ring size, so rive
+    /// never recycles a pooled buffer still in flight; the caller bounds frames-in-flight.
+    pub safe_frame: u64,
+    /// wgpu's open primary `VkCommandBuffer` (as a `u64`) for this frame, obtained via
+    /// `CommandEncoder::as_hal_mut(|e| e.raw_handle())`. rive records its draws into it.
+    pub command_buffer: u64,
 }
 
 /// rive's active PLS interlock mode (see [`Context::pls_mode`]).

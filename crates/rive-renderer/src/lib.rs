@@ -618,9 +618,12 @@ pub struct ExternalFrameSubmit {
 pub struct ExternalFrameRecord {
     /// Monotonically increasing, **nonzero** frame number for this frame.
     pub current_frame: u64,
-    /// Highest frame number whose GPU work has completed. WITHOUT a blocking fence
-    /// this must trail `current_frame` by at least rive's resource-ring size, so rive
-    /// never recycles a pooled buffer still in flight; the caller bounds frames-in-flight.
+    /// Highest frame number whose GPU work has actually completed — rive recycles
+    /// pooled transient buffers up to this watermark. WITHOUT a blocking fence the
+    /// caller must guarantee this names only GPU-finished frames: either an exact
+    /// GPU-completion signal (e.g. a timeline semaphore the per-frame submit advances —
+    /// the bevy-rive M2b path), or, as a fallback, `current_frame - ring_size` while
+    /// frames-in-flight ≤ ring.
     pub safe_frame: u64,
     /// wgpu's open primary `VkCommandBuffer` (as a `u64`) for this frame, obtained via
     /// `CommandEncoder::as_hal_mut(|e| e.raw_handle())`. rive records its draws into it.

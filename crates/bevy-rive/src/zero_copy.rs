@@ -69,7 +69,7 @@ use bevy::render::render_resource::{
     Extent3d, Texture, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureView,
 };
-use bevy::render::renderer::{RenderContext, RenderDevice};
+use bevy::render::renderer::{RenderContext, RenderDevice, RenderQueue};
 use bevy::render::texture::GpuImage;
 use bevy::render::{Extract, RenderApp};
 
@@ -109,21 +109,24 @@ const SHARED_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
 /// **identical to the M1a seam**, so the user's `Sprite` path is unchanged.
 const DISPLAY_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
-/// rive's transient-resource ring depth (`gpu::kBufferRingSize`). In the M2a
-/// non-blocking path there is no fence proving GPU completion, so `safe_frame =
-/// current - RIVE_RING_SIZE` is the ONLY signal telling rive a frame's pooled,
-/// host-mapped buffers are safe to recycle (rive's `acquire()` reuses a buffer iff
-/// its `lastFrameNumber <= safeFrameNumber`, then a CPU memcpy rewrites it). This is
-/// correct **only while frames-in-flight ≤ RIVE_RING_SIZE**: if the CPU outruns GPU
-/// completion by more than the ring, rive overwrites a buffer the GPU is still
-/// reading → silent content corruption. Bevy's default surface (Fifo / AutoVsync,
-/// `desired_maximum_frame_latency` 2 → a 3-image swapchain) caps the CPU at ~3
-/// frames ahead, matching the ring — so the default is safe, and that is what every
-/// M2a measurement ran under. Non-Fifo present modes (Immediate / Mailbox /
-/// AutoNoVsync) or a higher frame latency break the bound; the node emits a one-shot
-/// warning when it detects such a config, and `RIVE_BLOCKING=1` is the safe fallback.
-/// The robust fix — derive the watermark from wgpu's completed `SubmissionIndex` via
-/// `device.poll`, instead of a fixed offset — is M2 remainder. Must match rive's
+/// rive's transient-resource ring depth (`gpu::kBufferRingSize`), used as the
+/// **fallback** recycle watermark. rive's `acquire()` reuses a pooled, host-mapped
+/// buffer iff its `lastFrameNumber <= safeFrameNumber`, then a CPU memcpy rewrites
+/// it — so `safe_frame` must never name a frame whose GPU work is still in flight.
+///
+/// M2b's default is an EXACT watermark: the node reads our own Vulkan timeline
+/// semaphore (signalled with the frame number on each of wgpu's per-frame submits)
+/// to learn the highest frame the GPU has actually finished — with no fixed
+/// assumption about frames-in-flight, so any present mode / frame latency is sound
+/// (see [`RiveSharedHandles::frame_sync_sema`]).
+///
+/// This constant is the fallback used only when timeline semaphores are unavailable:
+/// `safe_frame = current - RIVE_RING_SIZE`, correct **only while frames-in-flight ≤
+/// RIVE_RING_SIZE**. Bevy's default surface (Fifo / AutoVsync,
+/// `desired_maximum_frame_latency` 2 → a 3-image swapchain) caps the CPU at ~3 frames
+/// ahead, matching the ring; non-Fifo present modes (Immediate / Mailbox /
+/// AutoNoVsync) or a higher latency break it, so in the fallback the node emits a
+/// one-shot warning and `RIVE_BLOCKING=1` is the safe escape hatch. Must match rive's
 /// `kBufferRingSize`.
 const RIVE_RING_SIZE: u64 = 3;
 
@@ -341,6 +344,18 @@ struct RiveSharedHandles {
     /// fence instead of the default non-blocking record-into-wgpu path. Kept as a
     /// selectable fallback and an A/B baseline measurable on a single build.
     blocking_submit: bool,
+    /// M2b: handle (as `u64`) of our own Vulkan **timeline** semaphore, or `0` if
+    /// unavailable. When nonzero, the node signals it with the frame number on each
+    /// of wgpu's per-frame submits and reads its counter as the EXACT, non-blocking
+    /// GPU-completion watermark for rive's resource recycling — which removes the M2a
+    /// "≤ ring frames in flight" precondition entirely. `0` (the blocking path, or a
+    /// device without timeline semaphores) falls back to `frame - RIVE_RING_SIZE`.
+    ///
+    /// Created once (device-lifetime) and **intentionally never destroyed**: it is a
+    /// single semaphore for the whole app, and a `vkDestroySemaphore` at drop would
+    /// reintroduce exactly the teardown-ordering / drop-time device access the M1b
+    /// close-out removed. The device outlives it; the OS reclaims it at process exit.
+    frame_sync_sema: u64,
 }
 
 /// Per-entity native render state (one rive instance bound to one shared texture).
@@ -508,6 +523,11 @@ struct PerfStats {
     frame_fence_us: Vec<f64>,
     /// Per-frame rive GPU command-buffer total, summed over instances.
     frame_gpu_ms: Vec<f64>,
+    /// M2b diagnostic — per-frame CPU run-ahead = `current_frame - safe_frame` (frames
+    /// submitted but not yet GPU-complete). Correlates flush growth/variance with how
+    /// far the CPU outruns GPU completion. Real with the exact timeline watermark;
+    /// ≈ constant `RIVE_RING_SIZE` with the fixed-ring fallback.
+    frame_run_ahead: Vec<f64>,
     summarized: bool,
 }
 
@@ -521,6 +541,7 @@ impl PerfStats {
         flush_us: f64,
         fence_us: f64,
         gpu_ms: Option<f64>,
+        run_ahead: f64,
     ) {
         if !self.enabled || self.summarized {
             return;
@@ -533,6 +554,7 @@ impl PerfStats {
         self.frame_cpu_us.push(cpu_us);
         self.frame_flush_us.push(flush_us);
         self.frame_fence_us.push(fence_us);
+        self.frame_run_ahead.push(run_ahead);
         if let Some(ms) = gpu_ms {
             self.frame_gpu_ms.push(ms);
         }
@@ -547,9 +569,11 @@ impl PerfStats {
         let flush = Summary::of(&self.frame_flush_us);
         let fence = Summary::of(&self.frame_fence_us);
         let gpu = Summary::of(&self.frame_gpu_ms);
+        let run_ahead = Summary::of(&self.frame_run_ahead);
         info!(
             "rive zero-copy PERF (frames={}, instances={}): frame CPU [us] {} | \
-             rive flush [us] {} | fence wait [us] {} | rive GPU [ms] {}",
+             rive flush [us] {} | fence wait [us] {} | rive GPU [ms] {} | \
+             run-ahead [frames] {}",
             cpu.n,
             self.instances,
             cpu.fmt_us(),
@@ -560,6 +584,7 @@ impl PerfStats {
             } else {
                 "unavailable".to_string()
             },
+            run_ahead.fmt_us(),
         );
     }
 }
@@ -815,6 +840,53 @@ fn extract_shared_handles_once(
         // selects the M1b blocking submit+fence (fallback / A-B baseline).
         let blocking_submit = std::env::var_os("RIVE_BLOCKING").is_some();
 
+        // M2b: for the non-blocking path, create our own Vulkan TIMELINE semaphore to
+        // get an EXACT, non-blocking GPU-completion watermark. wgpu signals it with the
+        // frame number on each per-frame submit (see the node), so reading its counter
+        // tells rive precisely which frames' transient buffers are free to recycle,
+        // removing the M2a "≤ ring frames in flight" precondition. Falls back to `0`
+        // (fixed `frame - RIVE_RING_SIZE`) for the blocking path, a device lacking
+        // timeline semaphores (Vulkan 1.2 core / VK_KHR_timeline_semaphore), or the
+        // `RIVE_NO_WATERMARK` A/B knob (forces the fixed-ring path on one build, to
+        // measure the watermark's effect on rive's flush — M2b Step 2).
+        let frame_sync_sema = if blocking_submit || std::env::var_os("RIVE_NO_WATERMARK").is_some()
+        {
+            0
+        } else {
+            // Query support first — using a timeline semaphore without the feature is
+            // UB. (features2 is Vulkan 1.1 core; wgpu's instance is ≥ 1.1 on desktop.)
+            let mut ts_features = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+            {
+                let mut features2 =
+                    vk::PhysicalDeviceFeatures2::default().push_next(&mut ts_features);
+                inst_shared
+                    .raw_instance()
+                    .get_physical_device_features2(vk_phys, &mut features2);
+            }
+            if ts_features.timeline_semaphore == vk::TRUE {
+                let mut type_info = vk::SemaphoreTypeCreateInfo::default()
+                    .semaphore_type(vk::SemaphoreType::TIMELINE)
+                    .initial_value(0);
+                let create_info = vk::SemaphoreCreateInfo::default().push_next(&mut type_info);
+                match dev_g.raw_device().create_semaphore(&create_info, None) {
+                    Ok(sema) => sema.as_raw(),
+                    Err(e) => {
+                        warn!(
+                            "rive zero-copy: timeline semaphore create failed ({e:?}); \
+                             falling back to the fixed frame-ring watermark"
+                        );
+                        0
+                    }
+                }
+            } else {
+                info!(
+                    "rive zero-copy: device lacks timeline semaphores; using the fixed \
+                     frame-ring watermark (vsync-bounded surface assumed — see RIVE_RING_SIZE)"
+                );
+                0
+            }
+        };
+
         RiveSharedHandles {
             instance: vk_instance.as_raw(),
             physical_device: vk_phys.as_raw(),
@@ -829,6 +901,7 @@ fn extract_shared_handles_once(
             perf_enabled,
             perf_target,
             blocking_submit,
+            frame_sync_sema,
         }
     };
 
@@ -1011,6 +1084,38 @@ impl Node for RiveFillNode {
         // the frame's GPU total is not reported (avoids undercounting).
         let mut frame_gpu_ok = true;
 
+        // M2b: the resource-recycle watermark for this frame, shared by every instance
+        // and by both submit paths (so the run-ahead metric reflects the real value).
+        // Three cases:
+        //  * blocking (M1b): the per-frame fence proves the prior frame finished, so
+        //    `frame_no - 1` is exact.
+        //  * non-blocking + timeline semaphore (M2b default): read the EXACT highest
+        //    frame whose submit has completed on the GPU (non-blocking) — this is what
+        //    removes the M2a "≤ ring frames in flight" precondition.
+        //  * non-blocking fallback (no timeline semaphore): the fixed ring offset,
+        //    sound only under a vsync-bounded surface (see RIVE_RING_SIZE).
+        let watermark_sema = vk::Semaphore::from_raw(handles.frame_sync_sema);
+        let watermark_active = !blocking && handles.frame_sync_sema != 0;
+        let safe_frame = if blocking {
+            frame_no.saturating_sub(1)
+        } else if watermark_active {
+            // SAFETY: `as_hal` yields wgpu's Vulkan device for the call only (guard not
+            // stored); reading a timeline semaphore's counter is a non-blocking query
+            // with no aliasing. `watermark_sema` is our own live timeline semaphore.
+            let completed = unsafe {
+                render_device.wgpu_device().as_hal::<Vk>().and_then(|d| {
+                    d.raw_device()
+                        .get_semaphore_counter_value(watermark_sema)
+                        .ok()
+                })
+            }
+            .unwrap_or(0);
+            // A frame's own work cannot be complete before it is even submitted.
+            completed.min(frame_no.saturating_sub(1))
+        } else {
+            frame_no.saturating_sub(RIVE_RING_SIZE)
+        };
+
         for item in &frame_items {
             let entity = item.entity;
             // Instantiate native objects + shared texture on first sight. Building
@@ -1068,7 +1173,8 @@ impl Node for RiveFillNode {
             let submit_res = if blocking {
                 let submit = ExternalFrameSubmit {
                     current_frame: frame_no,
-                    safe_frame: frame_no.saturating_sub(1),
+                    // blocking case of the unified watermark above (= frame_no - 1).
+                    safe_frame,
                     queue,
                 };
                 // SAFETY: `queue` is wgpu's graphics VkQueue on this context's device;
@@ -1085,10 +1191,9 @@ impl Node for RiveFillNode {
             } else {
                 let record = ExternalFrameRecord {
                     current_frame: frame_no,
-                    // No fence proves GPU completion, so a frame's resources are safe
-                    // to recycle only once it has finished; trail by rive's ring size
-                    // (frames-in-flight bounded by the vsync surface).
-                    safe_frame: frame_no.saturating_sub(RIVE_RING_SIZE),
+                    // M2b: the exact GPU-completion watermark (or fixed-ring fallback),
+                    // computed once above for the whole frame.
+                    safe_frame,
                     command_buffer: cmd_buffer,
                 };
                 // SAFETY: `cmd_buffer` is wgpu's open buffer on this context's device;
@@ -1187,12 +1292,15 @@ impl Node for RiveFillNode {
         // when work actually ran — so warm-up / `seen` count real frames, not the
         // empty early node calls before the asset + display image are ready.
         if frame_instances > 0 {
+            // run-ahead = frames submitted but not yet GPU-complete (current - safe).
+            let run_ahead = frame_no.saturating_sub(safe_frame) as f64;
             perf.record_frame(
                 frame_instances,
                 frame_cpu_us,
                 frame_flush_us,
                 frame_fence_us,
                 frame_gpu_ok.then_some(frame_gpu_ms),
+                run_ahead,
             );
         }
 
@@ -1209,8 +1317,10 @@ impl Node for RiveFillNode {
                 handles.clockwise,
                 if blocking {
                     "blocking (M1b submit+fence)"
+                } else if watermark_active {
+                    "non-blocking + timeline-semaphore watermark (M2b, exact)"
                 } else {
-                    "non-blocking (M2a record-into-wgpu)"
+                    "non-blocking + fixed ring-offset watermark (M2a fallback)"
                 },
                 if ctx.last_gpu_ms().is_some() {
                     "available"
@@ -1218,13 +1328,16 @@ impl Node for RiveFillNode {
                     "unavailable"
                 },
             );
-            // M2a sync guard: the non-blocking watermark (safe_frame = current -
-            // RIVE_RING_SIZE) is sound only while frames-in-flight ≤ RIVE_RING_SIZE.
-            // Warn (once) if the live window config could exceed that — a non-vsync
-            // present mode, or a frame latency past the ring — since rive would then
-            // recycle a pooled buffer the GPU is still reading (silent corruption).
-            // RIVE_BLOCKING=1 is the safe fallback. See RIVE_RING_SIZE.
-            if !blocking {
+            // Sync guard — only meaningful in the FIXED-RING fallback. M2b's exact
+            // timeline-semaphore watermark proves GPU completion regardless of frames
+            // in flight, so when it is active there is no present-mode precondition and
+            // no warning. We only reach here in the fallback (timeline semaphores
+            // unavailable), where `safe_frame = current - RIVE_RING_SIZE` is sound only
+            // while frames-in-flight ≤ RIVE_RING_SIZE: warn (once) if the live window
+            // config could exceed that (non-vsync present mode, or latency past the
+            // ring) — else rive could recycle a buffer the GPU still reads (silent
+            // corruption). RIVE_BLOCKING=1 is the safe fallback. See RIVE_RING_SIZE.
+            if !blocking && !watermark_active {
                 if let Some(windows) = world.get_resource::<ExtractedWindows>() {
                     for w in windows.windows.values() {
                         let vsync = matches!(
@@ -1258,6 +1371,22 @@ impl Node for RiveFillNode {
         let live: std::collections::HashSet<Entity> =
             frame_items.iter().map(|x| x.entity).collect();
         instances.retain(|e, _| live.contains(e));
+
+        // M2b: arm this frame's GPU-completion signal. `add_signal_semaphore` appends
+        // (sema, frame_no) to wgpu-hal's per-queue signal list, which THIS frame's
+        // single graph submit drains (the render graph records every node, then submits
+        // exactly once — so nothing else submits in between). The timeline therefore
+        // reaches `frame_no` precisely when this frame's recorded rive work completes on
+        // the GPU; a later frame reads that as the exact `safe_frame` above. `frame_no`
+        // is monotonic, satisfying the timeline rule that signalled values increase.
+        if watermark_active {
+            // SAFETY: the render queue is wgpu's graphics VkQueue on this device; we
+            // only append a signal value (interior-mutex) and never submit or own it.
+            // The hal guard is dropped immediately and never stored.
+            if let Some(q) = unsafe { world.resource::<RenderQueue>().as_hal::<Vk>() } {
+                q.add_signal_semaphore(watermark_sema, Some(frame_no));
+            }
+        }
 
         Ok(())
     }

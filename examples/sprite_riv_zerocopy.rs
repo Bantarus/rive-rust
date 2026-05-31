@@ -29,6 +29,7 @@
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::window::PresentMode;
 use bevy::winit::WinitSettings;
 
 use bevy_rive::{
@@ -110,6 +111,17 @@ fn main() {
         target.saturating_add(150)
     });
 
+    // M2b correctness knob: select the swapchain present mode to exercise the GPU
+    // completion watermark under CPU run-ahead. Default Fifo (vsync) matches the M2a
+    // measurements; Immediate / Mailbox let the CPU outrun the GPU past rive's ring,
+    // which only the M2b timeline-semaphore watermark (not the fixed offset) handles.
+    let present_mode = match std::env::var("RIVE_PRESENT_MODE").ok().as_deref() {
+        Some("immediate") => PresentMode::Immediate,
+        Some("mailbox") => PresentMode::Mailbox,
+        Some("fifo_relaxed") => PresentMode::FifoRelaxed,
+        _ => PresentMode::Fifo,
+    };
+
     let asset_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../assets").to_string();
 
     let mut app = App::new();
@@ -123,6 +135,15 @@ fn main() {
         DefaultPlugins
             .set(AssetPlugin {
                 file_path: asset_path,
+                ..default()
+            })
+            // M2b: drive the primary window's present mode from RIVE_PRESENT_MODE so we
+            // can validate the watermark under non-Fifo (CPU-run-ahead) configurations.
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    present_mode,
+                    ..default()
+                }),
                 ..default()
             })
             // CORRECTNESS-TIER CHOICE (deliberate, reversible): disable pipelined

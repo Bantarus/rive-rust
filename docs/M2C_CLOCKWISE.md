@@ -10,9 +10,13 @@ move wall-clock? **(3)** does the ≤1 LSB equivalence hold beyond the octopus? 
 - **Wall-clock win band is N ≈ 32–128** (+13 % fps at N=32, +8 % at N=128, Step 2) — exactly where the
   M2b run-ahead metric climbs to 2 (GPU-leaning). At N=1–8 (run-ahead=1, CPU/overhead-bound) it is
   wall-clock-neutral, but still CPU-cheaper (head-room that matters off the hot path).
-- **Output is ≤1 LSB vs atomics on diverse content** (octopus *and* coffee), alpha exactly identical,
-  with **zero interop VUIDs / sync-hazards** under core+sync validation on both the native NVIDIA ICD
-  (clockwise) and Dozen (the atomics fallback).
+- **Output matches atomics to within coverage/AA quantization across 7 assets**, alpha exactly identical
+  and every pair visually identical. The delta is byte-identical-to-≤4 LSB spread across gradients
+  (cloner 0; coffee/octopus ≤1; draworder/eye ≤2; big-wheel ≤4), rising to ≤55 LSB on **0.039 %** of the
+  slot-machine frame (thin high-contrast antialiased edges only). The shipped **clockwise** path is
+  **validation-clean (zero interop VUIDs / sync-hazards)** under core+sync validation on every asset on the
+  native NVIDIA ICD. Both PLS modes are rive-correct; the divergence is accepted as a precision property of
+  the two fill algorithms (decision in Step 3).
 
 Because clockwise is free-or-better on CPU, positive on throughput, and correct, M2c makes it the
 **capability-gated default**: on wherever rive's clockwise path is the best available (pixel interlock
@@ -70,23 +74,58 @@ GPU-leaning band with a measured throughput A/B.
 
 Frozen pose (`RIVE_SPEED=0`), clockwise vs atomics, under **core + synchronization validation**
 (`WGPU_VALIDATION=1` + a layer-settings file; the `SYNCHRONIZATION_VALIDATION` banner is confirmed
-present in every log). The native NVIDIA ICD runs clockwise; Dozen (no interlock) exercises the atomics
-fallback.
+present in every log). **Seven assets** (the original two + five later-supplied demos spanning scripted
+path effects, an interactive rig, gradient-heavy painted artwork, and a draw-order animation). The native
+NVIDIA ICD runs clockwise; Dozen (no interlock) exercises the atomics fallback. Same-mode re-captures are
+0-delta, so cross-mode deltas are stable fill-algorithm precision, not run-to-run noise.
 
-| content | clockwise vs atomics (native) | interop VUIDs | sync-hazards |
-|---|---|--:|--:|
-| octopus_loop (transparency, gradients, many paths) | per-channel max Δ **1 LSB**, alpha **identical**, 149/921600 px differ | 0 | 0 |
-| coffee_loader (loader animation) | per-channel max Δ **1 LSB**, alpha **identical**, 32/921600 px differ | 0 | 0 |
+| content | clockwise vs atomics (native) | native validation |
+|---|---|---|
+| cloner-scripted-path-effect | max Δ **0** — **byte-identical** | clean |
+| coffee_loader (loader) | max Δ **1 LSB**, α identical, 32 px (0.003 %) | clean |
+| octopus_loop (transparency, gradients) | max Δ **1 LSB**, α identical, 149 px (0.02 %) | clean |
+| animating-draw-order | max Δ **2 LSB**, α identical, 213 px (0.02 %) | clean |
+| eye-joysticks-demo | max Δ **2 LSB**, α identical, 22442 px (2.4 %) | clean |
+| big-wheel-demo (gradient-heavy) | max Δ **4 LSB**, α identical, 121969 px (13.2 %) | clean |
+| slot-machine (painted art, thin edges) | max Δ **55 LSB** but **0.039 % px** (96.2 % identical, 3.68 % at 1–2 LSB), α identical | clean |
 
-The only native VUID is the known naga/Bevy `VUID-StandaloneSpirv-None-10684` (matrix shaders, not ours —
-characterised in the M2 gate). The Dozen atomics-fallback path is likewise clean (only the known
-wgpu-internal Dozen cubemap `imageOffset-07738`); default and `RIVE_FORCE_ATOMIC` produce byte-identical
-Dozen output. **The ≤1 LSB equivalence is a rounding difference in the different fill algorithm, not a
-sync/correctness defect — confirmed on both available assets.**
+The divergence is **coverage / antialiasing quantization** between the two fill algorithms: ≤1–4 LSB
+spread across smooth gradient backgrounds, rising to tens of LSB on a **tiny fraction of thin
+high-contrast antialiased edges** (the slot-machine: 361 px / 0.039 % in the 33–64 LSB band, localized by
+heatmap to the slot outline / stars / arrow / a UI divider — *not* a structural defect or a shifted pose).
+Every rendered pair is **visually identical** and alpha is **exactly** identical. The shipped **clockwise
+default is validation-clean on every asset** (only VUID is the known non-ours naga
+`VUID-StandaloneSpirv-None-10684`). Notably the draw-order animation diffs at only ≤2 LSB — the PLS mode
+does not change element z-ordering.
 
-> Coverage note: only `octopus_loop.riv` and `coffee_loader.riv` ship in-repo. They span transparency,
-> gradients, and many paths, but a wider clip/mask-heavy set would strengthen the insurance. Drop more
-> `.riv` into `assets/` to extend this diff — the harness is content-agnostic (`RIVE_RIV=<file>`).
+**Decision:** the divergence exceeds the milestone's strict ≤1 LSB "pure rounding" bar (up to 55 LSB on
+the slot-machine), so it was raised explicitly — **twice**, as the magnitude grew with added assets.
+**Resolution (confirmed): keep clockwise as the default** — it is rive's own preferred path on interlock
+HW, both PLS modes are rive-correct, and the difference is imperceptible (visually identical side-by-side;
+the high-LSB pixels are sub-pixel edge antialiasing on <0.04 % of the frame), alpha-exact, and
+validation-clean. The divergence is accepted as a known precision property of the clockwise vs atomic fill
+algorithms.
+
+### A pre-existing atomic-fallback finding (Dozen, heavy content) — NOT the shipped default
+
+Validating the **atomics fallback** on Dozen surfaced `SYNC-HAZARD` errors on **rive's own internal
+atomic-PLS coverage storage image** (`STORAGE_IMAGE`, binding #3, `IMAGE_LAYOUT_GENERAL`; named "atomic
+coverage backing" in the debug build) — read/write across draws with no barrier
+(`SYNC_FRAGMENT_SHADER_SHADER_STORAGE` READ-after-WRITE and WRITE-after-READ). It appears **only on the two
+richest assets** (big-wheel 240×, slot-machine 540×) and is **absent on the five simpler ones**
+(cloner/octopus/coffee/eye/draworder). It is **entirely inside rive's flush, not our zero-copy interop** —
+no hazard names our shared `VkImage`/display image; the `COLOR→SHADER_READ` barrier and timeline semaphore
+are uninvolved. Root cause, characterised: it fires **only on Dozen's D3D12-translated atomic execution +
+heavy overlapping fills** — on the native 4090 it is **absent in every configuration** (clockwise,
+`RIVE_NO_CLOCKWISE` atomics, and `RIVE_FORCE_ATOMIC` atomics: all 0 hazards). So it is **not** on the
+shipped clockwise default, **not** on any native path, and **not** introduced by M2c (the atomic-path code
+is unchanged). It is a rive-upstream atomic-fallback property; see Follow-ups.
+
+Two further build/asset notes (orthogonal to M2c): the slot-machine trips a rive **debug-only** assert in
+its asset importer (`file_asset_importer.cpp` `onFileAssetContents !m_content`, on the demo's embedded file
+assets) — so it aborts under the **debug** Dozen build but loads + renders fine in **release** (native and
+Dozen). And `rc=1` on the validation-enabled Dozen cells is a validation-error-on-exit artifact of the
+known Dozen cubemap VUID — renders completed and captured correctly.
 
 ## Step 4 — exposure: the capability-gated default
 
@@ -134,10 +173,12 @@ change; the frozen ECS API is untouched.
 
 ## Guardrails honoured
 
-- **Correctness over perf.** Clockwise diverges from atomics by ≤1 LSB (alpha identical) on every tested
-  content, and trips zero VUIDs / sync-hazards under core+sync validation on native and Dozen — so it is
-  safe to default. Had it diverged beyond rounding or tripped a hazard, the default would have stayed
-  atomics.
+- **Correctness over perf.** The shipped **clockwise default** is validation-clean (zero interop VUIDs /
+  sync-hazards) on every asset on the native deploy hardware. Clockwise diverges from atomics by ≤4 LSB on
+  gradient-heavy content — beyond the strict ≤1 LSB bar — so per the guardrail this was **raised
+  explicitly** rather than waved through; the decision to keep clockwise (imperceptible, alpha-exact,
+  rive's own preferred path) was made deliberately, not by default. The one sync-hazard found is in rive's
+  **atomic fallback** on Dozen only (rive-internal, not our interop, not the default path) — see Step 3.
 - **Numbers/attestations trace to artifacts** — `docs/perf/m2c_perf_raw.txt`, `docs/perf/m2c_validation.txt`.
 - The frozen ECS API and the M1a CPU-copy floor are untouched.
 
@@ -145,4 +186,9 @@ change; the frozen ECS API is untouched.
 
 - The raster-order PLS mode (`VK_EXT_rasterization_order_attachment_access`) is still unexercised — the
   4090 doesn't advertise it, so rive never selects it. Needs other hardware (carried over from the M2 gate).
-- Wider, clip/mask-heavy `.riv` coverage for the content diff (see the Step 3 coverage note).
+- **rive atomic-fallback sync-hazard on no-interlock HW + heavy content** (Step 3): rive's atomic-PLS
+  coverage read-after-write trips `SYNC-HAZARD-READ-AFTER-WRITE` on Dozen's D3D12-translated execution
+  (big-wheel demo). Absent on the native 4090 in every config. Worth a rive-upstream look at the atomic
+  path's barriering, and confirmation on real (conformant) no-interlock hardware — unavailable here.
+- Wider clip/mask-heavy `.riv` coverage would extend the content diff further (the harness is
+  `RIVE_RIV=<file>`-agnostic).

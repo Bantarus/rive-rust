@@ -325,15 +325,18 @@ struct RiveSharedHandles {
     features: VulkanFeatures,
     /// Whether an interlock extension was enabled (diagnostics / expected tier).
     interlock: bool,
-    /// Force rive's atomic PLS path (`RIVE_FORCE_ATOMIC` env). Needed on devices
-    /// that *advertise* `VK_EXT_fragment_shader_interlock` but cannot execute it
-    /// — e.g. WSL2's Mesa Dozen (Vulkan→D3D12), where the interlock path is
-    /// `VK_ERROR_DEVICE_LOST` on submit. Native NVIDIA Vulkan runs interlock fine,
-    /// so this is a dev/test escape hatch, not the production path.
+    /// Force rive's atomic PLS path (`RIVE_FORCE_ATOMIC` env): clears the interlock
+    /// feature flags so rive never records interlock commands. An A/B / escape-hatch
+    /// knob — to force atomics on interlock-capable HW, or for a hypothetical device
+    /// that *advertises* interlock but cannot execute it. (WSL2's Mesa Dozen does NOT
+    /// advertise `VK_EXT_fragment_shader_interlock` — pixel=raster=false there — so it
+    /// already selects atomics via the capability gate without this flag.)
     force_atomic: bool,
-    /// M2.0 perf lever (`RIVE_CLOCKWISE` env): opt into rive's per-frame
-    /// `clockwiseFillOverride`. On desktop NVIDIA (no raster-order ext) the default
-    /// path is atomics; this asks for the clockwise path instead, for an A/B.
+    /// Whether to request rive's per-frame `clockwiseFillOverride` (the clockwise PLS
+    /// path). M2c default = `pixel && !raster` (capability-gated: on wherever pixel
+    /// interlock is available and raster-order is not), because clockwise is CPU-cheaper
+    /// AND throughput-positive there with ≤1 LSB output. Overridable: `RIVE_CLOCKWISE`
+    /// forces it on, `RIVE_NO_CLOCKWISE` forces atomics (the A/B baseline).
     clockwise: bool,
     /// M2.0 perf instrumentation (`RIVE_PERF` env): collect per-frame CPU/GPU
     /// timings and log a median+percentile summary after `perf_target` frames.
@@ -558,6 +561,14 @@ struct PerfStats {
     /// far the CPU outruns GPU completion. Real with the exact timeline watermark;
     /// ≈ constant `RIVE_RING_SIZE` with the fixed-ring fallback.
     frame_run_ahead: Vec<f64>,
+    /// M2c Step 2 — per-frame wall-clock period [us] between consecutive *measured*
+    /// (post-warm-up) frames. Under a run-ahead-permitting present mode (Immediate,
+    /// no vsync) this is the sustained-throughput indicator (fps = 1e6 / period);
+    /// under Fifo it is pinned at the display refresh interval and not meaningful.
+    frame_period_us: Vec<f64>,
+    /// Wall-clock instant of the previous measured frame, to diff into
+    /// `frame_period_us`. `None` until the first post-warm-up frame seeds it.
+    last_frame_at: Option<std::time::Instant>,
     summarized: bool,
 }
 
@@ -580,6 +591,14 @@ impl PerfStats {
         if self.seen <= self.warmup {
             return;
         }
+        // M2c Step 2: sample the steady-state wall-clock frame period → sustained
+        // throughput. The first measured frame only seeds the reference instant.
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_frame_at {
+            self.frame_period_us
+                .push(now.duration_since(prev).as_secs_f64() * 1e6);
+        }
+        self.last_frame_at = Some(now);
         self.instances = instances;
         self.frame_cpu_us.push(cpu_us);
         self.frame_flush_us.push(flush_us);
@@ -600,10 +619,18 @@ impl PerfStats {
         let fence = Summary::of(&self.frame_fence_us);
         let gpu = Summary::of(&self.frame_gpu_ms);
         let run_ahead = Summary::of(&self.frame_run_ahead);
+        let period = Summary::of(&self.frame_period_us);
+        // Sustained throughput from the steady-state period (Immediate/no-vsync only;
+        // under Fifo this is pinned at the refresh rate).
+        let fps_p50 = if period.p50 > 0.0 {
+            1e6 / period.p50
+        } else {
+            0.0
+        };
         info!(
             "rive zero-copy PERF (frames={}, instances={}): frame CPU [us] {} | \
              rive flush [us] {} | fence wait [us] {} | rive GPU [ms] {} | \
-             run-ahead [frames] {}",
+             run-ahead [frames] {} | frame period [us] {} | fps(p50)={:.1}",
             cpu.n,
             self.instances,
             cpu.fmt_us(),
@@ -615,6 +642,8 @@ impl PerfStats {
                 "unavailable".to_string()
             },
             run_ahead.fmt_us(),
+            period.fmt_us(),
+            fps_p50,
         );
     }
 }
@@ -866,7 +895,27 @@ fn extract_shared_handles_once(
         features.api_version = 0x0040_1000;
 
         // M2.0 perf knobs (read once at handle extraction).
-        let clockwise = std::env::var_os("RIVE_CLOCKWISE").is_some();
+        // M2c: capability-gated clockwise default. rive's clockwise PLS path needs
+        // pixel interlock; where it's available — AND raster-order is not, since rive
+        // prefers the cleaner RasterOrdering when that ext is present — clockwise is
+        // strictly-better-or-neutral: lower rive CPU + flush at every N (Step 1) and
+        // +8–13% sustained throughput in the GPU-leaning N≈32–128 band (Step 2), with
+        // ≤1 LSB / alpha-identical output vs atomics (Step 3, octopus + coffee). So
+        // default it wherever `pixel && !raster`. Overrides (kept for A/B + forcing
+        // either path):
+        //   RIVE_NO_CLOCKWISE → atomics on an interlock device (the Step-1/2 A/B baseline)
+        //   RIVE_CLOCKWISE    → force clockwise on
+        //   RIVE_FORCE_ATOMIC → clears `pixel`/`raster` above (and suppresses the exts)
+        // Non-interlock devices fall back to atomics automatically with no flag: Dozen
+        // advertises neither ext (pixel=raster=false — verified VUID/hazard-clean), as
+        // does older HW.
+        let clockwise = if std::env::var_os("RIVE_NO_CLOCKWISE").is_some() {
+            false
+        } else if std::env::var_os("RIVE_CLOCKWISE").is_some() {
+            true
+        } else {
+            pixel && !raster
+        };
         let perf_enabled = std::env::var_os("RIVE_PERF").is_some();
         let perf_target = std::env::var("RIVE_PERF_FRAMES")
             .ok()

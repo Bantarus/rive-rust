@@ -1,0 +1,34 @@
+M2c Step 3 — broader-content correctness + validation attestation
+================================================================
+
+## Native RTX 4090 (release + WGPU_VALIDATION=1, core+sync validation, frozen pose RIVE_SPEED=0)
+Clockwise-vs-atomics pixel diff (the different fill algorithm), 1280x720 RGBA:
+  cap_m2c_octopus_loop_atomic.png vs cap_m2c_octopus_loop_clockwise.png: BYTE-IDENTICAL | size=(1280, 720) | per-channel max delta R/G/B/A=[1, 1, 1, 0] | max_channel_delta=1 | differing_pixels=149/921600 (0.0162%)
+  cap_m2c_coffee_loader_atomic.png vs cap_m2c_coffee_loader_clockwise.png: BYTE-IDENTICAL | size=(1280, 720) | per-channel max delta R/G/B/A=[1, 1, 1, 0] | max_channel_delta=1 | differing_pixels=32/921600 (0.0035%)
+  (NOTE: 'BYTE-IDENTICAL' label is a PIL getbbox RGBA artifact when alpha-delta=0;
+   authoritative = max_channel_delta=1 LSB, differing_pixels count. alpha exactly identical.)
+
+Validation per cell (native): only VUID is naga/Bevy VUID-StandaloneSpirv-None-10684 (not ours)
+  v_native_coffee_loader_atomic.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0
+  v_native_coffee_loader_clockwise.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0
+  v_native_octopus_loop_atomic.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0
+  v_native_octopus_loop_clockwise.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0
+
+## Dozen (WSL2, debug + WGPU_VALIDATION=1, core+sync validation) — atomics FALLBACK path
+Capability gate auto-selects atomics: device-create callback logs raster=false, pixel=false
+(Dozen does NOT advertise VK_EXT_fragment_shader_interlock), so PLS=Atomics with NO flag needed.
+default == RIVE_FORCE_ATOMIC byte-identical: 1 distinct md5 (1=identical)
+  v_dozen_default_coffee.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0 (only VUID = known Dozen cubemap imageOffset-07738)
+  v_dozen_default_octopus.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0 (only VUID = known Dozen cubemap imageOffset-07738)
+  v_dozen_forceatomic_octopus.log: syncValOn=1 SYNC-HAZARDs=0 interopVUIDs=0 (only VUID = known Dozen cubemap imageOffset-07738)
+
+## Step 4 — capability-gated default verification (default = pixel && !raster)
+Native RTX 4090 (release), frozen octopus. Refs: atomic=1de62920, clockwise=d5294a72.
+  default (no flags)   -> PLS=Clockwise md5=d5294a72  (default flipped to clockwise; == explicit clockwise)
+  RIVE_NO_CLOCKWISE=1  -> PLS=Atomics   md5=1de62920  (A/B baseline; == explicit atomics)
+  RIVE_CLOCKWISE=1     -> PLS=Clockwise md5=d5294a72  (force-on still works)
+Dozen (WSL2, debug):
+  default (no flags)   -> PLS=Atomics, callback raster=false pixel=false
+                          (capability gate auto-selects atomics; no flag, no crash, no regression)
+DoD: capability-driven default OK; atomics fallback (Dozen) OK; flags force either path OK;
+     default-path output byte-identical to the clockwise reference.

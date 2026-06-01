@@ -3,9 +3,10 @@
 //! (zero copy — no per-frame CPU readback), via the `bevy-rive` `zero_copy` tier.
 //!
 //! Build/run requires the `zero_copy` feature **and native Vulkan** (set
-//! `WGPU_BACKEND=vulkan`). On a GPU with `VK_EXT_fragment_shader_interlock`
-//! (e.g. NVIDIA) rive runs its clean raster-order PLS path; elsewhere it falls
-//! back to the atomic path (still correct).
+//! `WGPU_BACKEND=vulkan`). PLS path is capability-gated (M2c): raster-order
+//! (`VK_EXT_rasterization_order_attachment_access`) if present, else clockwise where
+//! pixel interlock (`VK_EXT_fragment_shader_interlock`, e.g. NVIDIA desktop) is
+//! available, else the atomic fallback (all correct).
 //!
 //!   WGPU_BACKEND=vulkan cargo run -p bevy-rive --features zero_copy \
 //!       --example sprite_riv_zerocopy
@@ -17,6 +18,9 @@
 //!   RIVE_INSTANCES=N              spawn N independent rive instances in a grid
 //!                                 (default 1) — the M2a multi-instance perf regime;
 //!                                 each renders into its own shared VkImage + sprite.
+//!   RIVE_NO_CLOCKWISE=1           force the atomic PLS path (M2c default is clockwise
+//!                                 wherever pixel interlock is available); RIVE_CLOCKWISE=1
+//!                                 forces clockwise; RIVE_FORCE_ATOMIC=1 suppresses interlock.
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the

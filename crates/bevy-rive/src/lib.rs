@@ -1,6 +1,38 @@
 //! `bevy-rive` — a Bevy plugin that drives the **native Rive Renderer** to fill a
 //! Bevy [`Image`] every frame; display it with a `Sprite`.
 //!
+//! # Consuming `bevy-rive` (tiers & setup)
+//!
+//! The whole public surface is [`prelude`]. Two render tiers, selected by feature:
+//!
+//! - **`floor`** (default) — the CPU-copy bridge: a near-drop-in plugin with NO
+//!   `ash`, NO `wgpu-hal`, NO exact-wgpu pin and NO `as_hal` code, depending only on a
+//!   caret `bevy = "0.18"`. The standard three-step third-party flow:
+//!   ```no_run
+//!   use bevy::prelude::*;
+//!   use bevy_rive::prelude::*;
+//!   # let _ = |app: &mut App, handle: Handle<RiveFile>, commands: &mut Commands| {
+//!   app.add_plugins(RivePlugin);                       // 1. add the plugin
+//!   commands.spawn((RiveAnimation::new(handle),        // 2. spawn the components
+//!                   RiveTarget::new(512, 512)));
+//!   // 3. once the plugin writes `target.image` back, display it with a `Sprite`.
+//!   # };
+//!   ```
+//!
+//! - **`zero_copy`** (opt-in; **version-LOCKED**) — the Vulkan fast path (a shared
+//!   `VkImage`, no per-frame readback). It is ABI-locked to **Bevy 0.18.1 / wgpu 27.0.1
+//!   / wgpu-hal 27.0.4 / ash 0.38** by exact Cargo pins, so a mismatched host wgpu is a
+//!   *resolver error naming the versions*, never a silent `as_hal` corruption (see
+//!   `build.rs` + [`RiveZeroCopyPlugin`]). Setup is heavier and host-coupled:
+//!   1. `bevy_rive::install_interlock_device_callback(&mut app)` **before** `DefaultPlugins`;
+//!   2. `add_plugins(RiveZeroCopyPlugin::default())` instead of `RivePlugin` — a pure-3D
+//!      scene (`Camera3d`, no `Camera2d`) needs `RiveZeroCopyPlugin::anchored(RiveGraphAnchor::Core3d)`,
+//!      since the fill node only runs in a sub-graph a camera targets (default is `Both`);
+//!   3. build `DefaultPlugins.disable::<PipelinedRenderingPlugin>()`;
+//!   4. run on the Vulkan backend (`WGPU_BACKEND=vulkan`, until the D3D12 port).
+//!
+//!   Treat every Bevy bump as a deliberate zero-copy re-validation, never a `cargo update`.
+//!
 //! # Milestone 1a — the CPU-copy bridge (the universal fallback tier)
 //!
 //! The native renderer renders a `.riv`'s state machine to its own offscreen
@@ -59,22 +91,61 @@
 //! rive's premultiplied bytes (it cannot un-premultiply), so the alpha convention
 //! is per-tier — see `docs/M1A_REPORT.md`.
 
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use bevy::asset::io::Reader;
-use bevy::asset::{Asset, AssetLoader, LoadContext, RenderAssetUsages};
+use bevy::asset::{Asset, AssetLoader, LoadContext};
 use bevy::prelude::*;
+
+// The M1a CPU-copy floor machinery (gated by the `floor` feature). The frozen public
+// types further down need NONE of this — only the floor's `Image` allocation + the
+// native-render systems do — so `--no-default-features --features zero_copy` compiles
+// the frozen API + zero-copy tier without pulling `wgpu-types` or these systems.
+#[cfg(feature = "floor")]
+use std::collections::{HashMap, HashSet};
+#[cfg(feature = "floor")]
+use bevy::asset::RenderAssetUsages;
+#[cfg(feature = "floor")]
+use rive_renderer::{Artboard, Context, RenderTarget, StateMachine};
+#[cfg(feature = "floor")]
 use wgpu_types::{Extent3d, TextureDimension, TextureFormat};
 
-use rive_renderer::{Artboard, Context, RenderTarget, StateMachine};
+// At least one rendering tier must be selected, or the crate is an inert set of
+// component definitions. Fail with a clear message rather than a baffling empty build.
+#[cfg(not(any(feature = "floor", feature = "zero_copy")))]
+compile_error!(
+    "bevy-rive needs a rendering tier: enable `floor` (default, the CPU-copy plugin) \
+     and/or `zero_copy` (the opt-in Vulkan fast path). A bare `--no-default-features` \
+     build with neither has no renderer."
+);
 
 // M1b zero-copy Vulkan tier (gated). Re-exports the plugin + the device-sharing
 // entry point; the frozen M1a ECS API above is unchanged and reused.
 #[cfg(feature = "zero_copy")]
 mod zero_copy;
 #[cfg(feature = "zero_copy")]
-pub use zero_copy::{install_interlock_device_callback, RiveZeroCopyPlugin};
+pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZeroCopyPlugin};
+
+/// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
+///
+/// This is the whole public surface a game touches. The floor's three-step flow —
+/// [`RivePlugin`] + the [`RiveAnimation`]/[`RiveTarget`] components — plus the
+/// [`RiveFile`] asset and its selectors. With the `zero_copy` feature it additionally
+/// re-exports [`RiveZeroCopyPlugin`] and [`install_interlock_device_callback`]; the
+/// GPU-interop machinery (render-graph node, `as_hal` extraction, watermark) stays
+/// private. See the crate docs for each tier's setup.
+pub mod prelude {
+    // Frozen components + asset — spawned identically by BOTH tiers.
+    pub use crate::{ArtboardSelector, RiveAnimation, RiveFile, RiveTarget, StateMachineSelector};
+
+    // Floor (default): the CPU-copy plugin entry point.
+    #[cfg(feature = "floor")]
+    pub use crate::RivePlugin;
+
+    // Zero-copy (opt-in): the Vulkan fast-path plugin + its graph anchor + device wiring.
+    #[cfg(feature = "zero_copy")]
+    pub use crate::{install_interlock_device_callback, RiveGraphAnchor, RiveZeroCopyPlugin};
+}
 
 /// The texture format M1a allocates the [`RiveTarget::image`] in.
 ///
@@ -82,6 +153,7 @@ pub use zero_copy::{install_interlock_device_callback, RiveZeroCopyPlugin};
 /// format is a per-tier allocation choice (M1b may wrap rive's `VkImage` in a
 /// different wgpu format). Consumers that need the format must read it off the
 /// allocated [`Image`] (`image.texture_descriptor.format`), never hard-code it.
+#[cfg(feature = "floor")]
 pub(crate) const RIVE_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormSrgb;
 
 /// The straight-RGBA clear rive renders behind the artboard. Default: opaque dark
@@ -91,6 +163,7 @@ pub(crate) const RIVE_TEXTURE_FORMAT: TextureFormat = TextureFormat::Rgba8UnormS
 /// so antialiased edges + soft fills become partial-alpha, exercising the
 /// un-premultiply `c/a` divide that an opaque clear never reaches. Read once and
 /// shared by the M1a CPU path and the M1b zero-copy node, so both clear identically.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
 pub(crate) fn rive_clear_rgba() -> [f32; 4] {
     use std::sync::OnceLock;
     static CLEAR: OnceLock<[f32; 4]> = OnceLock::new();
@@ -130,6 +203,10 @@ impl RivePlugin {
     }
 }
 
+// The M1a CPU-copy floor plugin. Gated by `floor` (default): a `zero_copy`-only build
+// uses [`RiveZeroCopyPlugin`] and never compiles these systems. The `RivePlugin` struct
+// + `register_asset` stay always-on (the zero-copy tier reuses `register_asset`).
+#[cfg(feature = "floor")]
 impl Plugin for RivePlugin {
     fn build(&self, app: &mut App) {
         // (1) Asset store + AssetEvent<RiveFile> + the `.riv` loader.
@@ -301,7 +378,9 @@ impl Default for RiveTarget {
 }
 
 // ---------------------------------------------------------------------------
-// Internal (NON-frozen): NonSend machinery. M1a fill mechanism only.
+// Internal (NON-frozen): NonSend machinery. M1a `floor` fill mechanism only —
+// every item below is `#[cfg(feature = "floor")]`, so a `zero_copy`-only build
+// compiles none of it (and never pulls `wgpu-types`).
 // ---------------------------------------------------------------------------
 
 /// Holds the single self-managed Vulkan [`Context`]. `!Send`. Created lazily on
@@ -310,6 +389,7 @@ impl Default for RiveTarget {
 /// Tri-state so a failed creation (e.g. a headless box with no Vulkan device) is
 /// terminal: the plugin attempts device creation **at most once** and logs once,
 /// rather than re-running it (and re-logging) every frame.
+#[cfg(feature = "floor")]
 #[derive(Default)]
 enum RiveContext {
     /// Creation not yet attempted.
@@ -321,6 +401,7 @@ enum RiveContext {
     Ready(Context),
 }
 
+#[cfg(feature = "floor")]
 impl RiveContext {
     /// Attempts creation at most once, then returns the context if ready.
     fn get_or_init(&mut self) -> Option<&Context> {
@@ -347,6 +428,7 @@ impl RiveContext {
 
 /// One entity's native render state. `!Send`. The wrapper's `Rc` graph makes
 /// field drop order non-load-bearing.
+#[cfg(feature = "floor")]
 struct RiveInstance {
     artboard: Artboard,
     state_machine: StateMachine,
@@ -358,6 +440,7 @@ struct RiveInstance {
 /// Per-entity native instances, keyed by [`Entity`]. `!Send`. Links the
 /// `Send + Sync` components to the `!Send` native state (which cannot be a
 /// component).
+#[cfg(feature = "floor")]
 #[derive(Default)]
 struct RiveInstances {
     map: HashMap<Entity, RiveInstance>,
@@ -369,6 +452,7 @@ struct RiveInstances {
 
 /// Builds the native objects for one entity. `File` is derived then dropped — the
 /// `Artboard` keeps the underlying file data alive via the wrapper's `Rc` graph.
+#[cfg(feature = "floor")]
 fn build_instance(
     ctx: &Context,
     bytes: &[u8],
@@ -384,6 +468,7 @@ fn build_instance(
 
 /// Advance → render → flush → readback for one instance. Disjoint field borrows
 /// keep the transient `Frame` borrow scoped to this call.
+#[cfg(feature = "floor")]
 fn render_instance(ctx: &Context, inst: &mut RiveInstance) -> rive_renderer::Result<()> {
     let frame = ctx.begin_frame(&inst.target, rive_clear_rgba())?;
     frame.draw(&inst.artboard)?;
@@ -400,6 +485,7 @@ fn render_instance(ctx: &Context, inst: &mut RiveInstance) -> rive_renderer::Res
 ///
 /// `MAIN_WORLD | RENDER_WORLD` keeps `data` resident so the per-frame CPU copy can
 /// overwrite it (M1a fill detail — M1b allocates `RENDER_WORLD`-only, `data: None`).
+#[cfg(feature = "floor")]
 fn make_rive_image(width: u32, height: u32) -> Image {
     let size = Extent3d {
         width,
@@ -423,6 +509,7 @@ fn make_rive_image(width: u32, height: u32) -> Image {
 /// Creates the native instance for each entity whose `.riv` has finished loading
 /// and that has no instance yet; allocates the [`Image`] if the target's handle
 /// is default and writes it back.
+#[cfg(feature = "floor")]
 fn instantiate_rive_instances(
     mut rive_ctx: NonSendMut<RiveContext>,
     mut instances: NonSendMut<RiveInstances>,
@@ -473,6 +560,7 @@ fn instantiate_rive_instances(
 
 /// The per-frame core: advance each state machine by `Time::delta * speed`, render
 /// it offscreen, read the pixels back, and copy them into the target [`Image`].
+#[cfg(feature = "floor")]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
     mut instances: NonSendMut<RiveInstances>,
@@ -514,6 +602,7 @@ fn advance_and_upload_rive(
 }
 
 /// Recreates the offscreen target + [`Image`] when a [`RiveTarget`]'s size changes.
+#[cfg(feature = "floor")]
 fn resize_rive_targets(
     rive_ctx: NonSend<RiveContext>,
     mut instances: NonSendMut<RiveInstances>,
@@ -546,6 +635,7 @@ fn resize_rive_targets(
 /// Drops native instances whose entity was despawned or lost its [`RiveAnimation`].
 /// Runs on the main thread (the system is `NonSend`-pinned), as the `!Send`
 /// destructors require.
+#[cfg(feature = "floor")]
 fn cleanup_despawned_instances(
     mut instances: NonSendMut<RiveInstances>,
     alive: Query<Entity, With<RiveAnimation>>,

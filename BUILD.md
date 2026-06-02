@@ -234,3 +234,48 @@ Treat every Bevy bump as a deliberate interop re-validation, not a `cargo update
 More `.riv` files: rive's [awesome-rive](https://github.com/rive-app/awesome-rive)
 repo, or anything exported from the Rive editor. M0 uses no image decoders for
 its samples; an image-bearing `.riv` would need the (already-linked) decoders.
+
+---
+
+## 8. Prebuilt rive libraries — skip the C++ toolchain (M-PKG.1)
+
+A consumer of `bevy-rive` normally inherits this crate's full C++ build (premake +
+clang + the rive static libs + the shim). To take that off a consumer's hot path,
+`crates/rive-renderer-sys/build.rs` honours **`RIVE_PREBUILT_LIBS=<dir>`**: when set it
+links pre-archived libraries from `<dir>` and **skips premake/make/clang *and* the
+rive-runtime submodule entirely**. It prints `cargo:warning=… linking PREBUILT libs …`
+so the path taken is obvious, and fails fast (listing what is absent) if an archive is
+missing.
+
+`<dir>` must hold every archive a from-source build produces — the ten rive static libs
+plus the shim archive, in the platform's naming:
+
+| Platform | rive libs (× 10) | shim |
+| --- | --- | --- |
+| Linux (GNU `ar`) | `librive_pls_renderer.a`, `librive.a`, `librive_decoders.a`, `liblibpng.a`, `libzlib.a`, `liblibjpeg.a`, `liblibwebp.a`, `librive_harfbuzz.a`, `librive_sheenbidi.a`, `librive_yoga.a` | `librive_shim.a` |
+| Windows (MSVC) | same stems as `rive_pls_renderer.lib`, `rive.lib`, `rive_decoders.lib`, `libpng.lib`, `zlib.lib`, `libjpeg.lib`, `libwebp.lib`, `rive_harfbuzz.lib`, `rive_sheenbidi.lib`, `rive_yoga.lib` | `rive_shim.lib` |
+
+### Producing the archive
+
+Build once from source, then collect the artifacts into one directory:
+
+```bash
+# 1. a normal from-source build produces the rive libs (in the vendored out/ dir) and
+#    the shim archive (in the build's OUT_DIR). dev shown; release uses -release paths.
+cargo build -p bevy-rive
+
+# 2. collect them
+mkdir -p prebuilt/linux-dev
+cp vendor/rive-runtime/renderer/out/rive-rust-m0/*.a                                   prebuilt/linux-dev/
+cp "$(ls -t target/debug/build/rive-renderer-sys-*/out/librive_shim.a | head -1)"      prebuilt/linux-dev/
+
+# 3. a consumer (or this repo) then links them with NO C++ toolchain / submodule:
+RIVE_PREBUILT_LIBS="$PWD/prebuilt/linux-dev" cargo build -p bevy-rive
+```
+
+`tools/archive_prebuilt.sh [out_dir] [--release]` automates steps 1–2 for the host.
+
+The archive is **ABI-specific** — it is tied to the toolchain, the Cargo profile
+(debug/release link different rive libs), and the target triple. Ship one set per
+target. Per-platform binary *hosting* + CI (so consumers never build C++ at all) is the
+follow-on; this milestone establishes the link mechanism.

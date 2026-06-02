@@ -36,7 +36,7 @@
 //! 4. **Per-frame.** An `Extract` system copies `Send` per-entity data (the
 //!    display `Handle<Image>`, the `.riv` bytes, size, and `dt·speed`) into the
 //!    render world. The [`RiveFillNode`] render-graph node (ordered before
-//!    `Node2d::StartMainPass`) lazily builds rive's context + per-entity
+//!    `StartMainPass` in the [`RiveGraphAnchor`]-selected sub-graph) lazily builds rive's context + per-entity
 //!    instances, advances each state machine, renders it into the **shared**
 //!    `Rgba8Unorm` texture out-of-band (rive submits its own command buffer; the
 //!    shim fences), then copies that texture into the **display**
@@ -74,6 +74,7 @@ use bevy::render::texture::GpuImage;
 use bevy::render::{Extract, RenderApp};
 
 use bevy::core_pipeline::core_2d::graph::{Core2d, Node2d};
+use bevy::core_pipeline::core_3d::graph::{Core3d, Node3d};
 use bevy::render::renderer::raw_vulkan_init::{AdditionalVulkanFeatures, RawVulkanInitSettings};
 use bevy::render::renderer::{RenderAdapter, RenderInstance};
 use bevy::render::view::ExtractedWindows;
@@ -134,25 +135,61 @@ const RIVE_RING_SIZE: u64 = 3;
 // Plugin.
 // ===========================================================================
 
-/// The M1b zero-copy plugin. Registers the `.riv` asset + loader (via the shared
+/// Which Bevy render sub-graph(s) the zero-copy [`RiveFillNode`] is anchored in.
+///
+/// Bevy runs a camera sub-graph **only when a camera targets it**, so the anchor MUST
+/// match the consuming scene's cameras. A pure-3D scene (a `Camera3d`, **no** `Camera2d`
+/// — a `bevy_ui` HUD does *not* imply a `Camera2d`) needs [`Core3d`](Self::Core3d), or
+/// the fill node never executes and the texture is frozen on frame 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RiveGraphAnchor {
+    /// Core2d only — fill before `Node2d::StartMainPass` (2D `Sprite`/`Material2d` scenes).
+    Core2d,
+    /// Core3d only — fill before `Node3d::StartMainPass` (pure-3D `StandardMaterial` scenes).
+    Core3d,
+    /// **Both** (default) — zero-config: the fill runs in whichever sub-graph has a
+    /// camera, and is simply not executed in a sub-graph with no matching camera (so a
+    /// pure-2D *or* pure-3D scene each pays for exactly one fill). In a scene with BOTH a
+    /// `Camera2d` and a `Camera3d` the fill runs once per sub-graph — i.e. twice —
+    /// which is harmless (idempotent re-render), just redundant GPU work that frame.
+    #[default]
+    Both,
+}
+
+/// The M1b zero-copy plugin. Registers the `.riv` asset + loader (the shared
 /// [`RivePlugin`] machinery is *not* reused — see below), the main-world display
 /// allocation system, the render-world extract + handle systems, and the
-/// [`RiveFillNode`] render-graph node.
+/// [`RiveFillNode`] render-graph node — anchored per [`RiveZeroCopyPlugin::anchor`].
 ///
 /// Wiring (see the `sprite_riv_zerocopy` example):
 /// ```ignore
 /// let mut app = App::new();
 /// bevy_rive::install_interlock_device_callback(&mut app); // BEFORE DefaultPlugins
 /// app.add_plugins(DefaultPlugins);
-/// app.add_plugins(RiveZeroCopyPlugin);                    // INSTEAD of RivePlugin
+/// app.add_plugins(RiveZeroCopyPlugin::default());         // INSTEAD of RivePlugin
+/// // pure-3D consumer (Camera3d, no Camera2d):
+/// // app.add_plugins(RiveZeroCopyPlugin::anchored(RiveGraphAnchor::Core3d));
 /// ```
 ///
 /// `RiveZeroCopyPlugin` registers the asset + loader itself (so it composes
 /// without the M1a CPU systems double-driving the same entities). It does *not*
 /// add the M1a `NonSend` systems; M1b entities are driven entirely in the render
 /// world.
-#[derive(Debug, Default)]
-pub struct RiveZeroCopyPlugin;
+#[derive(Debug, Clone, Default)]
+pub struct RiveZeroCopyPlugin {
+    /// Which render graph(s) to anchor the fill node in. Defaults to
+    /// [`RiveGraphAnchor::Both`] (works with a 2D or 3D camera out of the box).
+    pub anchor: RiveGraphAnchor,
+}
+
+impl RiveZeroCopyPlugin {
+    /// A plugin anchored in the given sub-graph(s) — e.g.
+    /// `RiveZeroCopyPlugin::anchored(RiveGraphAnchor::Core3d)` for a pure-3D consumer.
+    #[must_use]
+    pub fn anchored(anchor: RiveGraphAnchor) -> Self {
+        Self { anchor }
+    }
+}
 
 impl Plugin for RiveZeroCopyPlugin {
     fn build(&self, app: &mut App) {
@@ -195,11 +232,22 @@ impl Plugin for RiveZeroCopyPlugin {
             .world_mut()
             .init_non_send_resource::<RiveRenderState>();
 
-        // The fill node, ordered before all 2D sampling (StartMainPass precedes
-        // the opaque + transparent sprite passes).
-        render_app
-            .add_render_graph_node::<RiveFillNode>(Core2d, RiveFillLabel)
-            .add_render_graph_edges(Core2d, (RiveFillLabel, Node2d::StartMainPass));
+        // The fill node, ordered before the main pass that SAMPLES the rive texture, in
+        // each sub-graph the consumer selected (`StartMainPass` precedes the opaque +
+        // transparent passes in both Core2d sprites and Core3d StandardMaterial). A
+        // sub-graph runs only when a camera targets it, so anchoring in the wrong graph
+        // leaves the fill dead — hence `anchor` must match the scene's cameras. The same
+        // node type + label in two distinct sub-graphs are two independent node instances.
+        if matches!(self.anchor, RiveGraphAnchor::Core2d | RiveGraphAnchor::Both) {
+            render_app
+                .add_render_graph_node::<RiveFillNode>(Core2d, RiveFillLabel)
+                .add_render_graph_edges(Core2d, (RiveFillLabel, Node2d::StartMainPass));
+        }
+        if matches!(self.anchor, RiveGraphAnchor::Core3d | RiveGraphAnchor::Both) {
+            render_app
+                .add_render_graph_node::<RiveFillNode>(Core3d, RiveFillLabel)
+                .add_render_graph_edges(Core3d, (RiveFillLabel, Node3d::StartMainPass));
+        }
     }
 }
 
@@ -846,6 +894,9 @@ fn extract_shared_handles_once(
     adapter: Res<RenderAdapter>,
     instance: Res<RenderInstance>,
     additional: Option<Res<AdditionalVulkanFeatures>>,
+    // Log-once latch (M-PKG.1 backend guard): the wrong-backend diagnostic below must
+    // fire ONCE, not every frame this no-op system re-runs waiting for the handles.
+    mut backend_warned: Local<bool>,
 ) {
     if existing.is_some() {
         return;
@@ -855,7 +906,19 @@ fn extract_shared_handles_once(
     // outlives the render world). We never store the guards.
     let handles = unsafe {
         let Some(dev_g) = device.wgpu_device().as_hal::<Vk>() else {
-            error!("rive zero-copy: wgpu device is not Vulkan (set WGPU_BACKEND=vulkan)");
+            // The zero-copy handoff needs `as_hal::<Vulkan>`; on any other backend it
+            // returns None and the tier is INERT. Make that loud + actionable, once —
+            // this is the runtime half of the M-PKG.1 fail-fast guard (the compile-time
+            // half is the exact wgpu pins; see build.rs).
+            if !*backend_warned {
+                *backend_warned = true;
+                error!(
+                    "rive zero-copy: wgpu is NOT on the Vulkan backend — the shared-VkImage \
+                     fast path is INERT (nothing renders via RiveZeroCopyPlugin). Set \
+                     `WGPU_BACKEND=vulkan` (D3D12/Metal are not yet supported; see \
+                     docs/M3_0_D3D12_SPIKE.md), or use the default `floor` tier instead."
+                );
+            }
             return;
         };
         let vk_device = dev_g.raw_device().handle();
@@ -867,6 +930,13 @@ fn extract_shared_handles_once(
         let gipa = inst_shared.entry().static_fn().get_instance_proc_addr;
 
         let Some(adapter_g) = adapter.as_hal::<Vk>() else {
+            if !*backend_warned {
+                *backend_warned = true;
+                error!(
+                    "rive zero-copy: wgpu adapter is not Vulkan — fast path inert \
+                     (set `WGPU_BACKEND=vulkan`)."
+                );
+            }
             return;
         };
         let vk_phys = adapter_g.raw_physical_device();

@@ -93,11 +93,21 @@ fn main() {
     ] {
         println!("cargo:rerun-if-env-changed={var}");
     }
+    println!("cargo:rerun-if-env-changed=RIVE_PREBUILT_LIBS");
+
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+
+    // Prebuilt fast path (M-PKG.1): if pre-archived rive + shim libs are provided, link
+    // them and skip the ENTIRE C++ build — premake, make/msbuild, the shader build, the
+    // shim compile, and even the rive-runtime submodule. This removes the C++ toolchain
+    // from a consumer's hot path. Produce the archive from a normal build (see BUILD.md §8).
+    if let Some(dir) = std::env::var_os("RIVE_PREBUILT_LIBS") {
+        link_prebuilt_libs(Path::new(&dir), windows);
+        return;
+    }
 
     ensure_submodule_present(&rive_root);
     std::fs::create_dir_all(&deps_cache).expect("create .rive-deps cache dir");
-
-    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
     let premake5 = find_premake5(&workspace_root, windows);
 
     // rive lib optimization config. Resolution order:
@@ -384,6 +394,12 @@ fn emit_link_directives(rive_out: &Path, windows: bool) {
     for lib in RIVE_LIBS {
         println!("cargo:rustc-link-lib=static={lib}");
     }
+    emit_system_link_directives(windows);
+}
+
+/// The OS link companions (Vulkan loader + C++/libc runtime), shared by the from-source
+/// and the prebuilt link paths so both produce an identical final link line.
+fn emit_system_link_directives(windows: bool) {
     if windows {
         // Vulkan is resolved at runtime via LoadLibraryA("vulkan-1.dll") (rive is
         // built VK_NO_PROTOTYPES), so there is NO Vulkan import lib to link — the
@@ -399,6 +415,48 @@ fn emit_link_directives(rive_out: &Path, windows: bool) {
         println!("cargo:rustc-link-lib=dylib=dl");
         println!("cargo:rustc-link-lib=dylib=m");
     }
+}
+
+/// Links pre-archived rive + shim static libs from `dir`, skipping premake/make/clang
+/// entirely (and not even requiring the rive-runtime submodule). Set via
+/// `RIVE_PREBUILT_LIBS=<dir>`. `dir` must contain EVERY archive a from-source build
+/// produces — the rive libs (this platform's naming) plus `cc`'s shim archive.
+fn link_prebuilt_libs(dir: &Path, windows: bool) {
+    assert!(
+        dir.is_dir(),
+        "RIVE_PREBUILT_LIBS={} is not a directory",
+        dir.display()
+    );
+
+    let shim = if windows { "rive_shim.lib" } else { "librive_shim.a" };
+    let mut expected = rive_archive_file_names(windows);
+    expected.push(shim.to_string());
+    let missing: Vec<&str> = expected
+        .iter()
+        .map(String::as_str)
+        .filter(|f| !dir.join(f).exists())
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "RIVE_PREBUILT_LIBS={} is missing archives: {missing:?}\n\
+         Produce them with a normal from-source build, then copy the rive libs from \
+         vendor/rive-runtime/renderer/out/rive-rust-m0[-release]/ AND {shim} from the \
+         build's OUT_DIR into this dir. See BUILD.md §8.",
+        dir.display()
+    );
+
+    println!(
+        "cargo:warning=rive-renderer-sys: linking PREBUILT libs from {} (skipped premake/make/clang + the rive-runtime submodule)",
+        dir.display()
+    );
+    // Single-pass link order: shim (consumer) before the rive libs (providers), then
+    // the system companions — identical to the from-source path (cc emits the shim first).
+    println!("cargo:rustc-link-search=native={}", dir.display());
+    println!("cargo:rustc-link-lib=static=rive_shim");
+    for lib in RIVE_LIBS {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+    emit_system_link_directives(windows);
 }
 
 // ---------------------------------------------------------------------------
@@ -578,28 +636,26 @@ fn run(cmd: &mut Command, label: &str) {
     }
 }
 
-fn verify_archives(rive_out: &Path, windows: bool) {
-    // On GNU, premake prefixes "lib" (so libpng -> liblibpng.a). On MSVC/clang-cl
-    // there is no file prefix and the extension is .lib (libpng -> libpng.lib).
-    let files: Vec<String> = if windows {
-        RIVE_LIBS.iter().map(|l| format!("{l}.lib")).collect()
-    } else {
-        [
-            "librive.a",
-            "librive_pls_renderer.a",
-            "librive_decoders.a",
-            "liblibpng.a",
-            "libzlib.a",
-            "liblibjpeg.a",
-            "liblibwebp.a",
-            "librive_harfbuzz.a",
-            "librive_sheenbidi.a",
-            "librive_yoga.a",
-        ]
+/// The rive static-lib archive FILE names this platform produces, in `RIVE_LIBS` order.
+/// On GNU, premake prefixes "lib" (so `libpng` → `liblibpng.a`, the image libs getting a
+/// double "lib" because their project names already start with "lib"); on MSVC/clang-cl
+/// there is no prefix and the extension is `.lib`. Shared by `verify_archives` (from
+/// source) and `link_prebuilt_libs` so both agree on the exact file set.
+fn rive_archive_file_names(windows: bool) -> Vec<String> {
+    RIVE_LIBS
         .iter()
-        .map(|s| s.to_string())
+        .map(|l| {
+            if windows {
+                format!("{l}.lib")
+            } else {
+                format!("lib{l}.a")
+            }
+        })
         .collect()
-    };
+}
+
+fn verify_archives(rive_out: &Path, windows: bool) {
+    let files = rive_archive_file_names(windows);
     let missing: Vec<&str> = files
         .iter()
         .map(String::as_str)

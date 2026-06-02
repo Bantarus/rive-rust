@@ -161,7 +161,10 @@ fn main() {
     )
     // The zero-copy plugin registers the `.riv` asset + loader itself, plus the
     // render-world bridge. Use it INSTEAD of RivePlugin (no CPU-copy systems).
-    .add_plugins(RiveZeroCopyPlugin)
+    // `::default()` anchors the fill in BOTH the Core2d + Core3d graphs; this is a 2D
+    // `Sprite` scene, so the Core2d node is the one that runs. A pure-3D consumer
+    // (Camera3d, no Camera2d) would use `RiveZeroCopyPlugin::anchored(RiveGraphAnchor::Core3d)`.
+    .add_plugins(RiveZeroCopyPlugin::default())
     .insert_resource(WinitSettings::continuous())
     .insert_resource(Cfg {
         riv,

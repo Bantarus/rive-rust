@@ -9,8 +9,17 @@ description = "Bevy plugin for the native Rive Renderer (offscreen render + CPU-
 publish = false
 
 [features]
-default = []
-# M1b zero-copy Vulkan tier. Adds the render-world bridge: a Render Graph node
+# `floor` (default) — the M1a CPU-copy tier: a near-drop-in Bevy plugin with NO
+# `ash`, NO `wgpu-hal`, NO exact wgpu pin and NO `as_hal` code. It depends only on a
+# caret `bevy = "0.18"` plus a caret `wgpu-types` (named only because `bevy_image`
+# does not re-export `Image::new`'s `Extent3d`/`TextureFormat`/`TextureDimension`;
+# the caret unifies with whatever `wgpu-types` the host Bevy already links). This is
+# the loosely-coupled path a normal game project drops in like any other plugin.
+default = ["floor"]
+floor = ["dep:wgpu-types"]
+
+# M1b zero-copy Vulkan tier (opt-in; version-LOCKED — see the fail-fast guard in
+# `src/zero_copy.rs` + `build.rs`). Adds the render-world bridge: a Render Graph node
 # that drives the native Rive renderer directly into a wgpu-allocated VkImage
 # (no per-frame CPU readback), device sharing via Bevy's `raw_vulkan_init`
 # callback (to enable VK_EXT_fragment_shader_interlock), and raw Vulkan handle
@@ -35,15 +44,17 @@ rive-renderer = { path = "../rive-renderer" }
 # The plugin only defines an asset + loader, ECS components/systems, and fills a
 # Bevy `Image` — no render-side code (display is user-side via `Sprite`). So it
 # needs just the asset + image stack, not the sprite/render crates or winit.
-bevy = { version = "0.18.1", default-features = false, features = [
+bevy = { version = "0.18", default-features = false, features = [
     "bevy_asset",
     "bevy_image",
     "bevy_log",
 ] }
-# `Image::new` takes `wgpu_types::{Extent3d, TextureDimension, TextureFormat}` directly;
-# this MUST be the exact version `bevy_image` 0.18.1 links, or `TextureFormat` is a distinct
-# type and `Image::new` rejects our format constant. Pinned exact; guarded by `cargo tree -d`.
-wgpu-types = "=27.0.1"
+# `Image::new` takes `wgpu_types::{Extent3d, TextureDimension, TextureFormat}` directly,
+# and `bevy_image` does NOT re-export them (a private `use` in its image.rs). The floor
+# names `wgpu-types` only for these three types; a CARET (not an exact pin) lets Cargo
+# unify it with whatever `wgpu-types` the host Bevy links (one 27.x in the tree), so the
+# floor stays loosely coupled. Optional + pulled by the `floor` feature only.
+wgpu-types = { version = "27", optional = true }
 
 # M1b zero-copy deps (optional; enabled by `zero_copy`). Pinned to Bevy 0.18.1's
 # exact wgpu/wgpu-hal so `wgpu::hal::vulkan::*` and our `wgpu_hal::vulkan::Api`
@@ -78,6 +89,8 @@ image = "0.25"
 [[example]]
 name = "sprite_riv"
 path = "../../examples/sprite_riv.rs"
+# The CPU-copy floor example; needs the (default) floor tier's plugin + systems.
+required-features = ["floor"]
 
 # The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
 [[example]]

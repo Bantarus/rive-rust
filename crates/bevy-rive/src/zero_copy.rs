@@ -88,7 +88,7 @@ use rive_renderer::{
     VulkanFeatures,
 };
 
-use crate::{RiveAnimation, RiveFile, RivePlugin, RiveSurface, RiveTarget};
+use crate::{RiveActive, RiveAnimation, RiveFile, RivePlugin, RiveSurface, RiveTarget};
 
 type Vk = wgpu_hal::vulkan::Api;
 
@@ -108,16 +108,28 @@ const RIVE_TARGET_VK_USAGE: u32 = 0x10 | 0x04 | 0x02 | 0x01;
 /// The shared (internal) texture rive renders into: **linear** `Rgba8Unorm`, so
 /// the WGSL/sampler sees rive's raw sRGB-encoded premultiplied bytes verbatim.
 const SHARED_FORMAT: TextureFormat = TextureFormat::Rgba8Unorm;
-/// M-SCALE Phase 2a atlas tile size (px) — matches the example's per-instance target
-/// so the batched record cost is comparable to the per-instance/overlapping baseline.
-const ATLAS_TILE: u32 = 512;
-/// Max tiles per side of one atlas page (16×512 = 8192px, within the 4090's 16384 cap).
-const ATLAS_MAX_SIDE: u32 = 16;
-/// Max tiles in one page (single-page Phase 2a; multi-page paging is the C1 follow-up).
-const ATLAS_MAX_TILES: usize = (ATLAS_MAX_SIDE * ATLAS_MAX_SIDE) as usize;
-/// One atlas page is a fixed `ATLAS_MAX_SIDE`×`ATLAS_MAX_SIDE` grid → this many px/side
-/// (8192 at 16×512). Both worlds use this so slots map to the same tiles.
-const ATLAS_PAGE_PX: u32 = ATLAS_TILE * ATLAS_MAX_SIDE;
+/// M-SCALE Phase 3 — per-LOD atlas tile sizes (px), ascending. A face's bucket is the
+/// smallest tile ≥ its `max(width, height)`; larger faces clamp to the last bucket (they
+/// render at reduced resolution — the intended LOD tradeoff). 512 matches the M1a/example
+/// target, so the 512 bucket reproduces the Phase-2 single-page record cost exactly; the
+/// 128/256 buckets give distant/small faces a cheaper tile (less tessellation + far less
+/// coverage VRAM, since the PLS coverage backing scales with PAGE area, not fill).
+const ATLAS_BUCKETS: [u32; 3] = [128, 256, 512];
+/// Tiles per side of one atlas page → `ATLAS_TILES_PER_PAGE` tiles/page. 16 ⇒ 256
+/// tiles/page: the count validated in Phase 2 (one octopus flush) and comfortably under
+/// rive's per-flush caps (contours ≤ 65535, draw-passes ≤ 32767 in atomic mode —
+/// `render_context.cpp:497-522`; exceeding them is a correctness-preserving auto-split,
+/// not a crash). A FULL page is VRAM-efficient, so growth adds a SIBLING page rather than
+/// enlarging one (the C1 budget). Largest page = 512×16 = 8192px (within the 16384 cap).
+const ATLAS_TILES_PER_SIDE: u32 = 16;
+/// Tiles in one page — a fixed `ATLAS_TILES_PER_SIDE`² grid, so slot alloc is an O(1)
+/// bump cursor + free-list (no shelf packer, no fragmentation, no repack-invalidates-all).
+const ATLAS_TILES_PER_PAGE: u32 = ATLAS_TILES_PER_SIDE * ATLAS_TILES_PER_SIDE;
+/// C2 writer-side gutter (px inset per tile side). rive's `clipRect` AA writes fractional
+/// coverage ~0.5px OUTSIDE the nominal rect (`common.glsl`), so edge-to-edge tiles corrupt
+/// each other's boundary. Each tile's drawn viewport AND its `uv_rect` are inset by this,
+/// leaving a transparent ≥`2·GUTTER` band between neighbours. Page dimensions are unchanged.
+const ATLAS_GUTTER_PX: u32 = 2;
 
 /// The display texture behind `RiveTarget.image`: `Rgba8UnormSrgb` straight-alpha,
 /// **identical to the M1a seam**, so the user's `Sprite` path is unchanged.
@@ -479,10 +491,10 @@ struct RiveInstance {
     bind_group: Option<wgpu::BindGroup>,
 }
 
-/// A single atlas PAGE (M-SCALE Phase 2a): one shared `Rgba8Unorm` wgpu texture that
-/// rive renders ALL active instances into — each in its own tile, in one begin/flush —
-/// wrapped once as a single rive [`RenderTarget`]. Fixed `tile`px `cols`×`rows` grid.
-/// Render-world only; gated by `RIVE_ATLAS` while the consumer seam (Phase 2b) lands.
+/// One atlas PAGE (M-SCALE): a shared `Rgba8Unorm` wgpu texture (`page_px`²) that rive
+/// renders a page's worth of active faces into — each in its own gutter-inset tile, in one
+/// begin/flush — wrapped once as a single rive [`RenderTarget`]. The render world keys these
+/// by [`AtlasPageId`] in `RiveGpu::atlas_pages`; the grid layout is the shared bucket helpers.
 struct RiveAtlas {
     /// rive's render target wrapping `shared_tex`'s `VkImage` (zero copy).
     target: RenderTarget,
@@ -506,33 +518,165 @@ struct AtlasInstance {
     state_machine: StateMachine,
 }
 
-/// Pixel rect `[x, y, w, h]` of atlas grid `slot` in the fixed `ATLAS_MAX_SIDE`² page.
-/// Shared by the MAIN-world packer (→ `uv_rect`) and the render-world draw, so both
-/// worlds agree on where each face's tile lives without a render→main channel.
-fn atlas_slot_rect_px(slot: u32) -> [f32; 4] {
-    let (col, row) = (slot % ATLAS_MAX_SIDE, slot / ATLAS_MAX_SIDE);
+/// Identifies one atlas PAGE: which LOD `bucket` (index into [`ATLAS_BUCKETS`]) and which
+/// sibling `page` within that bucket. BOTH worlds key pages by this — main-world holds the
+/// display image, render-world the [`RiveAtlas`] — so they agree with no render→main channel.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct AtlasPageId {
+    bucket: u8,
+    page: u16,
+}
+
+/// A face's atlas assignment: its [`AtlasPageId`] + tile `slot` within that page's grid.
+#[derive(Clone, Copy)]
+struct AtlasLoc {
+    page: AtlasPageId,
+    slot: u16,
+}
+
+/// Page dimension (px/side) for a bucket: `tile × ATLAS_TILES_PER_SIDE` (≤ 8192).
+fn atlas_page_px(bucket: u8) -> u32 {
+    ATLAS_BUCKETS[bucket as usize] * ATLAS_TILES_PER_SIDE
+}
+
+/// The gutter-inset pixel rect `[x, y, w, h]` of `slot` in its page — the DRAWN viewport
+/// (`rive_artboard_draw_viewport` aligns + clips the artboard into exactly this). Inset by
+/// [`ATLAS_GUTTER_PX`] per side so neighbouring tiles can't bleed across the clipRect AA edge.
+fn atlas_tile_rect_px(bucket: u8, slot: u16) -> [f32; 4] {
+    let tile = ATLAS_BUCKETS[bucket as usize];
+    let (col, row) = (
+        u32::from(slot) % ATLAS_TILES_PER_SIDE,
+        u32::from(slot) / ATLAS_TILES_PER_SIDE,
+    );
+    let g = ATLAS_GUTTER_PX;
     [
-        (col * ATLAS_TILE) as f32,
-        (row * ATLAS_TILE) as f32,
-        ATLAS_TILE as f32,
-        ATLAS_TILE as f32,
+        (col * tile + g) as f32,
+        (row * tile + g) as f32,
+        (tile - 2 * g) as f32,
+        (tile - 2 * g) as f32,
     ]
 }
 
-/// MAIN-world atlas bookkeeping (M-SCALE Phase 2b): the shared display atlas image +
-/// per-entity slot assignment. Lives main-world so a face's `image` + `uv_rect` (its
-/// [`RiveSurface`]) are written together, the SAME frame, BEFORE any consumer reads —
-/// the render world only READS the assigned slot (there is no render→main path).
-#[derive(Resource, Default)]
-struct RiveAtlasState {
-    /// The shared straight-alpha display atlas (`Rgba8UnormSrgb`, `ATLAS_PAGE_PX`²),
-    /// written into every atlas face's `RiveSurface.image`. Created on first use.
+/// Normalized `[0, 1]` uv-rect of `slot` in its page — the inset content region the consumer
+/// samples. Matches [`atlas_tile_rect_px`] / [`atlas_page_px`], so the sampled sub-rect is
+/// exactly what was drawn (no bleed, no half-tile offset).
+fn atlas_tile_uv_rect(bucket: u8, slot: u16) -> Rect {
+    let r = atlas_tile_rect_px(bucket, slot);
+    let inv = 1.0 / atlas_page_px(bucket) as f32;
+    Rect {
+        min: Vec2::new(r[0] * inv, r[1] * inv),
+        max: Vec2::new((r[0] + r[2]) * inv, (r[1] + r[3]) * inv),
+    }
+}
+
+/// Smallest bucket index whose tile ≥ `max(width, height)`; clamps to the last (largest)
+/// bucket — a face larger than the biggest tile renders contained into it (LOD downscale).
+fn atlas_bucket_for(width: u32, height: u32) -> u8 {
+    let want = width.max(height);
+    ATLAS_BUCKETS
+        .iter()
+        .position(|&t| t >= want)
+        .unwrap_or(ATLAS_BUCKETS.len() - 1) as u8
+}
+
+/// One sibling page within a bucket: its main-world display image + an O(1) slot allocator.
+struct AtlasPageState {
+    /// The shared straight-alpha display page (`Rgba8UnormSrgb`, `atlas_page_px(bucket)`²),
+    /// written into every face-of-this-page's `RiveSurface.image`.
     display: Handle<Image>,
-    /// Assigned grid slot per atlas-opted entity (read by `extract_rive_instances`).
-    slots: HashMap<Entity, u32>,
-    /// Bump cursor + freed-slot list (0..`ATLAS_MAX_TILES`).
+    /// Bump cursor (`0..ATLAS_TILES_PER_PAGE`) + freed-slot list (cull / despawn reclaim).
     next: u32,
-    free: Vec<u32>,
+    free: Vec<u16>,
+}
+
+/// One LOD bucket: a list of sibling pages (all the same tile size). Grown by appending a
+/// page when every existing page is full — never by enlarging a page (the C1 VRAM budget).
+#[derive(Default)]
+struct AtlasBucketState {
+    pages: Vec<AtlasPageState>,
+}
+
+/// MAIN-world atlas bookkeeping (M-SCALE Phase 2b → 3 multi-page): per-LOD-bucket sibling
+/// pages + per-entity slot assignment. Lives main-world so a face's `image` + `uv_rect` (its
+/// [`RiveSurface`]) are written together, the SAME frame, BEFORE any consumer reads — the
+/// render world only READS the assigned [`AtlasLoc`] (there is no render→main path).
+#[derive(Resource)]
+struct RiveAtlasState {
+    /// Per-bucket page lists, indexed by bucket (fixed length = `ATLAS_BUCKETS.len()`).
+    buckets: Vec<AtlasBucketState>,
+    /// Assigned location per atlas-opted entity (read by `extract_rive_instances`).
+    locs: HashMap<Entity, AtlasLoc>,
+}
+
+impl Default for RiveAtlasState {
+    fn default() -> Self {
+        let mut buckets = Vec::with_capacity(ATLAS_BUCKETS.len());
+        buckets.resize_with(ATLAS_BUCKETS.len(), AtlasBucketState::default);
+        Self {
+            buckets,
+            locs: HashMap::new(),
+        }
+    }
+}
+
+impl RiveAtlasState {
+    /// Allocates a free tile in `bucket` (reusing a freed slot, else bumping a page's
+    /// cursor, else appending a sibling page whose display image is created now). Returns
+    /// the assigned location. `images` is needed only to create a new page's display image.
+    fn alloc(&mut self, bucket: u8, images: &mut Assets<Image>) -> AtlasLoc {
+        let pages = &mut self.buckets[bucket as usize].pages;
+        for (pi, page) in pages.iter_mut().enumerate() {
+            if let Some(slot) = page.free.pop() {
+                return AtlasLoc {
+                    page: AtlasPageId {
+                        bucket,
+                        page: pi as u16,
+                    },
+                    slot,
+                };
+            }
+            if page.next < ATLAS_TILES_PER_PAGE {
+                let slot = page.next as u16;
+                page.next += 1;
+                return AtlasLoc {
+                    page: AtlasPageId {
+                        bucket,
+                        page: pi as u16,
+                    },
+                    slot,
+                };
+            }
+        }
+        // Every page full → append a sibling page (slot 0).
+        let px = atlas_page_px(bucket);
+        pages.push(AtlasPageState {
+            display: images.add(make_display_image(px, px)),
+            next: 1,
+            free: Vec::new(),
+        });
+        AtlasLoc {
+            page: AtlasPageId {
+                bucket,
+                page: (pages.len() - 1) as u16,
+            },
+            slot: 0,
+        }
+    }
+
+    /// Returns a slot to its page's free-list (cull / despawn). The page itself persists
+    /// (occupancy is bounded by the active set, so we don't churn page textures).
+    fn free(&mut self, loc: AtlasLoc) {
+        self.buckets[loc.page.bucket as usize].pages[loc.page.page as usize]
+            .free
+            .push(loc.slot);
+    }
+
+    /// The display image handle for a location's page.
+    fn display_of(&self, page: AtlasPageId) -> Handle<Image> {
+        self.buckets[page.bucket as usize].pages[page.page as usize]
+            .display
+            .clone()
+    }
 }
 
 /// The fullscreen un-premultiply + sRGB-decode blit pipeline (M1b display).
@@ -869,17 +1013,20 @@ struct RiveGpu {
     /// Per-entity rive state for the atlas path (artboard + state machine only; the
     /// render target is the shared `atlas`, not a per-instance texture).
     atlas_instances: HashMap<Entity, AtlasInstance>,
-    /// The shared atlas page (render-world): all atlas faces render into ONE texture in
-    /// one begin/flush. Lazily built in the node.
+    /// The shared atlas pages (render-world), keyed by [`AtlasPageId`]: every active atlas
+    /// face renders into its page's ONE texture in one begin/flush. Lazily built per page in
+    /// the node, sized from the extracted `page_px` (per-LOD-bucket). O(pages) flushes/blits.
     ///
-    /// TEARDOWN ORDER (load-bearing): declared AFTER `atlas_instances` so its wgpu
-    /// `shared_tex` — the ONLY wgpu device reference the atlas path holds — outlives the
-    /// rive-only `atlas_instances` AND the deferred rive-context destroy (Drop runs in
-    /// declaration order). Otherwise the wgpu device can be destroyed first and rive then
-    /// tears down its objects on a dead `VkDevice` (a `vkDestroyDevice` leaked-objects
-    /// VUID + access violation). The non-atlas `instances` are self-keeping — each holds
-    /// its own texture — so they don't need this; the atlas's single texture does.
-    atlas: Option<RiveAtlas>,
+    /// TEARDOWN: the load-bearing invariant is PER-PAGE and lives inside [`RiveAtlas`] —
+    /// `target` is declared before `shared_tex`, so each rive `RenderTarget` is destroyed
+    /// before the wgpu texture whose `VkImage` it wraps (else `rive_render_target_destroy`
+    /// touches a freed image). The rive *context* destroy is independent of field order: it
+    /// is deferred by the `Rc<ContextInner>` refcount (it runs only when the LAST handle —
+    /// any `RenderTarget`/`Artboard`/`StateMachine` across these maps — drops), so neither
+    /// this field's position nor the unspecified `HashMap` value-drop order affects it. The
+    /// original single-`atlas` ordering rationale (drop the texture last) is therefore moot
+    /// for multi-page; the per-page `target`-before-`shared_tex` rule is what matters.
+    atlas_pages: HashMap<AtlasPageId, RiveAtlas>,
     /// Monotonic frame counter for rive's resource-recycling watermark.
     frame: u64,
     /// Set once we have logged the active PLS mode.
@@ -912,7 +1059,7 @@ impl Default for RiveRenderState {
             blit: None,
             instances: HashMap::new(),
             atlas_instances: HashMap::new(),
-            atlas: None,
+            atlas_pages: HashMap::new(),
             frame: 0,
             logged_mode: false,
             recycle_unsafe_warned: false,
@@ -920,6 +1067,18 @@ impl Default for RiveRenderState {
             perf: PerfStats::default(),
         }))
     }
+}
+
+/// Per-frame atlas placement for one face, resolved MAIN-world and ferried to the render
+/// node. Carries everything the node needs WITHOUT any render→main channel or knowledge of
+/// the bucket config: which `page` to group/key by, the gutter-inset `tile_rect` to draw
+/// into, the `page_px` to size that page's texture, and the `display` page to blit into.
+#[derive(Clone)]
+struct ExtractedAtlas {
+    page: AtlasPageId,
+    tile_rect: [f32; 4],
+    page_px: u32,
+    display: Handle<Image>,
 }
 
 /// Per-entity `Send` data ferried main→render each frame by [`extract_rive_instances`].
@@ -936,13 +1095,18 @@ struct ExtractedRive {
     bytes: std::sync::Arc<[u8]>,
     width: u32,
     height: u32,
-    /// `dt * speed`, sanitized non-negative + finite.
+    /// `dt * speed`, sanitized non-negative + finite (0 for a culled face).
     step: f32,
-    /// M-SCALE: `Some(slot)` for an atlas-opted face (its tile in the shared atlas,
-    /// assigned main-world); `None` for a dedicated-image face.
-    atlas_slot: Option<u32>,
-    /// The shared display atlas handle (the un-premult pass target) for atlas faces.
-    atlas_display: Option<Handle<Image>>,
+    /// M-SCALE: `Some` for an atlas-opted face (its resolved tile placement, assigned
+    /// main-world); `None` for a dedicated-image face (which uses `display` above) OR a
+    /// culled face (no placement this frame).
+    atlas: Option<ExtractedAtlas>,
+    /// M-SCALE: `RiveActive(false)` — the face is PAUSED this frame (skip advance + record),
+    /// but still ferried so the node keeps it in the live set and does NOT evict its rive
+    /// state machine. Without this, `retain` would drop a culled-but-alive face and the next
+    /// activation would rebuild it (a t=0 reset + `.riv` re-parse). Its atlas tile is freed
+    /// main-world regardless; only the rive state is preserved for resume-in-place.
+    culled: bool,
 }
 
 /// Render-world resource holding this frame's extracted rive instances. Replaced
@@ -977,53 +1141,55 @@ fn allocate_display_images(
     }
 }
 
-/// Assigns an atlas slot + writes [`RiveSurface`] for each opt-in atlas face
-/// (`RiveTarget::atlas == Some`), creating the shared display atlas on first use.
+/// Assigns a per-LOD-bucket atlas slot + writes [`RiveSurface`] for each ACTIVE opt-in
+/// atlas face (`RiveTarget::atlas == Some`, [`RiveActive`] absent-or-true), frees + drops
+/// `RiveSurface` for culled (inactive) faces, and reclaims the slots of despawned faces.
 /// MAIN-world (`Update`): `image` + `uv_rect` are written together so a single-shot
-/// consumer never latches a stale UV. (Phase 2b: one page / one key for now.)
-#[expect(
-    clippy::type_complexity,
-    reason = "Bevy query with a With/Without filter tuple"
-)]
+/// consumer never latches a stale UV; the bucket is `max(width, height)` → smallest tile.
 fn allocate_atlas_slots(
     mut commands: Commands,
     mut state: ResMut<RiveAtlasState>,
     mut images: ResMut<Assets<Image>>,
-    query: Query<(Entity, &RiveTarget), (With<RiveAnimation>, Without<RiveSurface>)>,
+    query: Query<(Entity, &RiveTarget, Option<&RiveActive>), With<RiveAnimation>>,
 ) {
-    for (entity, target) in &query {
+    let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
+    for (entity, target, active) in &query {
         if target.atlas.is_none() {
             continue;
         }
-        // Assign a slot (reuse a freed one, else bump). Atlas full → skip (unrendered).
-        let slot = if let Some(s) = state.free.pop() {
-            s
-        } else if state.next < ATLAS_MAX_TILES as u32 {
-            let s = state.next;
-            state.next += 1;
-            s
-        } else {
-            warn!(
-                "rive atlas: page full (> {} faces) — {entity:?} unrendered",
-                ATLAS_MAX_TILES
-            );
-            continue;
-        };
-        state.slots.insert(entity, slot);
-        if state.display == Handle::default() {
-            state.display = images.add(make_display_image(ATLAS_PAGE_PX, ATLAS_PAGE_PX));
+        seen.insert(entity);
+        let active = active.is_none_or(|a| a.0);
+        let has_loc = state.locs.contains_key(&entity);
+        if active && !has_loc {
+            // Allocate a tile in the size-appropriate bucket (creates a sibling page +
+            // its display image lazily) and publish the seam — image + uv_rect together.
+            let bucket = atlas_bucket_for(target.width, target.height);
+            let loc = state.alloc(bucket, &mut images);
+            state.locs.insert(entity, loc);
+            commands.entity(entity).insert(RiveSurface {
+                image: state.display_of(loc.page),
+                uv_rect: atlas_tile_uv_rect(bucket, loc.slot),
+                atlas_size: UVec2::splat(atlas_page_px(bucket)),
+            });
+        } else if !active && has_loc {
+            // Culled: free the tile (so the page slot can be reused) and drop RiveSurface
+            // so the consumer stops sampling a tile that another face may now own.
+            if let Some(loc) = state.locs.remove(&entity) {
+                state.free(loc);
+            }
+            commands.entity(entity).remove::<RiveSurface>();
         }
-        let r = atlas_slot_rect_px(slot);
-        let inv = 1.0 / ATLAS_PAGE_PX as f32;
-        let uv_rect = Rect {
-            min: Vec2::new(r[0] * inv, r[1] * inv),
-            max: Vec2::new((r[0] + r[2]) * inv, (r[1] + r[3]) * inv),
-        };
-        commands.entity(entity).insert(RiveSurface {
-            image: state.display.clone(),
-            uv_rect,
-            atlas_size: UVec2::splat(ATLAS_PAGE_PX),
-        });
+    }
+    // Reclaim slots of atlas faces that have despawned (gone from the world this frame).
+    let stale: Vec<(Entity, AtlasLoc)> = state
+        .locs
+        .iter()
+        .filter(|(e, _)| !seen.contains(*e))
+        .map(|(e, l)| (*e, *l))
+        .collect();
+    for (entity, loc) in stale {
+        state.locs.remove(&entity);
+        state.free(loc);
     }
 }
 
@@ -1270,31 +1436,63 @@ fn extract_shared_handles_once(
     clippy::needless_pass_by_value,
     reason = "Bevy Extract systems take Extract<...> by value"
 )]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy query tuple with an Option<&RiveActive> cull filter"
+)]
 fn extract_rive_instances(
     mut out: ResMut<ExtractedRives>,
-    query: Extract<Query<(Entity, &RiveAnimation, &RiveTarget)>>,
+    query: Extract<Query<(Entity, &RiveAnimation, &RiveTarget, Option<&RiveActive>)>>,
     files: Extract<Res<Assets<RiveFile>>>,
     atlas: Extract<Res<RiveAtlasState>>,
     time: Extract<Res<Time>>,
 ) {
     out.0.clear();
     let dt = time.delta_secs();
-    for (entity, anim, target) in &query {
+    for (entity, anim, target, active) in &query {
         let Some(file) = files.get(&anim.handle) else {
-            continue;
+            continue; // not loaded yet — no rive state to keep
         };
-        // Atlas faces are gated on a SLOT (they get no per-face image); dedicated
+        // Culled faces (`RiveActive(false)`) are PAUSED, not despawned: ferry them with no
+        // placement + zero step so the node keeps them in the live set (preserving their
+        // rive state machine for resume-in-place) but neither advances nor records them.
+        // Dropping them here would let `retain` evict their instance → a t=0 reset + a
+        // `.riv` re-parse on the next activation (the LOD-cull use case). Their atlas tile
+        // is already freed main-world; only the rive state is preserved.
+        if active.is_some_and(|a| !a.0) {
+            out.0.push(ExtractedRive {
+                entity,
+                display: Handle::default(),
+                bytes: file.bytes.clone(),
+                width: target.width,
+                height: target.height,
+                step: 0.0,
+                atlas: None,
+                culled: true,
+            });
+            continue;
+        }
+        // Atlas faces are gated on an assigned LOC (they get no per-face image); dedicated
         // faces on their display image being allocated.
-        let (display, atlas_slot, atlas_display) = if target.atlas.is_some() {
-            match atlas.slots.get(&entity) {
-                Some(&slot) => (Handle::default(), Some(slot), Some(atlas.display.clone())),
-                None => continue, // slot not assigned yet
+        let (display, atlas_data) = if target.atlas.is_some() {
+            match atlas.locs.get(&entity) {
+                Some(&loc) => {
+                    let bucket = loc.page.bucket;
+                    let atlas_data = ExtractedAtlas {
+                        page: loc.page,
+                        tile_rect: atlas_tile_rect_px(bucket, loc.slot),
+                        page_px: atlas_page_px(bucket),
+                        display: atlas.display_of(loc.page),
+                    };
+                    (Handle::default(), Some(atlas_data))
+                }
+                None => continue, // slot not assigned yet (or just culled)
             }
         } else {
             if target.image == Handle::default() {
                 continue;
             }
-            (target.image.clone(), None, None)
+            (target.image.clone(), None)
         };
         let step = dt * anim.speed;
         let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
@@ -1305,8 +1503,8 @@ fn extract_rive_instances(
             width: target.width,
             height: target.height,
             step,
-            atlas_slot,
-            atlas_display,
+            atlas: atlas_data,
+            culled: false,
         });
     }
 }
@@ -1410,7 +1608,7 @@ impl Node for RiveFillNode {
             ctx,
             blit,
             instances,
-            atlas,
+            atlas_pages,
             atlas_instances,
             logged_mode,
             recycle_unsafe_warned,
@@ -1478,9 +1676,15 @@ impl Node for RiveFillNode {
         };
 
         for item in &frame_items {
+            // Culled (paused) faces: skip advance/record/instantiate. They stay in `live`
+            // (built from frame_items below), so `retain` KEEPS their rive state for a
+            // resume-in-place — we just don't tick or draw them this frame.
+            if item.culled {
+                continue;
+            }
             // Atlas-opted faces (RiveTarget.atlas = Some) render together in the atlas
             // block after this loop — never per-instance (they have no own image).
-            if item.atlas_slot.is_some() {
+            if item.atlas.is_some() {
                 continue;
             }
             let entity = item.entity;
@@ -1727,100 +1931,128 @@ impl Node for RiveFillNode {
             }
         }
 
-        // M-SCALE atlas path: render every atlas-opted face (RiveTarget.atlas = Some, a
-        // slot assigned main-world) into ONE shared atlas in ONE begin/flush — the
-        // shippable batching shape, writing DISTINCT tiles — then ONE un-premult pass
-        // over the whole atlas into the straight-alpha display atlas the consumer samples.
-        let any_atlas = !blocking && frame_items.iter().any(|i| i.atlas_slot.is_some());
+        // M-SCALE atlas path (multi-page, per-LOD bucket): render every ACTIVE atlas-opted
+        // face into its PAGE — one begin/flush per page (writing DISTINCT, gutter-inset
+        // tiles), then ONE un-premult pass per page into that page's straight-alpha display
+        // image (the consumer samples its tile). Page count is O(pages) ≪ O(faces); each
+        // page reproduces the Phase-2 single-flush record win.
+        let any_atlas = !blocking && frame_items.iter().any(|i| i.atlas.is_some());
         if any_atlas {
-            if atlas.is_none() {
-                match build_atlas(ctx, &render_device, ATLAS_TILE, ATLAS_MAX_SIDE, ATLAS_MAX_SIDE) {
-                    Ok(a) => *atlas = Some(a),
-                    Err(e) => warn!("rive zero-copy: atlas page build failed: {e}"),
+            // Instantiate (artboard + state machine) any new atlas faces, then advance all
+            // (advance is page-independent — one pass over every atlas face this frame).
+            for item in &frame_items {
+                if item.atlas.is_none() {
+                    continue;
+                }
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    atlas_instances.entry(item.entity)
+                {
+                    match build_atlas_instance(ctx, item) {
+                        Ok(inst) => {
+                            e.insert(inst);
+                        }
+                        Err(err) => {
+                            warn!("rive zero-copy: atlas instance {:?} failed: {err}", item.entity);
+                        }
+                    }
                 }
             }
-            if let Some(page) = atlas.as_mut() {
-                // Instantiate (artboard + state machine) for new atlas faces, then advance.
-                for item in &frame_items {
-                    if item.atlas_slot.is_none() {
+            for item in &frame_items {
+                if item.atlas.is_none() {
+                    continue;
+                }
+                if let Some(inst) = atlas_instances.get_mut(&item.entity) {
+                    let advance_t0 = std::time::Instant::now();
+                    inst.state_machine.advance(item.step);
+                    frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
+                }
+            }
+
+            // Group active atlas faces by page (each page = one begin/flush + one blit).
+            let mut groups: HashMap<AtlasPageId, Vec<usize>> = HashMap::new();
+            for (i, item) in frame_items.iter().enumerate() {
+                if let Some(a) = &item.atlas {
+                    groups.entry(a.page).or_default().push(i);
+                }
+            }
+
+            // wgpu's open primary command buffer (stable for the frame); rive records into it.
+            // SAFETY: as_hal_mut yields wgpu's open buffer; we read the handle only.
+            let cmd_buffer = unsafe {
+                render_context
+                    .command_encoder()
+                    .as_hal_mut::<Vk, _, _>(|enc| enc.map(|e| e.raw_handle().as_raw()))
+            }
+            .unwrap_or(0);
+            if cmd_buffer == 0 {
+                warn!("rive zero-copy: atlas path — wgpu encoder is not Vulkan");
+            } else {
+                for (page_id, idxs) in &groups {
+                    let Some(page_px) = frame_items[idxs[0]].atlas.as_ref().map(|a| a.page_px)
+                    else {
                         continue;
-                    }
-                    if let std::collections::hash_map::Entry::Vacant(e) =
-                        atlas_instances.entry(item.entity)
-                    {
-                        match build_atlas_instance(ctx, item) {
-                            Ok(inst) => {
-                                e.insert(inst);
+                    };
+                    // Ensure the render-world page texture exists (sized to this bucket's page).
+                    if !atlas_pages.contains_key(page_id) {
+                        match build_atlas(ctx, &render_device, page_px) {
+                            Ok(a) => {
+                                atlas_pages.insert(*page_id, a);
                             }
-                            Err(err) => {
-                                warn!("rive zero-copy: atlas instance {:?} failed: {err}", item.entity);
+                            Err(e) => {
+                                warn!("rive zero-copy: atlas page {page_id:?} build failed: {e}");
+                                continue;
                             }
                         }
                     }
-                }
-                for item in &frame_items {
-                    if item.atlas_slot.is_none() {
+                    let page = atlas_pages.get_mut(page_id).unwrap();
+
+                    // (artboard, gutter-inset tile rect) for this page — MAIN-assigned, so the
+                    // rendered tiles match the `uv_rect` each consumer was handed.
+                    let tiles: Vec<(&Artboard, [f32; 4])> = idxs
+                        .iter()
+                        .filter_map(|&i| {
+                            let a = frame_items[i].atlas.as_ref()?;
+                            let inst = atlas_instances.get(&frame_items[i].entity)?;
+                            Some((&inst.artboard, a.tile_rect))
+                        })
+                        .collect();
+                    if tiles.is_empty() {
                         continue;
                     }
-                    if let Some(inst) = atlas_instances.get_mut(&item.entity) {
-                        let advance_t0 = std::time::Instant::now();
-                        inst.state_machine.advance(item.step);
-                        frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
-                    }
-                }
-                // Collect (artboard, tile rect) using the MAIN-assigned slot, so the
-                // rendered tiles match the `uv_rect` the consumer was handed.
-                let tiles: Vec<(&Artboard, [f32; 4])> = frame_items
-                    .iter()
-                    .filter_map(|item| {
-                        let slot = item.atlas_slot?;
-                        let inst = atlas_instances.get(&item.entity)?;
-                        Some((&inst.artboard, atlas_slot_rect_px(slot)))
-                    })
-                    .collect();
-                if !tiles.is_empty() {
-                    // SAFETY: as_hal_mut yields wgpu's open buffer; we read the handle only.
-                    let cmd_buffer = unsafe {
-                        render_context
-                            .command_encoder()
-                            .as_hal_mut::<Vk, _, _>(|enc| enc.map(|e| e.raw_handle().as_raw()))
-                    }
-                    .unwrap_or(0);
-                    if cmd_buffer == 0 {
-                        warn!("rive zero-copy: atlas path — wgpu encoder is not Vulkan");
-                    } else {
-                        let record = ExternalFrameRecord {
-                            current_frame: frame_no,
-                            safe_frame,
-                            command_buffer: cmd_buffer,
-                        };
-                        let t0 = std::time::Instant::now();
-                        // SAFETY: cmd_buffer is wgpu's open buffer on this context's device;
-                        // the node runs serialized on the render thread before StartMainPass.
-                        let res = unsafe {
-                            ctx.record_external_atlas_frame(
-                                &page.target,
-                                &tiles,
-                                crate::rive_clear_rgba(),
-                                record,
-                            )
-                        };
-                        frame_cpu_us += t0.elapsed().as_secs_f64() * 1.0e6;
-                        match res {
-                            Ok(()) => {
-                                rendered_any = true;
-                                frame_instances = tiles.len() as u32;
-                                frame_flush_us += ctx.last_flush_us().unwrap_or(0.0);
-                            }
-                            Err(e) => warn!("rive zero-copy: atlas record failed: {e}"),
+                    let record = ExternalFrameRecord {
+                        current_frame: frame_no,
+                        safe_frame,
+                        command_buffer: cmd_buffer,
+                    };
+                    let t0 = std::time::Instant::now();
+                    // SAFETY: cmd_buffer is wgpu's open buffer on this context's device; the
+                    // node runs serialized on the render thread before StartMainPass.
+                    let res = unsafe {
+                        ctx.record_external_atlas_frame(
+                            &page.target,
+                            &tiles,
+                            crate::rive_clear_rgba(),
+                            record,
+                        )
+                    };
+                    frame_cpu_us += t0.elapsed().as_secs_f64() * 1.0e6;
+                    match res {
+                        Ok(()) => {
+                            rendered_any = true;
+                            frame_instances += tiles.len() as u32;
+                            frame_flush_us += ctx.last_flush_us().unwrap_or(0.0);
+                        }
+                        Err(e) => {
+                            warn!("rive zero-copy: atlas record (page {page_id:?}) failed: {e}");
+                            continue;
                         }
                     }
-                }
-                // ONE un-premult pass: the whole premultiplied atlas -> the straight-alpha
-                // display atlas the consumers sample. dst-pixel == src-pixel (both
-                // ATLAS_PAGE_PX²), so UNPREMULT_WGSL is unchanged; bind group cached.
-                if let Some(dh) = frame_items.iter().find_map(|i| i.atlas_display.clone()) {
-                    if let Some(dst) = gpu_images.get(&dh) {
+
+                    // ONE un-premult pass for this page: premultiplied page -> the straight-
+                    // alpha display page the consumers sample. dst-pixel == src-pixel (both
+                    // page_px²), so UNPREMULT_WGSL is unchanged; bind group cached per page.
+                    let display = &frame_items[idxs[0]].atlas.as_ref().unwrap().display;
+                    if let Some(dst) = gpu_images.get(display) {
                         let blit_t0 = std::time::Instant::now();
                         let device = render_device.wgpu_device();
                         if page.bind_group.is_none() {
@@ -2045,17 +2277,15 @@ fn build_instance(
     })
 }
 
-/// Builds the atlas page's shared wgpu texture (`cols*tile` × `rows*tile`) and wraps
-/// its `VkImage` as a single rive render target — [`build_instance`]'s texture path,
-/// but allocated ONCE for the whole page (Phase 2a).
+/// Builds one atlas page's shared `page_px`×`page_px` wgpu texture and wraps its `VkImage`
+/// as a single rive render target — [`build_instance`]'s texture path, but allocated ONCE
+/// for the whole page. `page_px` comes from the face's LOD bucket ([`atlas_page_px`]).
 fn build_atlas(
     ctx: &Context,
     render_device: &RenderDevice,
-    tile: u32,
-    cols: u32,
-    rows: u32,
+    page_px: u32,
 ) -> rive_renderer::Result<RiveAtlas> {
-    let (w, h) = (cols * tile, rows * tile);
+    let (w, h) = (page_px, page_px);
     let shared_tex = render_device.create_texture(&TextureDescriptor {
         label: Some("rive_atlas_shared"),
         size: Extent3d {

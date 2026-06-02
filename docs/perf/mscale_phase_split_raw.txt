@@ -73,3 +73,32 @@ rive zero-copy PERF (frames=120, instances=128): advance [us] p50=333.1 p90=1130
 rive zero-copy PERF (frames=120, instances=256): advance [us] p50=4287.9 p90=4864.8 p95=5233.7 p99=6894.6 min=902.1 max=8296.7 mean=3804.7 | frame CPU/record [us] p50=15113.1 p90=26816.0 p95=27731.4 p99=30311.8 min=12754.4 max=38234.8 mean=19413.2 | rive flush [us] p50=12323.3 p90=24265.8 p95=25247.4 p99=27259.3 min=10372.2 max=33489.8 mean=16611.5 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] unavailable | blit [us] p50=240.5 p90=301.1 p95=316.6 p99=403.3 min=179.4 max=524.1 mean=247.6 | run-ahead [frames] p50=2.0 p90=2.0 p95=2.0 p99=2.0 min=1.0 max=2.0 mean=2.0 | frame period [us] p50=25974.9 p90=37136.9 p95=39083.9 p99=42596.7 min=18572.5 max=53018.3 mean=28182.5 | fps(p50)=38.5
 === ATLAS (distinct tiles) instances=256 ===
 rive zero-copy PERF (frames=120, instances=256): advance [us] p50=1049.6 p90=3887.2 p95=3997.9 p99=4915.9 min=842.3 max=5433.0 mean=1701.3 | frame CPU/record [us] p50=4561.6 p90=5289.0 p95=5488.5 p99=5898.5 min=3749.6 max=6226.1 mean=4622.5 | rive flush [us] p50=1462.6 p90=1728.2 p95=1839.2 p99=1989.6 min=1168.3 max=2692.5 mean=1488.8 | fence wait [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | rive GPU [ms] p50=0.000 p90=0.000 p95=0.000 p99=0.000 min=0.000 max=0.000 mean=0.000 | blit [us] p50=0.0 p90=0.0 p95=0.0 p99=0.0 min=0.0 max=0.0 mean=0.0 | run-ahead [frames] p50=2.0 p90=2.0 p95=2.0 p99=2.0 min=1.0 max=2.0 mean=1.7 | frame period [us] p50=7631.9 p90=11146.2 p95=11820.7 p99=13158.3 min=5764.5 max=13173.4 mean=8254.6 | fps(p50)=131.0
+
+================================================================================
+PHASE 3: multi-page + per-LOD buckets + RiveActive cull + Changed/Removed re-sync
+================================================================================
+Buckets = [128,256,512]px tiles; page = 16x16 tiles (256 tiles/page, page_px = tile*16
+=> 2048/4096/8192). Growth = sibling page (O(pages) flush+blit). 2px writer-side gutter.
+Native 4090, octopus, speed=1, immediate, RIVE_PERF_FRAMES=200, RIVE_ATLAS=1.
+
+--- Multi-page scaling (size=512 => 512-bucket; N/256 = pages) ---
+ N=128  (1 page)  record p50=1819us  advance=388us  blit=3us   period=3406us  fps=293.6
+ N=256  (1 page)  record p50=4158us  advance=928us  blit=4us   period=6615us  fps=151.2   <- reproduces Phase 2 (~160), NO regression from the multi-page refactor
+ N=512  (2 pages) record p50=10410us advance=7522us blit=11us  period=19657us fps=50.9    <- NEW: exceeds the Phase-2 single-page 256 cap
+ N=1024 (4 pages) record p50=42840us advance=40694us blit=40us period=88384us fps=11.3    <- NEW: GPU-fill-bound (run-ahead pinned 2); the record/advance inflation is the known high-N back-pressure (M2c/Phase-2 finding), addressed by smaller buckets + cull, not a Phase-3 regression
+
+--- Per-LOD buckets (N=256, 1 page each; same fps at this N — bottleneck is CPU record/per-flush, not GPU fill or tile size — but VRAM differs sharply) ---
+ size=512  512-bucket  page 8192^2  record p50=4158us  fps=151.2   VRAM/page = 8192^2*4*2 = 512 MiB
+ size=256  256-bucket  page 4096^2  record p50=4296us  fps=143.8   VRAM/page = 128 MiB  (4x less)
+ size=128  128-bucket  page 2048^2  record p50=4343us  fps=145.3   VRAM/page = 32 MiB   (16x less)
+ => per-LOD buckets deliver the VRAM win (the C1 budget) at equal fps; small buckets are
+    the lever for distant/many NPCs (a game buckets by distance + culls off-screen).
+
+--- Cull + teardown validation (EXIT codes; the Phase-2 crash was 0xC0000005) ---
+ cap N=64  size=512 (1 page)   EXIT=0  capture clean: 8x8 distinct octopodes, no gutter bleed
+ cap N=512 size=512 (2 pages)  EXIT=0  capture: 512 distinct faces, BOTH pages render (multi-page teardown clean — drop-order holds across the page HashMap)
+ cull N=64 RIVE_CULL (free/realloc churn + Changed/Removed re-sync)  EXIT=0  (churn is teardown-safe)
+
+rive per-flush caps (render_context.cpp:497-522; exceeding => correctness-preserving auto-
+split, NOT a crash): pathCount<=MaxPathID(~64k), contourCount<=65535, tessVerts<=~4M,
+drawPassCount<=32767 (INT16_MAX, atomic/msaa only). 256 octopus tiles/flush is well under.

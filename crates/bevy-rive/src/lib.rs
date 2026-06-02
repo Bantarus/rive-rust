@@ -140,8 +140,8 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveAnimation, RiveAtlasKey, RiveFile, RiveSurface, RiveTarget,
-        StateMachineSelector,
+        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RiveSampling,
+        RiveSurface, RiveTarget, StateMachineSelector,
     };
 
     // Floor (default): the CPU-copy plugin entry point.
@@ -415,21 +415,85 @@ pub struct RiveAtlasKey(pub u32);
 
 /// Plugin **output** for an atlased face (M-SCALE): written back next to
 /// [`RiveTarget`] once a slot is assigned, and the canonical thing an atlased
-/// consumer samples. `image` is the SHARED atlas (one handle for every face of the
-/// key); `uv_rect` is THIS face's normalized `[0, 1]` sub-rect of it. Straight-alpha
-/// `Rgba8UnormSrgb`, exactly like the dedicated [`RiveTarget::image`].
+/// consumer samples. `image` is the shared atlas **page** this face was packed into
+/// (every face sharing that page shares the handle); `uv_rect` is THIS face's normalized
+/// `[0, 1]` sub-rect of it. Straight-alpha `Rgba8UnormSrgb`, exactly like the dedicated
+/// [`RiveTarget::image`].
 ///
-/// 3D: set `StandardMaterial.uv_transform` from `uv_rect`. 2D: set `Sprite.rect` =
-/// `uv_rect * atlas_size`. A non-atlased face has no `RiveSurface` (sample
-/// `RiveTarget.image` as before).
+/// 3D: set `StandardMaterial.uv_transform` from `uv_rect` ([`RiveSampling::uv_transform`]).
+/// 2D: set `Sprite.rect` ([`RiveSampling::sprite_rect`]). A non-atlased face has no
+/// `RiveSurface` (sample [`RiveTarget::image`] as before).
+///
+/// **Re-sync is MANDATORY, not one-shot.** This face's `uv_rect` can CHANGE after a cull or
+/// LOD repack, and the component is REMOVED while the face is culled (its tile is freed and
+/// may be handed to another face). A consumer that latches the sampling once will then
+/// mis-sample (a stale or reused tile). Drive sampling from BOTH `Changed<RiveSurface>`
+/// (re-point) AND `RemovedComponents<RiveSurface>` (hide the display) — see the
+/// `resync_atlas_sprites` system in the `sprite_riv_zerocopy` example.
 #[derive(Component, Debug, Clone)]
 pub struct RiveSurface {
-    /// The shared atlas image (same handle for every face of the key).
+    /// The shared atlas page image (same handle for every face packed into that page).
     pub image: Handle<Image>,
-    /// This face's sub-rect of the atlas, normalized `[0, 1]` (origin + size).
+    /// This face's sub-rect of the atlas page, normalized `[0, 1]` (origin + size).
     pub uv_rect: Rect,
-    /// The atlas image's pixel size (for `Sprite.rect = uv_rect * atlas_size`).
+    /// The atlas page's pixel size (for `Sprite.rect = uv_rect * atlas_size`).
     pub atlas_size: UVec2,
+}
+
+/// Cull flag for a rive face (M-SCALE Phase 3). `RiveActive(false)` **pauses** the face: it
+/// is not advanced and not rendered this frame, but its rive state machine is PRESERVED, so
+/// reactivation **resumes in place** (no restart, no `.riv` re-parse). An atlas face also
+/// **frees its tile** while paused; reactivation re-allocates a (possibly different) tile, so
+/// atlas consumers MUST re-read [`RiveSurface`] on `Changed` and hide on its removal (see
+/// [`RiveSampling`]). A **dedicated** (non-atlas) face has no tile and no `RiveSurface`: while
+/// paused its display image simply **freezes** on its last rendered frame (no auto-clear, no
+/// hide signal) — the consumer must toggle the display entity's `Visibility` itself.
+/// Absent is treated as active, so existing consumers are unaffected.
+///
+/// This is the engine-side hook for game LOD (Tier A): the game decides which faces are
+/// live and writes `RiveActive`. There is no automatic frustum cull here — the rive face is
+/// decoupled from its display entity (the two-entity pattern), so it has no `ViewVisibility`;
+/// a consumer can drive this from the display sprite's `ViewVisibility` if it wants engine
+/// culling. Honored by the `zero_copy` tier; the floor tier ignores it.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RiveActive(pub bool);
+
+impl Default for RiveActive {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// Maps a [`RiveSurface`] to a consumer's sampling parameters. An atlas face occupies a
+/// sub-rect of a SHARED page, so a consumer cannot bind the whole texture — it sets the 2D
+/// `Sprite.rect` or the 3D `StandardMaterial.uv_transform` from these. For a non-atlas face
+/// (no `RiveSurface`), sample the dedicated [`RiveTarget::image`] with no transform.
+///
+/// Run these on `Changed<RiveSurface>` (not once): a culled-then-reactivated face, or a LOD
+/// repack, hands the consumer a NEW `uv_rect`, and a single-shot latch would strand a stale
+/// (often full-page) sub-rect → permanent mis-sample.
+#[derive(Debug)]
+pub struct RiveSampling;
+
+impl RiveSampling {
+    /// 2D: the pixel `Rect` for `Sprite.rect` — this face's inset tile within the page.
+    #[must_use]
+    pub fn sprite_rect(surface: &RiveSurface) -> Rect {
+        let size = surface.atlas_size.as_vec2();
+        Rect {
+            min: surface.uv_rect.min * size,
+            max: surface.uv_rect.max * size,
+        }
+    }
+
+    /// 3D: the `StandardMaterial.uv_transform` ([`bevy::math::Affine2`]) mapping a mesh's
+    /// full-`[0, 1]` UVs onto this face's tile — `uv' = uv_rect.size()·uv + uv_rect.min`.
+    /// One line on a shared full-UV quad mesh; no custom material, no per-face mesh.
+    #[must_use]
+    pub fn uv_transform(surface: &RiveSurface) -> bevy::math::Affine2 {
+        let r = surface.uv_rect;
+        bevy::math::Affine2::from_scale_angle_translation(r.size(), 0.0, r.min)
+    }
 }
 
 // ---------------------------------------------------------------------------

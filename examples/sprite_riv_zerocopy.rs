@@ -37,8 +37,8 @@ use bevy::window::PresentMode;
 use bevy::winit::WinitSettings;
 
 use bevy_rive::{
-    install_interlock_device_callback, RiveAnimation, RiveAtlasKey, RiveFile, RiveSurface,
-    RiveTarget, RiveZeroCopyPlugin,
+    install_interlock_device_callback, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile,
+    RiveSampling, RiveSurface, RiveTarget, RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -59,6 +59,11 @@ struct Cfg {
     /// M-SCALE: when `RIVE_ATLAS` is set, opt every face into the shared atlas (one
     /// render pass for all of them); each sprite then samples its tile via `RiveSurface`.
     atlas: bool,
+    /// M-SCALE Phase 3: when `RIVE_CULL` is set, oscillate `RiveActive` on the odd-slot
+    /// faces (deactivate → reactivate) — exercises the per-LOD packer's free/realloc and
+    /// the `Changed`/`Removed` `RiveSurface` re-sync. Off by default (perf/capture runs
+    /// stay deterministic and full-grid).
+    cull: bool,
 }
 
 #[derive(Resource, Default)]
@@ -82,6 +87,12 @@ struct RiveSlot(u32);
 /// attaches each instance exactly once.
 #[derive(Component)]
 struct DisplayAttached;
+
+/// Links a rive (face) entity to its display-sprite entity (the two-entity pattern), so the
+/// `Changed`/`Removed` `RiveSurface` re-sync can find the sprite to re-point at a new tile
+/// (after a cull/LOD repack) or hide (after a cull frees the tile).
+#[derive(Component)]
+struct DisplayLink(Entity);
 
 fn main() {
     let riv = std::env::var("RIVE_RIV")
@@ -107,6 +118,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1u32)
         .clamp(1, 1024);
+    // M-SCALE Phase 3: per-face target size — picks the atlas LOD bucket under RIVE_ATLAS
+    // (≤128 → 128-bucket, ≤256 → 256, else 512). Default 512 (the M1a/M2 target size).
+    let size = std::env::var("RIVE_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(512u32)
+        .clamp(16, 2048);
     // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
     // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
     // frame budget past that so the run self-terminates with the summary printed.
@@ -172,19 +190,27 @@ fn main() {
     .insert_resource(WinitSettings::continuous())
     .insert_resource(Cfg {
         riv,
-        size: 512,
+        size,
         capture,
         warmup,
         speed,
         instances,
         perf_exit_frames,
         atlas: std::env::var_os("RIVE_ATLAS").is_some(),
+        cull: std::env::var_os("RIVE_CULL").is_some(),
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
     .add_systems(
         Update,
-        (attach_display, drive_capture, drive_perf_exit).chain(),
+        (
+            attach_display,
+            resync_atlas_sprites,
+            drive_cull,
+            drive_capture,
+            drive_perf_exit,
+        )
+            .chain(),
     )
     .run();
 }
@@ -216,7 +242,12 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         } else {
             RiveTarget::new(cfg.size, cfg.size)
         };
-        commands.spawn((anim, target, RiveEntity, RiveSlot(i)));
+        let mut e = commands.spawn((anim, target, RiveEntity, RiveSlot(i)));
+        // Under RIVE_CULL the driver toggles RiveActive; add it now so the component
+        // exists to mutate (absent would mean "always active" — nothing to cull).
+        if cfg.cull {
+            e.insert(RiveActive(true));
+        }
     }
 }
 
@@ -231,18 +262,14 @@ fn attach_display(
     query: Query<(Entity, &RiveTarget, &RiveSlot, Option<&RiveSurface>), Without<DisplayAttached>>,
 ) {
     for (entity, target, slot, surface) in &query {
-        // Atlas faces sample their TILE of the shared atlas (via RiveSurface.rect);
-        // dedicated faces sample their whole per-face image (the default tier).
+        // Atlas faces sample their TILE of the shared atlas (via `RiveSampling`); dedicated
+        // faces sample their whole per-face image (the default tier).
         let sprite = if target.atlas.is_some() {
             let Some(surface) = surface else {
                 continue; // slot not assigned / RiveSurface not written yet
             };
             let mut s = Sprite::from_image(surface.image.clone());
-            let size = surface.atlas_size.as_vec2();
-            s.rect = Some(Rect {
-                min: surface.uv_rect.min * size,
-                max: surface.uv_rect.max * size,
-            });
+            s.rect = Some(RiveSampling::sprite_rect(surface)); // this face's tile sub-rect
             s
         } else {
             if target.image == Handle::default() {
@@ -250,12 +277,68 @@ fn attach_display(
             }
             Sprite::from_image(target.image.clone())
         };
-        commands.spawn((
-            sprite,
-            grid_transform(slot.0, cfg.instances, cfg.size as f32),
-            DisplayQuad,
-        ));
-        commands.entity(entity).insert(DisplayAttached);
+        let display = commands
+            .spawn((
+                sprite,
+                grid_transform(slot.0, cfg.instances, cfg.size as f32),
+                DisplayQuad,
+                Visibility::Visible,
+            ))
+            .id();
+        // Mark the face attached (one-shot spawn) and link it to its sprite so the re-sync
+        // can re-point/hide that sprite after a later cull or LOD repack.
+        commands
+            .entity(entity)
+            .insert((DisplayAttached, DisplayLink(display)));
+    }
+}
+
+/// Re-syncs each atlas face's display sprite to its CURRENT tile (M-SCALE Phase 3). The
+/// main-world packer can hand a face a NEW `uv_rect` after a cull/LOD repack, or REMOVE
+/// `RiveSurface` when the face is culled (its tile is then freed for another face) — a
+/// one-shot latch would strand a stale sub-rect, so an atlas consumer MUST run this:
+///  * `Changed<RiveSurface>` → re-point the sprite at the new tile and show it.
+///  * `RemovedComponents<RiveSurface>` → hide the sprite (its old tile may now be reused).
+///
+/// (The first-frame insert is handled by `attach_display`, which spawns the sprite + link;
+/// this system covers every change AFTER the link exists.)
+fn resync_atlas_sprites(
+    changed: Query<(&RiveSurface, &DisplayLink), Changed<RiveSurface>>,
+    mut removed: RemovedComponents<RiveSurface>,
+    links: Query<&DisplayLink>,
+    mut sprites: Query<(&mut Sprite, &mut Visibility), With<DisplayQuad>>,
+) {
+    for (surface, link) in &changed {
+        if let Ok((mut sprite, mut vis)) = sprites.get_mut(link.0) {
+            sprite.image = surface.image.clone();
+            sprite.rect = Some(RiveSampling::sprite_rect(surface));
+            *vis = Visibility::Visible;
+        }
+    }
+    for face in removed.read() {
+        if let Ok(link) = links.get(face) {
+            if let Ok((_, mut vis)) = sprites.get_mut(link.0) {
+                *vis = Visibility::Hidden;
+            }
+        }
+    }
+}
+
+/// `RIVE_CULL` exercise (M-SCALE Phase 3): oscillate the odd-slot faces' [`RiveActive`] so
+/// the per-LOD packer frees + reallocates their tiles and `resync_atlas_sprites` re-points
+/// or hides their sprites. No-op unless `RIVE_CULL` was set (perf/capture runs are full-grid).
+fn drive_cull(cfg: Res<Cfg>, mut frame: Local<u32>, mut q: Query<(&RiveSlot, &mut RiveActive)>) {
+    if !cfg.cull {
+        return;
+    }
+    *frame += 1;
+    // Flip the odd slots active/inactive every 90 frames; even slots stay active.
+    let odd_active = (*frame / 90).is_multiple_of(2);
+    for (slot, mut active) in &mut q {
+        let want = slot.0.is_multiple_of(2) || odd_active;
+        if active.0 != want {
+            active.0 = want;
+        }
     }
 }
 

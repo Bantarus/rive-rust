@@ -52,8 +52,9 @@
 //! way the [`Image`] is filled (CPU readback + copy, `MAIN_WORLD | RENDER_WORLD`
 //! residency, the `Assets::get_mut` re-upload). M1b replaces these with a
 //! `RENDER_WORLD`-only shared `VkImage` (`data: None`, no CPU copy). Also not
-//! frozen: the exact [`Image`] *pixel format* and the *alpha convention*
-//! (straight here, premultiplied for M1b's zero-copy) — read the format off the
+//! frozen: the *internal* texture format + fill mechanism (M1a CPU-readback; M1b a
+//! shared `Rgba8Unorm` + a GPU un-premultiply pass). `RiveTarget.image` itself is
+//! **straight-alpha `Rgba8UnormSrgb` on both tiers** — read the format off the
 //! `Image`, not from a constant.
 //!
 //! ```no_run
@@ -85,11 +86,13 @@
 //! The image is **straight-alpha**, sRGB-encoded `RGBA8`, top-down rows (upright
 //! by construction — the shim is the only place orientation is corrected),
 //! allocated as [`TextureFormat::Rgba8UnormSrgb`]. rive's native output is
-//! premultiplied; the plugin un-premultiplies on readback so a straight-alpha
-//! `Sprite` composites correctly in linear space for **both** opaque (matching the
-//! M0/M1.0 references exactly) and transparent content. M1b's zero-copy path keeps
-//! rive's premultiplied bytes (it cannot un-premultiply), so the alpha convention
-//! is per-tier — see `docs/M1A_REPORT.md`.
+//! premultiplied; **both tiers un-premultiply**, so a straight-alpha `Sprite` (or a
+//! 3D `StandardMaterial` with `AlphaMode::Blend`) composites correctly in linear
+//! space for **both** opaque (matching the M0/M1.0 references exactly) and
+//! transparent content. M1a un-premultiplies on CPU readback; M1b's zero-copy path
+//! does it in a fullscreen GPU pass (un-premultiply + sRGB-decode, design spec §7
+//! Option B). The straight-alpha convention is therefore **uniform across tiers** —
+//! see `docs/M1A_REPORT.md` and `docs/design/M1B_DESIGN_SPEC.md` §7.
 
 use std::sync::Arc;
 
@@ -102,11 +105,11 @@ use bevy::prelude::*;
 // native-render systems do — so `--no-default-features --features zero_copy` compiles
 // the frozen API + zero-copy tier without pulling `wgpu-types` or these systems.
 #[cfg(feature = "floor")]
-use std::collections::{HashMap, HashSet};
-#[cfg(feature = "floor")]
 use bevy::asset::RenderAssetUsages;
 #[cfg(feature = "floor")]
 use rive_renderer::{Artboard, Context, RenderTarget, StateMachine};
+#[cfg(feature = "floor")]
+use std::collections::{HashMap, HashSet};
 #[cfg(feature = "floor")]
 use wgpu_types::{Extent3d, TextureDimension, TextureFormat};
 

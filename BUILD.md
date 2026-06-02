@@ -279,3 +279,31 @@ The archive is **ABI-specific** — it is tied to the toolchain, the Cargo profi
 (debug/release link different rive libs), and the target triple. Ship one set per
 target. Per-platform binary *hosting* + CI (so consumers never build C++ at all) is the
 follow-on; this milestone establishes the link mechanism.
+
+---
+
+## 9. Windows consumers MUST enable the static CRT (`+crt-static`)
+
+rive-runtime forces the **static CRT** (`/MT`) on Windows regardless of profile, and `/MT`
+cannot be mixed with `/MD` in one binary. So **any crate that links `bevy-rive`** (a game,
+an engine plugin) must build the whole binary with the static CRT — the cc-built shim,
+Rust std, and the consumer all `/MT` — or `link.exe` reports a wall of `LNK2038`
+*RuntimeLibrary mismatch* (`MT_StaticRelease` vs `MD_DynamicRelease`) plus `libcpmt`/
+`msvcprt` double-definitions.
+
+`.cargo/config.toml` is **per-workspace** — a consumer does **not** inherit rive-rust's
+setting and must enable it itself, by either:
+
+```toml
+# the consumer crate's .cargo/config.toml
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+```
+
+or `set RUSTFLAGS=-C target-feature=+crt-static` for the build (e.g. scoped inside a
+rive-specific launch script, so a non-rive build of the same project keeps its default
+dynamic CRT). **cargo does not merge rustflags sources** — if you already set rustflags via
+config `[build]`, a `[target.*]` block, or the env, fold `+crt-static` into that one source
+rather than adding a competing one. `rive-renderer-sys`'s `build.rs` fails fast with this
+exact remedy if the static CRT is off (instead of the cryptic `LNK2038` wall). Validated:
+the `sprite_riv_zerocopy` example (Bevy + zero-copy on the native 4090) links this way.

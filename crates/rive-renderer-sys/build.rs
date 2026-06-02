@@ -97,6 +97,28 @@ fn main() {
 
     let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
 
+    // Windows/MSVC: rive-runtime forces the STATIC CRT (/MT) in its own build config, and
+    // /MT cannot be mixed with /MD in one binary — so the cc-built shim, Rust std, and the
+    // consuming crate must ALL use the static CRT, or the link dies with a wall of LNK2038
+    // RuntimeLibrary mismatches (MT_StaticRelease vs MD_DynamicRelease) + libcpmt/msvcprt
+    // double-definitions. cc picks /MT vs /MD from this target feature. `.cargo/config.toml`
+    // is per-WORKSPACE, so a CONSUMER crate (e.g. a game pulling bevy-rive) does NOT inherit
+    // rive-rust's setting and must enable it itself. Fail FAST here, before the cryptic link
+    // error, with the exact remedy. (Applies to the prebuilt path too: rive's .libs are /MT.)
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if windows && msvc && !target_feature_enabled("crt-static") {
+        panic!(
+            "rive-renderer-sys (Windows/MSVC) requires the STATIC CRT: rive-runtime forces /MT, \
+             which cannot be mixed with /MD. Enable it in the CONSUMER crate's .cargo/config.toml \
+             (NOT inherited across workspaces):\n\
+             \n    [target.x86_64-pc-windows-msvc]\n    rustflags = [\"-C\", \"target-feature=+crt-static\"]\n\
+             \nIf you already set rustflags (there, via [build], or the RUSTFLAGS env), MERGE \
+             `+crt-static` in — cargo does NOT combine rustflags sources, one wins. Then \
+             `cargo clean -p rive-renderer-sys` and rebuild. Without it the cc shim links /MD \
+             while rive's libs are /MT -> LNK2038 RuntimeLibrary mismatch."
+        );
+    }
+
     // Prebuilt fast path (M-PKG.1): if pre-archived rive + shim libs are provided, link
     // them and skip the ENTIRE C++ build — premake, make/msbuild, the shader build, the
     // shim compile, and even the rive-runtime submodule. This removes the C++ toolchain
@@ -465,6 +487,15 @@ fn link_prebuilt_libs(dir: &Path, windows: bool) {
 
 fn env_var(key: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| panic!("missing env var {key}"))
+}
+
+/// True if `feat` is in `CARGO_CFG_TARGET_FEATURE` — the effective enabled target features
+/// cargo passes to build scripts (reflecting `+crt-static` from a config `rustflags` OR the
+/// `RUSTFLAGS` env, whichever the consumer used).
+fn target_feature_enabled(feat: &str) -> bool {
+    std::env::var("CARGO_CFG_TARGET_FEATURE")
+        .map(|f| f.split(',').any(|x| x == feat))
+        .unwrap_or(false)
 }
 
 fn ensure_submodule_present(rive_root: &Path) {

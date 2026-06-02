@@ -149,6 +149,18 @@ extern "C" {
         artboard: *mut RiveArtboard,
         ctx: *mut RiveRenderContext,
     ) -> RiveStatus;
+    /// Like [`rive_artboard_draw`] but fits + clips the artboard into the sub-rect
+    /// `(x,y,w,h)` of the bound target (an atlas tile, target pixels). The clip uses
+    /// rive's cheap axis-aligned clipRect shader path (no mask draw). Call between a
+    /// begin and a record/flush.
+    pub fn rive_artboard_draw_viewport(
+        artboard: *mut RiveArtboard,
+        ctx: *mut RiveRenderContext,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> RiveStatus;
     pub fn rive_frame_flush(ctx: *mut RiveRenderContext) -> RiveStatus;
 
     pub fn rive_render_target_read_pixels(

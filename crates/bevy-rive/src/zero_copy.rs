@@ -42,16 +42,19 @@
 //!    shim fences), then copies that texture into the **display**
 //!    `Rgba8UnormSrgb` `Image` the `Sprite` samples.
 //!
-//! # Display (step 1 vs the un-premultiply pass)
+//! # Display — the un-premultiply pass (design spec §7 Option B, IMPLEMENTED)
 //!
-//! M1b renders rive's *premultiplied* bytes into the shared `Rgba8Unorm` texture
-//! and currently copies them straight into the `Rgba8UnormSrgb` display image
-//! (`copy_texture_to_texture` — byte-identical, copy-compatible). The `Sprite`
-//! then hardware-sRGB-decodes on sample. This is **pixel-correct for opaque
-//! content** (the M0/M1.0 references, where premultiplied == straight) and is the
-//! M1b step-1 display. Fully-correct *transparent* compositing needs the
-//! un-premultiply + sRGB-decode fullscreen pass (design spec §7 Option B); that
-//! is the documented follow-up and is flagged at the copy site.
+//! rive renders **premultiplied, sRGB-encoded** bytes into the internal shared
+//! `Rgba8Unorm` texture. A fullscreen un-premultiply + sRGB-decode pass — recorded
+//! inside [`RiveFillNode`] (after rive's draws, before `StartMainPass`) by the
+//! `RiveBlitPipeline` (`UNPREMULT_WGSL`) — un-premultiplies in ENCODED space,
+//! sRGB-decodes, and writes the **straight-alpha** result into the `Rgba8UnormSrgb`
+//! display image that becomes `RiveTarget.image`. Correct for **both** opaque
+//! (premultiplied == straight; matches the M0/M1.0 references exactly) and
+//! **transparent** content (≤1–2 LSB on AA edges, no fringe). Both tiers therefore
+//! end at the same **straight-alpha `Rgba8UnormSrgb`** seam — a `Sprite`, or a 3D
+//! `StandardMaterial` with `AlphaMode::Blend`, composites `RiveTarget.image`
+//! directly (NOT `AlphaMode::Premultiplied` — the image is straight, not premultiplied).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -457,6 +460,10 @@ struct RiveInstance {
     /// A sampled view of `shared_tex` (the un-premult pass's source binding).
     /// Bevy's `TextureView` newtype; `Deref`s to `wgpu::TextureView`.
     shared_view: TextureView,
+    /// Cached un-premult-pass bind group (sole input = the stable `shared_view`).
+    /// Built once on first render and reused — the shared texture is zero-copy and
+    /// never changes, so this removes a per-frame `create_bind_group` per instance.
+    bind_group: Option<wgpu::BindGroup>,
 }
 
 /// The fullscreen un-premultiply + sRGB-decode blit pipeline (M1b display).
@@ -596,6 +603,10 @@ struct PerfStats {
     seen: u32,
     /// Instance count of the most recent recorded frame (the run's N).
     instances: u32,
+    /// M-SCALE: per-frame state-machine `advance` total (CPU tick), summed over
+    /// instances. Runs *before* the record span so it is invisible to
+    /// `frame_cpu_us` — the term that decides whether threading `advance` pays off.
+    frame_advance_us: Vec<f64>,
     /// Per-frame rive submit wall, summed over the frame's instances.
     frame_cpu_us: Vec<f64>,
     /// Per-frame rive CPU `flush()` total (shim-measured), summed over instances.
@@ -604,6 +615,9 @@ struct PerfStats {
     frame_fence_us: Vec<f64>,
     /// Per-frame rive GPU command-buffer total, summed over instances.
     frame_gpu_ms: Vec<f64>,
+    /// M-SCALE: per-frame un-premult blit-encode total (cached-bind-group lookup +
+    /// the fullscreen pass), summed over instances. Runs *after* the record span.
+    frame_blit_us: Vec<f64>,
     /// M2b diagnostic — per-frame CPU run-ahead = `current_frame - safe_frame` (frames
     /// submitted but not yet GPU-complete). Correlates flush growth/variance with how
     /// far the CPU outruns GPU completion. Real with the exact timeline watermark;
@@ -620,18 +634,24 @@ struct PerfStats {
     summarized: bool,
 }
 
+/// One frame's aggregate per-phase timings, each summed over the frame's instances.
+/// Named fields (not positional `f64`s) so the per-phase split — advance | record
+/// (`cpu`/`flush`) | `blit` — can't be transposed at the call site.
+struct FrameTimings {
+    instances: u32,
+    advance_us: f64,
+    cpu_us: f64,
+    flush_us: f64,
+    fence_us: f64,
+    gpu_ms: Option<f64>,
+    blit_us: f64,
+    run_ahead: f64,
+}
+
 impl PerfStats {
-    /// Record one frame's aggregate timings (summed over `instances` submits).
+    /// Record one frame's aggregate timings (summed over the frame's instances).
     /// `gpu_ms` is `None` if GPU timing was unavailable for any submit this frame.
-    fn record_frame(
-        &mut self,
-        instances: u32,
-        cpu_us: f64,
-        flush_us: f64,
-        fence_us: f64,
-        gpu_ms: Option<f64>,
-        run_ahead: f64,
-    ) {
+    fn record_frame(&mut self, t: FrameTimings) {
         if !self.enabled || self.summarized {
             return;
         }
@@ -647,12 +667,14 @@ impl PerfStats {
                 .push(now.duration_since(prev).as_secs_f64() * 1e6);
         }
         self.last_frame_at = Some(now);
-        self.instances = instances;
-        self.frame_cpu_us.push(cpu_us);
-        self.frame_flush_us.push(flush_us);
-        self.frame_fence_us.push(fence_us);
-        self.frame_run_ahead.push(run_ahead);
-        if let Some(ms) = gpu_ms {
+        self.instances = t.instances;
+        self.frame_advance_us.push(t.advance_us);
+        self.frame_cpu_us.push(t.cpu_us);
+        self.frame_flush_us.push(t.flush_us);
+        self.frame_fence_us.push(t.fence_us);
+        self.frame_blit_us.push(t.blit_us);
+        self.frame_run_ahead.push(t.run_ahead);
+        if let Some(ms) = t.gpu_ms {
             self.frame_gpu_ms.push(ms);
         }
         if self.frame_cpu_us.len() as u32 >= self.target {
@@ -663,6 +685,8 @@ impl PerfStats {
 
     fn summarize(&self) {
         let cpu = Summary::of(&self.frame_cpu_us);
+        let advance = Summary::of(&self.frame_advance_us);
+        let blit = Summary::of(&self.frame_blit_us);
         let flush = Summary::of(&self.frame_flush_us);
         let fence = Summary::of(&self.frame_fence_us);
         let gpu = Summary::of(&self.frame_gpu_ms);
@@ -676,11 +700,13 @@ impl PerfStats {
             0.0
         };
         info!(
-            "rive zero-copy PERF (frames={}, instances={}): frame CPU [us] {} | \
-             rive flush [us] {} | fence wait [us] {} | rive GPU [ms] {} | \
-             run-ahead [frames] {} | frame period [us] {} | fps(p50)={:.1}",
+            "rive zero-copy PERF (frames={}, instances={}): advance [us] {} | \
+             frame CPU/record [us] {} | rive flush [us] {} | fence wait [us] {} | \
+             rive GPU [ms] {} | blit [us] {} | run-ahead [frames] {} | \
+             frame period [us] {} | fps(p50)={:.1}",
             cpu.n,
             self.instances,
+            advance.fmt_us(),
             cpu.fmt_us(),
             flush.fmt_us(),
             fence.fmt_us(),
@@ -689,6 +715,7 @@ impl PerfStats {
             } else {
                 "unavailable".to_string()
             },
+            blit.fmt_us(),
             run_ahead.fmt_us(),
             period.fmt_us(),
             fps_p50,
@@ -840,7 +867,7 @@ struct ExtractedRives(Vec<ExtractedRive>);
 /// Allocates the display [`Image`] for each M1b entity whose `.riv` has loaded
 /// and whose [`RiveTarget`] has no image yet, then writes the handle back. The
 /// image is GPU-only (`data: None`), `Rgba8UnormSrgb`, with the usages the
-/// render-graph copy + the sprite sample need.
+/// un-premultiply display pass + the sprite sample need.
 fn allocate_display_images(
     mut query: Query<(&RiveAnimation, &mut RiveTarget)>,
     files: Res<Assets<RiveFile>>,
@@ -1200,6 +1227,13 @@ impl Node for RiveFillNode {
         // M2a: non-blocking record-into-wgpu by default; RIVE_BLOCKING uses the M1b
         // blocking submit+fence path (needs `queue`).
         let blocking = handles.blocking_submit;
+        // SPIKE/Phase-1 (RIVE_BATCH): record ALL instances' artboards in ONE begin/flush
+        // (after the loop) to measure the per-flush overhead batching removes. Per-instance
+        // record + blit are skipped; only valid on the non-blocking path. RIVE_BATCH=2 adds
+        // the per-draw clipRect (the C2 clip-cost A/B vs the no-clip =1 baseline).
+        let batch_val = std::env::var("RIVE_BATCH").ok();
+        let batch = !blocking && batch_val.is_some();
+        let batch_clip = batch_val.as_deref() == Some("2");
 
         // One-time, now that the context exists: apply the M2.0 perf knobs (the
         // clockwise PLS override + perf-collector config) carried on the handles.
@@ -1241,10 +1275,14 @@ impl Node for RiveFillNode {
 
         // M2a per-frame perf accumulators (summed across this frame's instances).
         let mut frame_instances = 0u32;
+        // M-SCALE: per-phase split (advance | record(=cpu/flush) | blit), so the
+        // measure-first question is an observed number, not an assumption.
+        let mut frame_advance_us = 0.0_f64;
         let mut frame_cpu_us = 0.0_f64;
         let mut frame_flush_us = 0.0_f64;
         let mut frame_fence_us = 0.0_f64;
         let mut frame_gpu_ms = 0.0_f64;
+        let mut frame_blit_us = 0.0_f64;
         // GPU timing is all-or-nothing per frame: if any submit lacked a timestamp,
         // the frame's GPU total is not reported (avoids undercounting).
         let mut frame_gpu_ok = true;
@@ -1307,7 +1345,17 @@ impl Node for RiveFillNode {
             //    per-frame submit, GPU-ordered before the un-premult pass below.
             //  * M1b blocking (RIVE_BLOCKING=1): out-of-band submit + blocking fence,
             //    kept as a selectable fallback and an A/B baseline on one build.
+            // M-SCALE: time the per-instance state-machine tick (previously untimed
+            // — it runs before the record span, so the collector never saw it).
+            let advance_t0 = std::time::Instant::now();
             inst.state_machine.advance(item.step);
+            frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
+
+            // SPIKE: under RIVE_BATCH the per-instance record + blit below are skipped;
+            // all artboards are recorded together in one begin/flush after the loop.
+            if batch {
+                continue;
+            }
 
             // For the non-blocking path, fetch wgpu's open primary command buffer for
             // this frame; rive records into it via its own Vulkan dispatch.
@@ -1419,15 +1467,25 @@ impl Node for RiveFillNode {
             // uses textureLoad), then draw a fullscreen triangle into the display
             // texture view. REPLACE blend (pipeline `blend: None`) overwrites the
             // whole display image.
+            // M-SCALE: time the un-premult blit-encode (bind-group lookup + pass) so
+            // the per-phase split (advance | record | blit) is observable. The bind
+            // group is cached on the instance — its only input, `shared_view`, is a
+            // stable zero-copy texture — so steady-state frames re-encode the pass
+            // only, with no per-frame `create_bind_group`.
+            let blit_t0 = std::time::Instant::now();
             let device = render_device.wgpu_device();
-            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("rive_unpremult_bg"),
-                layout: &blit.layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&inst.shared_view),
-                }],
-            });
+            if inst.bind_group.is_none() {
+                let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("rive_unpremult_bg"),
+                    layout: &blit.layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&inst.shared_view),
+                    }],
+                });
+                inst.bind_group = Some(bg);
+            }
+            let bind_group = inst.bind_group.as_ref().unwrap();
             let color_attachments = [Some(wgpu::RenderPassColorAttachment {
                 view: &dst.texture_view,
                 depth_slice: None,
@@ -1448,8 +1506,61 @@ impl Node for RiveFillNode {
                     },
                 );
                 pass.set_pipeline(&blit.pipeline);
-                pass.set_bind_group(0, &bind_group, &[]);
+                pass.set_bind_group(0, bind_group, &[]);
                 pass.draw(0..3, 0..1);
+            }
+            frame_blit_us += blit_t0.elapsed().as_secs_f64() * 1.0e6;
+        }
+
+        // SPIKE (RIVE_BATCH): one begin -> N draws -> one record for the WHOLE frame,
+        // to measure the per-flush overhead that real (atlas) batching would remove.
+        // All artboards overlap into the first instance's target — this times CPU
+        // record only (no display blit under batch).
+        if batch {
+            let built: Vec<&RiveInstance> = frame_items
+                .iter()
+                .filter_map(|it| instances.get(&it.entity))
+                .collect();
+            if let Some(first) = built.first() {
+                // wgpu's single open primary command buffer for this frame.
+                // SAFETY: `as_hal_mut` yields wgpu's open buffer; we read the handle only.
+                let cmd_buffer = unsafe {
+                    render_context
+                        .command_encoder()
+                        .as_hal_mut::<Vk, _, _>(|enc| enc.map(|e| e.raw_handle().as_raw()))
+                }
+                .unwrap_or(0);
+                if cmd_buffer == 0 {
+                    warn!("rive zero-copy: batch path — wgpu encoder is not Vulkan");
+                } else {
+                    let artboards: Vec<&Artboard> = built.iter().map(|i| &i.artboard).collect();
+                    let record = ExternalFrameRecord {
+                        current_frame: frame_no,
+                        safe_frame,
+                        command_buffer: cmd_buffer,
+                    };
+                    let t0 = std::time::Instant::now();
+                    // SAFETY: `cmd_buffer` is wgpu's open buffer on this context's device;
+                    // the node runs serialized on the render thread before StartMainPass.
+                    let res = unsafe {
+                        ctx.record_external_frame_batched(
+                            &first.target,
+                            &artboards,
+                            crate::rive_clear_rgba(),
+                            record,
+                            batch_clip,
+                        )
+                    };
+                    frame_cpu_us += t0.elapsed().as_secs_f64() * 1.0e6;
+                    match res {
+                        Ok(()) => {
+                            rendered_any = true;
+                            frame_instances = built.len() as u32;
+                            frame_flush_us += ctx.last_flush_us().unwrap_or(0.0);
+                        }
+                        Err(e) => warn!("rive zero-copy: batched record failed: {e}"),
+                    }
+                }
             }
         }
 
@@ -1459,14 +1570,16 @@ impl Node for RiveFillNode {
         if frame_instances > 0 {
             // run-ahead = frames submitted but not yet GPU-complete (current - safe).
             let run_ahead = frame_no.saturating_sub(safe_frame) as f64;
-            perf.record_frame(
-                frame_instances,
-                frame_cpu_us,
-                frame_flush_us,
-                frame_fence_us,
-                frame_gpu_ok.then_some(frame_gpu_ms),
+            perf.record_frame(FrameTimings {
+                instances: frame_instances,
+                advance_us: frame_advance_us,
+                cpu_us: frame_cpu_us,
+                flush_us: frame_flush_us,
+                fence_us: frame_fence_us,
+                gpu_ms: frame_gpu_ok.then_some(frame_gpu_ms),
+                blit_us: frame_blit_us,
                 run_ahead,
-            );
+            });
         }
 
         // Log the active interlock mode once a real frame has rendered (so
@@ -1626,6 +1739,7 @@ fn build_instance(
         target,
         shared_tex,
         shared_view,
+        bind_group: None,
         display: item.display.clone(),
     })
 }

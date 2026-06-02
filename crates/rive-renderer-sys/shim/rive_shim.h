@@ -111,6 +111,16 @@ RiveStatus         rive_frame_begin(RiveRenderContext* ctx,
 RiveStatus         rive_artboard_draw(RiveArtboard* artboard,
                                       RiveRenderContext* ctx);
 
+/* Like rive_artboard_draw, but fits the artboard (Fit::contain + center) into the
+ * sub-rect (x,y,w,h) of the bound target — an ATLAS TILE, in target pixels — and
+ * CLIPS to that rect so content cannot bleed into neighboring tiles. The clip uses
+ * rive's cheap axis-aligned clipRect shader path (no mask draw). Call between a
+ * begin and a record/flush, like rive_artboard_draw. */
+RiveStatus         rive_artboard_draw_viewport(RiveArtboard* artboard,
+                                               RiveRenderContext* ctx,
+                                               float x, float y,
+                                               float w, float h);
+
 /* Submits the frame, copies the result back to a CPU buffer held by the target,
  * and waits for the GPU. After this, use rive_render_target_read_pixels. */
 RiveStatus         rive_frame_flush(RiveRenderContext* ctx);

@@ -27,6 +27,8 @@
 #include "rive/layout.hpp"             // Fit, Alignment
 #include "rive/math/aabb.hpp"
 #include "rive/math/mat2d.hpp"
+#include "rive/math/path_types.hpp" // FillRule (rive_artboard_draw_viewport clip)
+#include "rive/math/raw_path.hpp"   // RawPath::addRect (tile clip rect)
 #include "rive/refcnt.hpp"             // rcp, ref_rcp
 #include "rive/renderer.hpp"           // Renderer, computeAlignment
 #include "rive/shapes/paint/color.hpp" // colorARGB, ColorInt
@@ -637,6 +639,56 @@ extern "C" RiveStatus rive_artboard_draw(RiveArtboard* artboard,
     ctx->currentRenderer->transform(m);
     artboard->artboard->draw(ctx->currentRenderer);
     ctx->currentRenderer->restore();
+    return RIVE_OK;
+}
+
+extern "C" RiveStatus rive_artboard_draw_viewport(RiveArtboard* artboard,
+                                                  RiveRenderContext* ctx,
+                                                  float x, float y,
+                                                  float w, float h)
+{
+    if (artboard == nullptr || artboard->artboard == nullptr || ctx == nullptr ||
+        ctx->currentRenderer == nullptr || ctx->currentTarget == nullptr ||
+        ctx->renderContext == nullptr)
+    {
+        set_error("rive_artboard_draw_viewport: no frame in progress or invalid args");
+        return 1;
+    }
+    // Inverse logic also rejects NaN (a non-finite compare is false).
+    if (!(w > 0.0f) || !(h > 0.0f))
+    {
+        set_error("rive_artboard_draw_viewport: width/height must be > 0");
+        return 1;
+    }
+
+    rive::RiveRenderer* r = ctx->currentRenderer;
+    // The tile sub-rect in ATLAS PIXEL space (x,y = top-left; w,h = tile size).
+    const rive::AABB tile(x, y, x + w, y + h);
+    // Fit the artboard's content bounds into the tile (same Fit/Alignment as the
+    // full-target rive_artboard_draw, but the frame is the tile, not the target).
+    const rive::Mat2D m = rive::computeAlignment(rive::Fit::contain,
+                                                 rive::Alignment::center,
+                                                 tile,
+                                                 artboard->artboard->bounds());
+    r->save();
+    // CLIP FIRST, while the matrix is still IDENTITY: clipPath captures the current
+    // stack matrix as the clipRect matrix, so the tile rect stays in atlas-pixel
+    // space, independent of the artboard's own overflow. An axis-aligned rect path
+    // (RawPath::addRect = move+3line+close) routes through rive's cheap clipRect
+    // shader path (NO clip-mask draw, NO clip-ID, no interaction with the PLS
+    // coverage machinery). REQUIRED: rive only bounds-culls against the whole target,
+    // so overflow content (strokes, feather, overflow shapes) would otherwise bleed
+    // into neighbor tiles in a shared atlas. (Build the RawPath explicitly: the
+    // Factory `makeRenderPath(AABB)` convenience is name-hidden by RenderContext's
+    // `makeRenderPath(RawPath&, FillRule)` override.)
+    rive::RawPath clipRect;
+    clipRect.addRect(tile);
+    auto clip = ctx->renderContext->makeRenderPath(clipRect, rive::FillRule::nonZero);
+    r->clipPath(clip.get());
+    // THEN place the artboard into the tile and draw, clipped to it.
+    r->transform(m);
+    artboard->artboard->draw(r);
+    r->restore();
     return RIVE_OK;
 }
 

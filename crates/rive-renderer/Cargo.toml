@@ -23,5 +23,10 @@ png = "0.17"
 name = "offscreen_png"
 path = "../../examples/offscreen_png.rs"
 
+# M-SCALE Phase 1: N artboards into one atlas via Frame::draw_viewport (offscreen).
+[[example]]
+name = "atlas_tiles"
+path = "../../examples/atlas_tiles.rs"
+
 [lints]
 workspace = true

@@ -589,6 +589,97 @@ impl Context {
         }
         Ok(())
     }
+
+    /// **Spike (M-SCALE batching).** Like [`Self::record_external_frame`] but draws
+    /// **every** artboard in `artboards` into a *single* begin→record cycle — one
+    /// `beginFrame`, N `draw`s, one `flush` — instead of N separate frames. This
+    /// isolates the per-flush fixed overhead (begin/flush/barrier + the per-frame
+    /// buffer set) that real batching would remove. All artboards align to `target`
+    /// (overlapping), so this measures CPU **record** cost, not final pixels; a
+    /// shipping path would need an atlas target with per-artboard viewports.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::record_external_frame`] (`frame.command_buffer` is
+    /// wgpu's open primary buffer on this device, not ended until this returns).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `target` or any artboard belongs to another
+    /// context, or [`Error::Frame`] if begin/draw/record fails.
+    pub unsafe fn record_external_frame_batched(
+        &self,
+        target: &RenderTarget,
+        artboards: &[&Artboard],
+        clear_rgba: [f32; 4],
+        frame: ExternalFrameRecord,
+        clip: bool,
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.inner, &target.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        for ab in artboards {
+            if !Rc::ptr_eq(&self.inner, &ab.inner.ctx) {
+                return Err(Error::ContextMismatch);
+            }
+        }
+        let [r, g, b, a] = clear_rgba;
+        // SAFETY: context and target are live; the caller upholds the cmd-buffer contract.
+        let begin = unsafe {
+            sys::rive_frame_begin_external(
+                self.inner.ptr,
+                target.ptr,
+                r,
+                g,
+                b,
+                a,
+                frame.current_frame,
+                frame.safe_frame,
+            )
+        };
+        if begin != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        // A frame is in progress. Draw every artboard into it, then ALWAYS reach
+        // `record` so the context is not left wedged mid-frame.
+        let mut draw_err = None;
+        for ab in artboards {
+            // `clip=true` routes through draw_viewport with the FULL-target rect: same
+            // alignment as `draw`, plus the per-draw clipRect — isolates the clip CPU
+            // cost for the Phase-1 A/B (the tiled atlas path uses real per-tile rects).
+            let draw = if clip {
+                // SAFETY: a frame is in progress on this live context; artboard is live.
+                unsafe {
+                    sys::rive_artboard_draw_viewport(
+                        ab.inner.ptr,
+                        self.inner.ptr,
+                        0.0,
+                        0.0,
+                        target.width as f32,
+                        target.height as f32,
+                    )
+                }
+            } else {
+                // SAFETY: a frame is in progress on this live context; artboard is live.
+                unsafe { sys::rive_artboard_draw(ab.inner.ptr, self.inner.ptr) }
+            };
+            if draw != sys::RIVE_OK {
+                draw_err = Some(last_error());
+                break;
+            }
+        }
+        // SAFETY: a frame is in progress; command_buffer is wgpu's open buffer.
+        let rec = unsafe {
+            sys::rive_frame_record_external(self.inner.ptr, target.ptr, frame.command_buffer)
+        };
+        if let Some(e) = draw_err {
+            return Err(Error::Frame(e));
+        }
+        if rec != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        Ok(())
+    }
 }
 
 /// Per-frame submission parameters for [`Context::render_external_frame`] (M1b).
@@ -1005,6 +1096,37 @@ impl Frame<'_> {
         }
         // SAFETY: artboard and context are live; a frame is in progress.
         let status = unsafe { sys::rive_artboard_draw(artboard.inner.ptr, self.ctx.raw()) };
+        if status != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        Ok(())
+    }
+
+    /// Draws `artboard` into the sub-rect `(x, y, w, h)` of this frame's target — an
+    /// atlas tile, in target pixels — fit with contain + center and **clipped** to
+    /// the tile so content cannot bleed past it. Use [`Self::draw`] for a
+    /// full-target draw. Call multiple `draw_viewport`s between one begin and one
+    /// flush to render N artboards into one atlas in a single frame.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `artboard` belongs to another context, or
+    /// [`Error::Frame`] if no frame is in progress or the rect is degenerate.
+    pub fn draw_viewport(
+        &self,
+        artboard: &Artboard,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.ctx.inner, &artboard.inner.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        // SAFETY: artboard and context are live; a frame is in progress.
+        let status = unsafe {
+            sys::rive_artboard_draw_viewport(artboard.inner.ptr, self.ctx.raw(), x, y, w, h)
+        };
         if status != sys::RIVE_OK {
             return Err(Error::Frame(last_error()));
         }

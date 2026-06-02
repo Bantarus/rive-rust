@@ -37,7 +37,8 @@ use bevy::window::PresentMode;
 use bevy::winit::WinitSettings;
 
 use bevy_rive::{
-    install_interlock_device_callback, RiveAnimation, RiveFile, RiveTarget, RiveZeroCopyPlugin,
+    install_interlock_device_callback, RiveAnimation, RiveAtlasKey, RiveFile, RiveSurface,
+    RiveTarget, RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -55,6 +56,9 @@ struct Cfg {
     /// summary (it summarizes after ~warmup + `RIVE_PERF_FRAMES` rendered frames).
     /// `None` outside perf mode (the app runs until closed / capture exit).
     perf_exit_frames: Option<u32>,
+    /// M-SCALE: when `RIVE_ATLAS` is set, opt every face into the shared atlas (one
+    /// render pass for all of them); each sprite then samples its tile via `RiveSurface`.
+    atlas: bool,
 }
 
 #[derive(Resource, Default)]
@@ -174,6 +178,7 @@ fn main() {
         speed,
         instances,
         perf_exit_frames,
+        atlas: std::env::var_os("RIVE_ATLAS").is_some(),
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
@@ -204,12 +209,14 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     for i in 0..cfg.instances {
         let mut anim = RiveAnimation::new(handle.clone());
         anim.speed = cfg.speed;
-        commands.spawn((
-            anim,
-            RiveTarget::new(cfg.size, cfg.size),
-            RiveEntity,
-            RiveSlot(i),
-        ));
+        // M-SCALE: under RIVE_ATLAS, opt every face into the shared atlas (one pass for
+        // all of them); otherwise each gets its own dedicated image (the default tier).
+        let target = if cfg.atlas {
+            RiveTarget::atlased(cfg.size, cfg.size, RiveAtlasKey::default())
+        } else {
+            RiveTarget::new(cfg.size, cfg.size)
+        };
+        commands.spawn((anim, target, RiveEntity, RiveSlot(i)));
     }
 }
 
@@ -221,14 +228,30 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
 fn attach_display(
     mut commands: Commands,
     cfg: Res<Cfg>,
-    query: Query<(Entity, &RiveTarget, &RiveSlot), Without<DisplayAttached>>,
+    query: Query<(Entity, &RiveTarget, &RiveSlot, Option<&RiveSurface>), Without<DisplayAttached>>,
 ) {
-    for (entity, target, slot) in &query {
-        if target.image == Handle::default() {
-            continue; // image not allocated yet
-        }
+    for (entity, target, slot, surface) in &query {
+        // Atlas faces sample their TILE of the shared atlas (via RiveSurface.rect);
+        // dedicated faces sample their whole per-face image (the default tier).
+        let sprite = if target.atlas.is_some() {
+            let Some(surface) = surface else {
+                continue; // slot not assigned / RiveSurface not written yet
+            };
+            let mut s = Sprite::from_image(surface.image.clone());
+            let size = surface.atlas_size.as_vec2();
+            s.rect = Some(Rect {
+                min: surface.uv_rect.min * size,
+                max: surface.uv_rect.max * size,
+            });
+            s
+        } else {
+            if target.image == Handle::default() {
+                continue; // image not allocated yet
+            }
+            Sprite::from_image(target.image.clone())
+        };
         commands.spawn((
-            Sprite::from_image(target.image.clone()),
+            sprite,
             grid_transform(slot.0, cfg.instances, cfg.size as f32),
             DisplayQuad,
         ));
@@ -271,7 +294,11 @@ fn drive_capture(
     let Some(target) = query.iter().next() else {
         return;
     };
-    if target.image == Handle::default() || quad.is_empty() {
+    // Atlas faces have no per-face image; gate on the display quad existing (it is
+    // spawned once the atlas slot / RiveSurface is ready). Dedicated faces gate on
+    // their image being allocated.
+    let img_ready = target.atlas.is_some() || target.image != Handle::default();
+    if !img_ready || quad.is_empty() {
         return;
     }
     state.frames += 1;

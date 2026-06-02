@@ -680,6 +680,85 @@ impl Context {
         }
         Ok(())
     }
+
+    /// Records ONE atlas frame: begin -> draw each `(artboard, [x,y,w,h])` into its
+    /// own tile (clipped) -> record, all into `target` (the shared atlas). The
+    /// shippable batching shape — N artboards in one begin/flush, each in its own
+    /// sub-rect of the atlas.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`Self::record_external_frame`] (`frame.command_buffer` is
+    /// wgpu's open primary buffer on this device, not ended until this returns).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `target`/any artboard belongs to another
+    /// context, or [`Error::Frame`] if begin/draw/record fails.
+    pub unsafe fn record_external_atlas_frame(
+        &self,
+        target: &RenderTarget,
+        tiles: &[(&Artboard, [f32; 4])],
+        clear_rgba: [f32; 4],
+        frame: ExternalFrameRecord,
+    ) -> Result<()> {
+        if !Rc::ptr_eq(&self.inner, &target.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        for (ab, _) in tiles {
+            if !Rc::ptr_eq(&self.inner, &ab.inner.ctx) {
+                return Err(Error::ContextMismatch);
+            }
+        }
+        let [r, g, b, a] = clear_rgba;
+        // SAFETY: context and target are live; the caller upholds the cmd-buffer contract.
+        let begin = unsafe {
+            sys::rive_frame_begin_external(
+                self.inner.ptr,
+                target.ptr,
+                r,
+                g,
+                b,
+                a,
+                frame.current_frame,
+                frame.safe_frame,
+            )
+        };
+        if begin != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        // A frame is in progress. Draw every tile into its sub-rect, then ALWAYS reach
+        // `record` so the context is not left wedged mid-frame.
+        let mut draw_err = None;
+        for (ab, rect) in tiles {
+            // SAFETY: a frame is in progress on this live context; artboard is live.
+            let draw = unsafe {
+                sys::rive_artboard_draw_viewport(
+                    ab.inner.ptr,
+                    self.inner.ptr,
+                    rect[0],
+                    rect[1],
+                    rect[2],
+                    rect[3],
+                )
+            };
+            if draw != sys::RIVE_OK {
+                draw_err = Some(last_error());
+                break;
+            }
+        }
+        // SAFETY: a frame is in progress; command_buffer is wgpu's open buffer.
+        let rec = unsafe {
+            sys::rive_frame_record_external(self.inner.ptr, target.ptr, frame.command_buffer)
+        };
+        if let Some(e) = draw_err {
+            return Err(Error::Frame(e));
+        }
+        if rec != sys::RIVE_OK {
+            return Err(Error::Frame(last_error()));
+        }
+        Ok(())
+    }
 }
 
 /// Per-frame submission parameters for [`Context::render_external_frame`] (M1b).

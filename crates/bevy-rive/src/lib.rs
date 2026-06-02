@@ -139,7 +139,10 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 /// private. See the crate docs for each tier's setup.
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
-    pub use crate::{ArtboardSelector, RiveAnimation, RiveFile, RiveTarget, StateMachineSelector};
+    pub use crate::{
+        ArtboardSelector, RiveAnimation, RiveAtlasKey, RiveFile, RiveSurface, RiveTarget,
+        StateMachineSelector,
+    };
 
     // Floor (default): the CPU-copy plugin entry point.
     #[cfg(feature = "floor")]
@@ -342,8 +345,8 @@ pub enum StateMachineSelector {
 /// `image` is CPU-backed (M1a) or a GPU-shared texture (M1b) is not part of this
 /// contract; only its format/premultiplied/upright convention is (see crate docs).
 ///
-/// `#[non_exhaustive]`: construct via [`RiveTarget::new`] (then set fields), so
-/// future fields (e.g. a clear color, sampler choice) stay additive.
+/// `#[non_exhaustive]`: construct via [`RiveTarget::new`]/[`RiveTarget::atlased`]
+/// (then set fields), so future fields stay additive.
 #[derive(Component, Debug, Clone)]
 #[non_exhaustive]
 pub struct RiveTarget {
@@ -358,18 +361,42 @@ pub struct RiveTarget {
     /// Frozen: this `Handle<Image>` is the seam later tiers reuse. **Not** frozen:
     /// whether the `Image` is CPU-readable. M1a keeps `data` resident (so capture
     /// tools can read it); M1b's zero-copy texture has `data: None`. Do not rely
-    /// on `image.data` being `Some` in production code.
+    /// on `image.data` being `Some` in production code. (For an atlased face — see
+    /// [`Self::atlas`] — the plugin writes a [`RiveSurface`] back instead; sample
+    /// that.)
     pub image: Handle<Image>,
+    /// Opt-in (M-SCALE): when `Some`, this face shares ONE atlas texture with other
+    /// faces of the same [`RiveAtlasKey`] instead of a dedicated image, so the
+    /// zero-copy tier renders many faces in ONE pass (the thousands-of-faces path).
+    /// The plugin then writes a [`RiveSurface`] back (the shared atlas handle + this
+    /// face's `uv_rect`); sample THAT, not `image`. `None` (default) keeps the
+    /// dedicated-image behavior, so existing consumers are byte-for-byte unaffected.
+    /// Honored only by the `zero_copy` tier on Vulkan; ignored by the floor tier.
+    pub atlas: Option<RiveAtlasKey>,
 }
 
 impl RiveTarget {
-    /// A `width`x`height` target whose image the plugin allocates on first use.
+    /// A `width`x`height` target whose image the plugin allocates on first use
+    /// (dedicated image; not atlased).
     #[must_use]
     pub fn new(width: u32, height: u32) -> Self {
         Self {
             width,
             height,
             image: Handle::default(),
+            atlas: None,
+        }
+    }
+
+    /// Like [`Self::new`] but opts this face into the shared atlas `key` (M-SCALE).
+    /// The plugin writes a [`RiveSurface`] back; sample its `uv_rect` of the atlas.
+    #[must_use]
+    pub fn atlased(width: u32, height: u32, key: RiveAtlasKey) -> Self {
+        Self {
+            width,
+            height,
+            image: Handle::default(),
+            atlas: Some(key),
         }
     }
 }
@@ -378,6 +405,31 @@ impl Default for RiveTarget {
     fn default() -> Self {
         Self::new(512, 512)
     }
+}
+
+/// Groups faces that share one atlas texture (M-SCALE). Same key → same atlas;
+/// different keys (e.g. per resolution/LOD bucket) use separate atlases.
+/// `RiveAtlasKey::default()` (`0`) is the zero-ceremony single pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct RiveAtlasKey(pub u32);
+
+/// Plugin **output** for an atlased face (M-SCALE): written back next to
+/// [`RiveTarget`] once a slot is assigned, and the canonical thing an atlased
+/// consumer samples. `image` is the SHARED atlas (one handle for every face of the
+/// key); `uv_rect` is THIS face's normalized `[0, 1]` sub-rect of it. Straight-alpha
+/// `Rgba8UnormSrgb`, exactly like the dedicated [`RiveTarget::image`].
+///
+/// 3D: set `StandardMaterial.uv_transform` from `uv_rect`. 2D: set `Sprite.rect` =
+/// `uv_rect * atlas_size`. A non-atlased face has no `RiveSurface` (sample
+/// `RiveTarget.image` as before).
+#[derive(Component, Debug, Clone)]
+pub struct RiveSurface {
+    /// The shared atlas image (same handle for every face of the key).
+    pub image: Handle<Image>,
+    /// This face's sub-rect of the atlas, normalized `[0, 1]` (origin + size).
+    pub uv_rect: Rect,
+    /// The atlas image's pixel size (for `Sprite.rect = uv_rect * atlas_size`).
+    pub atlas_size: UVec2,
 }
 
 // ---------------------------------------------------------------------------

@@ -64,6 +64,9 @@ struct Cfg {
     /// the `Changed`/`Removed` `RiveSurface` re-sync. Off by default (perf/capture runs
     /// stay deterministic and full-grid).
     cull: bool,
+    /// M-SCALE Phase 4: number of `RiveAtlasKey` pools to round-robin atlas faces across
+    /// (`RIVE_KEYS`, default 1). >1 exercises key partitioning (distinct keys ⇒ distinct pages).
+    keys: u32,
 }
 
 #[derive(Resource, Default)]
@@ -125,6 +128,13 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(512u32)
         .clamp(16, 2048);
+    // M-SCALE Phase 4: split atlas faces across this many RiveAtlasKey pools (round-robin
+    // by index) to exercise key partitioning — distinct keys never share a page. Default 1.
+    let keys = std::env::var("RIVE_KEYS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1u32)
+        .clamp(1, 16);
     // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
     // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
     // frame budget past that so the run self-terminates with the summary printed.
@@ -198,6 +208,7 @@ fn main() {
         perf_exit_frames,
         atlas: std::env::var_os("RIVE_ATLAS").is_some(),
         cull: std::env::var_os("RIVE_CULL").is_some(),
+        keys,
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
@@ -237,8 +248,9 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         anim.speed = cfg.speed;
         // M-SCALE: under RIVE_ATLAS, opt every face into the shared atlas (one pass for
         // all of them); otherwise each gets its own dedicated image (the default tier).
+        // RIVE_KEYS>1 round-robins faces across that many pools (distinct keys ⇒ distinct pages).
         let target = if cfg.atlas {
-            RiveTarget::atlased(cfg.size, cfg.size, RiveAtlasKey::default())
+            RiveTarget::atlased(cfg.size, cfg.size, RiveAtlasKey(i % cfg.keys))
         } else {
             RiveTarget::new(cfg.size, cfg.size)
         };

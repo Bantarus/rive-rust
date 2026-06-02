@@ -365,11 +365,12 @@ pub struct RiveTarget {
     /// [`Self::atlas`] — the plugin writes a [`RiveSurface`] back instead; sample
     /// that.)
     pub image: Handle<Image>,
-    /// Opt-in (M-SCALE): when `Some`, this face shares ONE atlas texture with other
-    /// faces of the same [`RiveAtlasKey`] instead of a dedicated image, so the
-    /// zero-copy tier renders many faces in ONE pass (the thousands-of-faces path).
-    /// The plugin then writes a [`RiveSurface`] back (the shared atlas handle + this
-    /// face's `uv_rect`); sample THAT, not `image`. `None` (default) keeps the
+    /// Opt-in (M-SCALE): when `Some`, this face shares an atlas with other faces of the
+    /// same [`RiveAtlasKey`] instead of a dedicated image, so the zero-copy tier renders
+    /// many faces in ONE pass (the thousands-of-faces path). Faces of the same key are
+    /// further split by size into LOD buckets, so the shared page is per `(key, size-bucket)`
+    /// (distinct keys never share a page). The plugin writes a [`RiveSurface`] back (the page
+    /// handle + this face's `uv_rect`); sample THAT, not `image`. `None` (default) keeps the
     /// dedicated-image behavior, so existing consumers are byte-for-byte unaffected.
     /// Honored only by the `zero_copy` tier on Vulkan; ignored by the floor tier.
     pub atlas: Option<RiveAtlasKey>,
@@ -407,9 +408,11 @@ impl Default for RiveTarget {
     }
 }
 
-/// Groups faces that share one atlas texture (M-SCALE). Same key → same atlas;
-/// different keys (e.g. per resolution/LOD bucket) use separate atlases.
-/// `RiveAtlasKey::default()` (`0`) is the zero-ceremony single pool.
+/// Groups faces into an atlas pool (M-SCALE). Faces of the SAME key share atlas pages;
+/// DIFFERENT keys never share a page — use distinct keys to isolate unrelated face sets
+/// (e.g. one pool per `.riv`, or per subsystem). LOD bucketing by face size is automatic
+/// WITHIN a key (you don't encode it in the key). `RiveAtlasKey::default()` (`0`) is the
+/// zero-ceremony single pool.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct RiveAtlasKey(pub u32);
 

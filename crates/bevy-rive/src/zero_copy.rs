@@ -518,11 +518,14 @@ struct AtlasInstance {
     state_machine: StateMachine,
 }
 
-/// Identifies one atlas PAGE: which LOD `bucket` (index into [`ATLAS_BUCKETS`]) and which
-/// sibling `page` within that bucket. BOTH worlds key pages by this — main-world holds the
-/// display image, render-world the [`RiveAtlas`] — so they agree with no render→main channel.
+/// Identifies one atlas PAGE: the consumer's [`RiveAtlasKey`] `key` (distinct keys never
+/// share a page — the documented pool isolation), the LOD `bucket` (index into
+/// [`ATLAS_BUCKETS`], picked by face size WITHIN a key), and which sibling `page`. BOTH
+/// worlds key pages by this — main-world holds the display image, render-world the
+/// [`RiveAtlas`] — so they agree with no render→main channel.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 struct AtlasPageId {
+    key: u32,
     bucket: u8,
     page: u16,
 }
@@ -596,39 +599,31 @@ struct AtlasBucketState {
     pages: Vec<AtlasPageState>,
 }
 
-/// MAIN-world atlas bookkeeping (M-SCALE Phase 2b → 3 multi-page): per-LOD-bucket sibling
-/// pages + per-entity slot assignment. Lives main-world so a face's `image` + `uv_rect` (its
-/// [`RiveSurface`]) are written together, the SAME frame, BEFORE any consumer reads — the
-/// render world only READS the assigned [`AtlasLoc`] (there is no render→main path).
-#[derive(Resource)]
+/// MAIN-world atlas bookkeeping (M-SCALE Phase 2b → 3 multi-page → 4 keyed): per-`(key,
+/// bucket)` sibling pages plus per-entity slot assignment. Lives main-world so a face's
+/// `image` and `uv_rect` (its [`RiveSurface`]) are written together, the SAME frame, BEFORE
+/// any consumer reads — the render world only READS the assigned [`AtlasLoc`] (no render→main
+/// path). Pools are keyed by `(RiveAtlasKey value, size-bucket)`, so distinct keys never
+/// share a page (the documented isolation) and size picks the LOD bucket within a key.
+#[derive(Resource, Default)]
 struct RiveAtlasState {
-    /// Per-bucket page lists, indexed by bucket (fixed length = `ATLAS_BUCKETS.len()`).
-    buckets: Vec<AtlasBucketState>,
+    /// Sibling pages per `(RiveAtlasKey value, size-bucket)`, created lazily.
+    pools: HashMap<(u32, u8), AtlasBucketState>,
     /// Assigned location per atlas-opted entity (read by `extract_rive_instances`).
     locs: HashMap<Entity, AtlasLoc>,
 }
 
-impl Default for RiveAtlasState {
-    fn default() -> Self {
-        let mut buckets = Vec::with_capacity(ATLAS_BUCKETS.len());
-        buckets.resize_with(ATLAS_BUCKETS.len(), AtlasBucketState::default);
-        Self {
-            buckets,
-            locs: HashMap::new(),
-        }
-    }
-}
-
 impl RiveAtlasState {
-    /// Allocates a free tile in `bucket` (reusing a freed slot, else bumping a page's
-    /// cursor, else appending a sibling page whose display image is created now). Returns
-    /// the assigned location. `images` is needed only to create a new page's display image.
-    fn alloc(&mut self, bucket: u8, images: &mut Assets<Image>) -> AtlasLoc {
-        let pages = &mut self.buckets[bucket as usize].pages;
+    /// Allocates a free tile in pool `(key, bucket)` (reusing a freed slot, else bumping a
+    /// page's cursor, else appending a sibling page whose display image is created now).
+    /// Returns the assigned location. `images` is needed only to create a new page's image.
+    fn alloc(&mut self, key: u32, bucket: u8, images: &mut Assets<Image>) -> AtlasLoc {
+        let pages = &mut self.pools.entry((key, bucket)).or_default().pages;
         for (pi, page) in pages.iter_mut().enumerate() {
             if let Some(slot) = page.free.pop() {
                 return AtlasLoc {
                     page: AtlasPageId {
+                        key,
                         bucket,
                         page: pi as u16,
                     },
@@ -640,6 +635,7 @@ impl RiveAtlasState {
                 page.next += 1;
                 return AtlasLoc {
                     page: AtlasPageId {
+                        key,
                         bucket,
                         page: pi as u16,
                     },
@@ -656,6 +652,7 @@ impl RiveAtlasState {
         });
         AtlasLoc {
             page: AtlasPageId {
+                key,
                 bucket,
                 page: (pages.len() - 1) as u16,
             },
@@ -666,14 +663,14 @@ impl RiveAtlasState {
     /// Returns a slot to its page's free-list (cull / despawn). The page itself persists
     /// (occupancy is bounded by the active set, so we don't churn page textures).
     fn free(&mut self, loc: AtlasLoc) {
-        self.buckets[loc.page.bucket as usize].pages[loc.page.page as usize]
-            .free
-            .push(loc.slot);
+        if let Some(bucket) = self.pools.get_mut(&(loc.page.key, loc.page.bucket)) {
+            bucket.pages[loc.page.page as usize].free.push(loc.slot);
+        }
     }
 
     /// The display image handle for a location's page.
     fn display_of(&self, page: AtlasPageId) -> Handle<Image> {
-        self.buckets[page.bucket as usize].pages[page.page as usize]
+        self.pools[&(page.key, page.bucket)].pages[page.page as usize]
             .display
             .clone()
     }
@@ -1154,17 +1151,17 @@ fn allocate_atlas_slots(
 ) {
     let mut seen: std::collections::HashSet<Entity> = std::collections::HashSet::new();
     for (entity, target, active) in &query {
-        if target.atlas.is_none() {
-            continue;
-        }
+        let Some(key) = target.atlas else {
+            continue; // dedicated face (RiveTarget.atlas == None)
+        };
         seen.insert(entity);
         let active = active.is_none_or(|a| a.0);
         let has_loc = state.locs.contains_key(&entity);
         if active && !has_loc {
-            // Allocate a tile in the size-appropriate bucket (creates a sibling page +
-            // its display image lazily) and publish the seam — image + uv_rect together.
+            // Allocate a tile in this key's size-appropriate bucket (creates a sibling page
+            // + its display image lazily) and publish the seam — image + uv_rect together.
             let bucket = atlas_bucket_for(target.width, target.height);
-            let loc = state.alloc(bucket, &mut images);
+            let loc = state.alloc(key.0, bucket, &mut images);
             state.locs.insert(entity, loc);
             commands.entity(entity).insert(RiveSurface {
                 image: state.display_of(loc.page),

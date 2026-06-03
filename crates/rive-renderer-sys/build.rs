@@ -30,6 +30,11 @@ use std::process::Command;
 const RIVE_LIBS: &[&str] = &[
     "rive_pls_renderer",
     "rive",
+    // Lua VM backing `--with_rive_scripting` (luigi-rosso/luau, cloned by premake).
+    // rive's scripting TUs reference it, so it links AFTER `rive`
+    // (provider-after-consumer). premake always emits this project — a `dummy.cpp`
+    // stub when scripting is off — but it is only needed in the link with the flag on.
+    "luau_vm",
     "rive_decoders",
     "libpng",
     "zlib",
@@ -248,6 +253,7 @@ fn build_rive_libs_unix(
                 "--with_vulkan",
                 "--with_rive_text",
                 "--with_rive_layout",
+                "--with_rive_scripting",
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),
@@ -301,6 +307,7 @@ fn build_rive_libs_windows(
                 "--with_vulkan",
                 "--with_rive_text",
                 "--with_rive_layout",
+                "--with_rive_scripting",
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),

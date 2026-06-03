@@ -92,6 +92,13 @@ path = "../../examples/sprite_riv.rs"
 # The CPU-copy floor example; needs the (default) floor tier's plugin + systems.
 required-features = ["floor"]
 
+# Minimal live viewer for the Voxelien face (floor tier). Defaults to the signed
+# published .riv so its scripts pass rive's signature gate.
+[[example]]
+name = "voxelien_face"
+path = "../../examples/voxelien_face.rs"
+required-features = ["floor"]
+
 # The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
 [[example]]
 name = "sprite_riv_zerocopy"

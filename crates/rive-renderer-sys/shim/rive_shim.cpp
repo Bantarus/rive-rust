@@ -23,6 +23,7 @@
 #include "rive/artboard.hpp"
 #include "rive/scene.hpp"
 #include "rive/animation/state_machine_instance.hpp"
+#include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance (data binding)
 #include "rive/factory.hpp"
 #include "rive/layout.hpp"             // Fit, Alignment
 #include "rive/math/aabb.hpp"
@@ -202,6 +203,11 @@ struct RiveFile
 struct RiveArtboard
 {
     std::unique_ptr<rive::ArtboardInstance> artboard;
+    // The artboard's default view-model instance, bound so editor-authored data
+    // bindings (incl. scripted view-model inputs) resolve at runtime. Held here
+    // so the SAME instance can also be bound to the state machine. Null for
+    // artboards with no view model.
+    rive::rcp<rive::ViewModelInstance> vmInstance;
 };
 
 struct RiveStateMachine
@@ -499,6 +505,20 @@ extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
         return nullptr;
     }
     handle->artboard = std::move(ab);
+
+    // Bind the artboard's DEFAULT view-model instance so editor-authored data
+    // bindings resolve at runtime — including a script's view-model `Input<...>`
+    // wired to a view model in the editor. Without a data context those inputs
+    // are nil and the script errors ("attempt to index nil"). This MUST run
+    // before the state machine is instanced: the SM clones scripted objects with
+    // the artboard's data context. `createDefaultViewModelInstance` returns null
+    // for artboards with no view model, so non-data-bound content is unchanged.
+    if (auto vmi =
+            file->file->createDefaultViewModelInstance(handle->artboard.get()))
+    {
+        handle->artboard->bindViewModelInstance(vmi);
+        handle->vmInstance = std::move(vmi);
+    }
     return handle;
 }
 
@@ -543,6 +563,15 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_default(
         return nullptr;
     }
     handle->scene = std::move(scene);
+
+    // Bind the SAME view-model instance to the state machine too (per the
+    // data-binding contract: the artboard binding drives layout-affecting
+    // properties; the SM binding drives transitions + listener conditions).
+    // No-op when the artboard had no view model.
+    if (artboard->vmInstance)
+    {
+        handle->scene->bindViewModelInstance(artboard->vmInstance);
+    }
     return handle;
 }
 

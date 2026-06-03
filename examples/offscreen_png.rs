@@ -57,8 +57,18 @@ fn main() -> Result<()> {
         .default_state_machine()
         .context("instantiating the default state machine")?;
 
-    // Advance one frame, then render it offscreen.
-    state_machine.advance(FRAME_DT_SECONDS);
+    // Advance the state machine, then render a single offscreen snapshot.
+    // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
+    // forward N 60Hz frames before the snapshot, so two runs at different frame
+    // counts can be diffed to prove a scripted animation (e.g. BallBreath) runs.
+    let advance_frames: u32 = std::env::var("RIVE_ADVANCE_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    for _ in 0..advance_frames {
+        state_machine.advance(FRAME_DT_SECONDS);
+    }
 
     let frame = ctx
         .begin_frame(&target, CLEAR_RGBA)

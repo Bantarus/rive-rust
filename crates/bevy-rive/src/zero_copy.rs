@@ -88,7 +88,10 @@ use rive_renderer::{
     VulkanFeatures,
 };
 
-use crate::{RiveActive, RiveAnimation, RiveFile, RivePlugin, RiveSurface, RiveTarget};
+use crate::{
+    RiveActive, RiveAnimation, RiveFile, RivePlugin, RiveSurface, RiveTarget, RiveValue,
+    RiveViewModel,
+};
 
 type Vk = wgpu_hal::vulkan::Api;
 
@@ -239,7 +242,9 @@ impl Plugin for RiveZeroCopyPlugin {
         // atlas faces (M-SCALE) — so a face's `image` + `uv_rect` land together, the
         // same frame, before any consumer reads them.
         app.init_resource::<RiveAtlasState>()
-            .add_systems(Update, (allocate_display_images, allocate_atlas_slots));
+            .add_systems(Update, (allocate_display_images, allocate_atlas_slots))
+            // M-DATA: stage view-model writes in `Last` (after gameplay, before extract).
+            .add_systems(Last, stage_vm_writes);
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             error!("rive zero-copy: RenderApp missing (enable bevy_render)");
@@ -1026,6 +1031,12 @@ struct RiveGpu {
     atlas_pages: HashMap<AtlasPageId, RiveAtlas>,
     /// Monotonic frame counter for rive's resource-recycling watermark.
     frame: u64,
+    /// M-DATA: the [`ExtractedRives::generation`] this node last applied VM writes for.
+    /// The node can run more than once per visual frame (one run per camera sub-graph),
+    /// so writes — notably the non-idempotent `fire_trigger` — are applied only when this
+    /// differs from the current generation, then it is advanced. 0 never collides (extract
+    /// starts the generation at 1).
+    vm_writes_applied_gen: u64,
     /// Set once we have logged the active PLS mode.
     logged_mode: bool,
     /// M2b: tracks whether the fixed-ring fallback's recycle precondition is currently
@@ -1058,6 +1069,7 @@ impl Default for RiveRenderState {
             atlas_instances: HashMap::new(),
             atlas_pages: HashMap::new(),
             frame: 0,
+            vm_writes_applied_gen: 0,
             logged_mode: false,
             recycle_unsafe_warned: false,
             clockwise_applied: false,
@@ -1104,12 +1116,24 @@ struct ExtractedRive {
     /// activation would rebuild it (a t=0 reset + `.riv` re-parse). Its atlas tile is freed
     /// main-world regardless; only the rive state is preserved for resume-in-place.
     culled: bool,
+    /// M-DATA: this frame's view-model writes (from a `RiveViewModel`), applied to
+    /// the instance in the node before advance — the zero-copy analogue of the
+    /// floor advance system's inline `apply_writes`. Empty for faces with no
+    /// `RiveViewModel` or no queued writes. Reads/watch are not ferried (floor-only).
+    vm_writes: Vec<(String, RiveValue)>,
 }
 
 /// Render-world resource holding this frame's extracted rive instances. Replaced
 /// wholesale each frame by [`extract_rive_instances`]; read by [`RiveFillNode`].
 #[derive(Resource, Default)]
-struct ExtractedRives(Vec<ExtractedRive>);
+struct ExtractedRives {
+    items: Vec<ExtractedRive>,
+    /// Bumped once per frame by [`extract_rive_instances`]. The node may run more than
+    /// once per frame (one run per camera sub-graph under `RiveGraphAnchor::Both`, or
+    /// multiple cameras on one anchored graph); it uses this generation to apply
+    /// non-idempotent VM writes (notably `fire_trigger`) exactly once per visual frame.
+    generation: u64,
+}
 
 // ===========================================================================
 // Main-world system: allocate the display Image (the frozen seam).
@@ -1422,6 +1446,49 @@ fn extract_shared_handles_once(
     commands.insert_resource(handles);
 }
 
+/// M-DATA: double-buffers each `RiveViewModel`'s queued writes into its staging
+/// slot, so the read-only [`extract_rive_instances`] can ferry them to the render
+/// world (where this tier's instances live and advance). Runs in `Last` — after
+/// gameplay queued writes this frame, before the render app's extract.
+///
+/// CRUCIAL: only drain `writes` → `staged` for a face that is **extractable this
+/// frame** (asset loaded, surface allocated, not culled — the SAME readiness gate
+/// [`extract_rive_instances`] applies below). Otherwise the writes stay queued in
+/// `writes`, RETAINED across the async-load / unallocated-surface / culled window —
+/// exactly as the floor advance system retains writes until the instance is live.
+/// Draining unconditionally would strand a one-shot write (e.g. set initial state /
+/// `fire_trigger` at spawn) in `staged`, which `stage_writes` then clears the next
+/// frame before extract ever ferried it — a silent lost update.
+fn stage_vm_writes(
+    mut query: Query<(
+        Entity,
+        &RiveAnimation,
+        &RiveTarget,
+        Option<&RiveActive>,
+        &mut RiveViewModel,
+    )>,
+    files: Res<Assets<RiveFile>>,
+    atlas: Res<RiveAtlasState>,
+) {
+    for (entity, anim, target, active, mut vm) in &mut query {
+        if !vm.has_staging_work() {
+            continue;
+        }
+        // Mirror extract_rive_instances' readiness gate (asset loaded + not culled +
+        // surface allocated). Keep these two in sync.
+        let ready = files.get(&anim.handle).is_some()
+            && active.is_none_or(|a| a.0)
+            && if target.atlas.is_some() {
+                atlas.locs.contains_key(&entity)
+            } else {
+                target.image != Handle::default()
+            };
+        if ready {
+            vm.stage_writes();
+        }
+    }
+}
+
 /// Ferries per-entity `Send` data from the main world into the [`ExtractedRives`]
 /// render-world resource each frame. Only entities whose `.riv` is loaded *and*
 /// whose display image is allocated are included.
@@ -1439,14 +1506,23 @@ fn extract_shared_handles_once(
 )]
 fn extract_rive_instances(
     mut out: ResMut<ExtractedRives>,
-    query: Extract<Query<(Entity, &RiveAnimation, &RiveTarget, Option<&RiveActive>)>>,
+    query: Extract<
+        Query<(
+            Entity,
+            &RiveAnimation,
+            &RiveTarget,
+            Option<&RiveActive>,
+            Option<&RiveViewModel>,
+        )>,
+    >,
     files: Extract<Res<Assets<RiveFile>>>,
     atlas: Extract<Res<RiveAtlasState>>,
     time: Extract<Res<Time>>,
 ) {
-    out.0.clear();
+    out.items.clear();
+    out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active) in &query {
+    for (entity, anim, target, active, vm) in &query {
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
         };
@@ -1457,7 +1533,7 @@ fn extract_rive_instances(
         // `.riv` re-parse on the next activation (the LOD-cull use case). Their atlas tile
         // is already freed main-world; only the rive state is preserved.
         if active.is_some_and(|a| !a.0) {
-            out.0.push(ExtractedRive {
+            out.items.push(ExtractedRive {
                 entity,
                 display: Handle::default(),
                 bytes: file.bytes.clone(),
@@ -1466,6 +1542,9 @@ fn extract_rive_instances(
                 step: 0.0,
                 atlas: None,
                 culled: true,
+                // Paused: skip advance, so applying writes (which take effect on
+                // advance) is pointless this frame — ferry none.
+                vm_writes: Vec::new(),
             });
             continue;
         }
@@ -1493,7 +1572,7 @@ fn extract_rive_instances(
         };
         let step = dt * anim.speed;
         let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
-        out.0.push(ExtractedRive {
+        out.items.push(ExtractedRive {
             entity,
             display,
             bytes: file.bytes.clone(),
@@ -1502,6 +1581,10 @@ fn extract_rive_instances(
             step,
             atlas: atlas_data,
             culled: false,
+            // Ferry this frame's staged view-model writes (read-only extract → the
+            // render world, where this tier's instances live). `stage_vm_writes`
+            // populated `staged` from `writes` earlier this frame.
+            vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
         });
     }
 }
@@ -1570,10 +1653,21 @@ impl Node for RiveFillNode {
         // This frame's work-list comes from the extract resource (the rive
         // entities are not render-world-synced, so there are no render entities to
         // query). Clone out so we don't borrow the world across the &mut gpu use.
-        let frame_items: Vec<ExtractedRive> = world.resource::<ExtractedRives>().0.clone();
+        let extracted = world.resource::<ExtractedRives>();
+        let frame_items: Vec<ExtractedRive> = extracted.items.clone();
+        // M-DATA: the per-frame generation gates the once-per-frame VM-write apply (this
+        // node can run multiple times per frame — one per camera sub-graph).
+        let extracted_gen = extracted.generation;
 
         gpu.frame = gpu.frame.wrapping_add(1).max(1);
         let frame_no = gpu.frame;
+        // M-DATA: apply VM writes exactly once per visual frame. This node runs once per
+        // camera sub-graph it is anchored in (twice under the default `Both` with a 2D + a
+        // 3D camera), all reading the same `frame_items`; re-applying idempotent setters is
+        // harmless, but a `fire_trigger` would pulse once per run. Gate on the extract
+        // generation so only the first run of a frame applies.
+        let apply_vm_writes = gpu.vm_writes_applied_gen != extracted_gen;
+        gpu.vm_writes_applied_gen = extracted_gen;
         let queue = handles.queue;
         // M2a: non-blocking record-into-wgpu by default; RIVE_BLOCKING uses the M1b
         // blocking submit+fence path (needs `queue`).
@@ -1709,6 +1803,13 @@ impl Node for RiveFillNode {
             //    per-frame submit, GPU-ordered before the un-premult pass below.
             //  * M1b blocking (RIVE_BLOCKING=1): out-of-band submit + blocking fence,
             //    kept as a selectable fallback and an A/B baseline on one build.
+            // M-DATA: apply this frame's view-model writes before advancing, so the
+            // state machine / scripts observe them this tick (the floor advance
+            // system's inline apply, ferried here for the render-world tier). Gated to
+            // once per visual frame (see `apply_vm_writes`) so a `fire_trigger` pulses once.
+            if apply_vm_writes && !item.vm_writes.is_empty() {
+                crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
+            }
             // M-SCALE: time the per-instance state-machine tick (previously untimed
             // — it runs before the record span, so the collector never saw it).
             let advance_t0 = std::time::Instant::now();
@@ -1959,6 +2060,11 @@ impl Node for RiveFillNode {
                     continue;
                 }
                 if let Some(inst) = atlas_instances.get_mut(&item.entity) {
+                    // M-DATA: apply view-model writes before advance (see the
+                    // dedicated-path apply above), gated once per visual frame.
+                    if apply_vm_writes && !item.vm_writes.is_empty() {
+                        crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
+                    }
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;

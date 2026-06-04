@@ -104,6 +104,15 @@ pub struct RiveStateMachine {
     _opaque: [u8; 0],
 }
 
+/// Opaque view-model instance (the artboard's root VM, a nested VM, or a list
+/// item). A **borrowed** handle: it aliases an instance owned by rive's caches
+/// under the root view model, so it is valid only while the owning artboard lives
+/// (and, for list items, while the addressed list is unmodified). Never freed.
+#[repr(C)]
+pub struct RiveViewModelInstance {
+    _opaque: [u8; 0],
+}
+
 extern "C" {
     /// Returns a static description of the most recent shim failure.
     pub fn rive_last_error() -> *const c_char;
@@ -260,6 +269,61 @@ extern "C" {
         cap: usize,
         out_len: *mut usize,
         out_type: *mut i32,
+    ) -> RiveStatus;
+    // Handle API (nested VMs + lists). Navigation returns a borrowed
+    // `*mut RiveViewModelInstance` (null on miss/null-input); reads + introspection
+    // mirror the artboard-rooted verbs. `out_type` ordinals add list=5,
+    // viewModel=8, assetImage=11, artboard=12 to the scalar set.
+    pub fn rive_artboard_vm_root(artboard: *mut RiveArtboard) -> *mut RiveViewModelInstance;
+    pub fn rive_vmi_property_view_model(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+    ) -> *mut RiveViewModelInstance;
+    pub fn rive_vmi_list_size(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_instance_at(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        index: u32,
+    ) -> *mut RiveViewModelInstance;
+    pub fn rive_vmi_property_count(vmi: *mut RiveViewModelInstance) -> u32;
+    pub fn rive_vmi_property_at(
+        vmi: *mut RiveViewModelInstance,
+        index: u32,
+        name_buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+        out_type: *mut i32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_get_number(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut f32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_get_bool(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut u8,
+    ) -> RiveStatus;
+    pub fn rive_vmi_get_color(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_get_string(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_vmi_get_enum_index(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut u32,
     ) -> RiveStatus;
 
     pub fn rive_frame_begin(

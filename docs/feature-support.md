@@ -77,7 +77,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 |---------|:------:|------------|-------|
 | Advance / playback tick | ✅ | [state-machines](cpp/state-machines.mdx) | `StateMachine::advance`; `RiveAnimation.speed` |
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](cpp/state-machines.mdx) | move/down/up/exit; `RivePointer` (floor). zero-copy/atlas-tile mapping 🔜 |
-| **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | **number/bool/trigger/color/string/enum get/set + top-level introspection** ✅ (floor); `RiveViewModel` (queued writes + typed watch read-back). **Gaps:** nested-VM introspection, lists, image/artboard ref props, zero-copy forwarding |
+| **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list mutation + per-item writes, image/artboard ref props (blocked — see backlog) |
 | State-machine inputs (bool/number/trigger) | 🔜 | [state-machines](cpp/state-machines.mdx) | the classic control path; `Scene::getBool/getNumber/getTrigger`. (Data binding is the modern path) |
 | Events read-back (state changes, custom / open-url / audio) | 🔜 | [state-machines](cpp/state-machines.mdx) | `stateChanged*` + `reportedEvent*` → an ECS event each frame so gameplay reacts |
 | Named artboard / state-machine selection | 🔜 | [file-and-artboard](cpp/file-and-artboard.mdx) | `ArtboardSelector` / `StateMachineSelector` reserved; only `Default` honored today |
@@ -92,16 +92,25 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **View-model data binding — remaining:** nested-VM introspection, lists, image/artboard
-   reference props, then **zero-copy-tier forwarding** of `RiveViewModel`. (Slice-2
-   color/string/enum shipped; setting `viseme` is headless-verified to change the mouth.)
-2. **State-machine inputs** (bool/number/trigger) — the other half of the write channel,
+1. **State-machine inputs** (bool/number/trigger) — the other half of the write channel,
    for `.riv` content authored without view models.
-3. **Events read-back** — the read channel: surface state changes + custom/open-url/audio
+2. **Events read-back** — the read channel: surface state changes + custom/open-url/audio
    events as Bevy events so gameplay reacts to the face.
-4. **Named artboard / state-machine selection** — honor `ArtboardSelector::ByName/ByIndex`.
-5. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
-6. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+3. **Named artboard / state-machine selection** — honor `ArtboardSelector::ByName/ByIndex`.
+4. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
+   *Unblocks* view-model **image refs** (`propertyImage` needs a `RenderImage` to set).
+5. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+
+**View-model data binding — what's deferred (lower-value or blocked, not on the critical path):**
+- **zero-copy watch read-back** — writes forward in both tiers; *reads* (watch) are floor-only.
+  Needs a render→main back-channel (`zero_copy` advances in the render world); deferred because you
+  rarely read back N atlas faces and floor reads cover the single-face case.
+- **image / artboard reference props** — `propertyImage`/`propertyArtboard` are **set-only** and need a
+  value source we don't have yet: a `RenderImage` from out-of-band **asset loading** (#4), and a
+  `BindableArtboard` from **nested-artboard binding**. Wire them WITH those features, not before
+  (a setter with nothing to pass it is a dead end).
+- **list mutation + per-item writes** — list read / size / item-introspection shipped; add/remove/swap
+  and writing into list items are deferred (reads cover the common game case).
 
 ---
 

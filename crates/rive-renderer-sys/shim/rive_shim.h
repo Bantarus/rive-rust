@@ -45,6 +45,12 @@ typedef struct RiveRenderTarget  RiveRenderTarget;
 typedef struct RiveFile          RiveFile;
 typedef struct RiveArtboard      RiveArtboard;
 typedef struct RiveStateMachine  RiveStateMachine;
+/* A view-model INSTANCE (the artboard's root VM, a nested VM, or a list item).
+ * Borrowed: aliases an instance owned by rive's caches under the root view model,
+ * so it is valid only while the owning RiveArtboard lives (and, for list items,
+ * while the addressed list is unmodified). Obtained from rive_artboard_vm_root /
+ * rive_vmi_property_view_model / rive_vmi_list_instance_at; never freed by Rust. */
+typedef struct RiveViewModelInstance RiveViewModelInstance;
 
 /* 0 == success; nonzero == failure (see rive_last_error). */
 typedef int32_t RiveStatus;
@@ -131,6 +137,31 @@ uint32_t           rive_artboard_vm_property_count(RiveArtboard*);
 RiveStatus         rive_artboard_vm_property_at(RiveArtboard*, uint32_t index,
                                                 char* name_buf, size_t cap,
                                                 size_t* out_len, int* out_type);
+
+/* --- View-model handle API (nested VMs + lists) -----------------------------
+ * Operate on a RiveViewModelInstance* (root / nested / list item). The flat path
+ * above reaches NAMED nested view models via '/', but cannot index lists nor
+ * introspect a nested VM's schema; the handle API can. Navigation returns a
+ * borrowed handle (null + rive_last_error on miss); reads/introspection mirror
+ * the artboard-rooted verbs. Read-only this slice (writes via the setters above;
+ * list mutation + image/artboard refs deferred). Implemented in
+ * rive_shim_viewmodel.cpp. `out_type` ordinals add list=5, viewModel=8,
+ * assetImage=11, artboard=12 to the scalar set documented above. */
+RiveViewModelInstance* rive_artboard_vm_root(RiveArtboard*);
+RiveViewModelInstance* rive_vmi_property_view_model(RiveViewModelInstance*, const char* path);
+RiveStatus         rive_vmi_list_size(RiveViewModelInstance*, const char* path, uint32_t* out);
+RiveViewModelInstance* rive_vmi_list_instance_at(RiveViewModelInstance*, const char* path,
+                                                 uint32_t index);
+uint32_t           rive_vmi_property_count(RiveViewModelInstance*);
+RiveStatus         rive_vmi_property_at(RiveViewModelInstance*, uint32_t index,
+                                        char* name_buf, size_t cap,
+                                        size_t* out_len, int* out_type);
+RiveStatus         rive_vmi_get_number(RiveViewModelInstance*, const char* path, float* out);
+RiveStatus         rive_vmi_get_bool(RiveViewModelInstance*, const char* path, uint8_t* out);
+RiveStatus         rive_vmi_get_color(RiveViewModelInstance*, const char* path, uint32_t* out);
+RiveStatus         rive_vmi_get_string(RiveViewModelInstance*, const char* path,
+                                       char* buf, size_t cap, size_t* out_len);
+RiveStatus         rive_vmi_get_enum_index(RiveViewModelInstance*, const char* path, uint32_t* out);
 
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 

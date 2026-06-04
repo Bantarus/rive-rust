@@ -87,7 +87,7 @@ mod scene;
 pub use scene::{Artboard, File, HitResult, StateMachine};
 
 mod view_model;
-pub use view_model::RiveValueKind;
+pub use view_model::{RiveValueKind, RiveViewModelInstance};
 
 /// Errors returned by the safe wrapper.
 #[derive(Debug, thiserror::Error)]

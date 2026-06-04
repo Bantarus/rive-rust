@@ -130,9 +130,10 @@ mod zero_copy;
 pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZeroCopyPlugin};
 
 // Per-feature module (the "add a Rive feature" convention — see
-// docs/feature-support.md). The `RiveViewModel` component is tier-agnostic; its
-// apply/read helpers are `floor`-gated inside the module (the `zero_copy` tier
-// will reuse the component and call the same `rive_renderer::Artboard` methods).
+// docs/feature-support.md). The `RiveViewModel` component is tier-agnostic. Its
+// WRITE apply helper is dual-tier (`floor` applies inline; `zero_copy` ferries
+// writes to the render world and calls it there); only the watch read-back path
+// remains `floor`-only for now.
 mod view_model;
 pub use view_model::{RiveValue, RiveViewModel};
 
@@ -722,6 +723,10 @@ fn instantiate_rive_instances(
 /// The per-frame core: advance each state machine by `Time::delta * speed`, render
 /// it offscreen, read the pixels back, and copy them into the target [`Image`].
 #[cfg(feature = "floor")]
+#[expect(
+    clippy::type_complexity,
+    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> control inputs"
+)]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
     mut instances: NonSendMut<RiveInstances>,

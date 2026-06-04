@@ -6,9 +6,13 @@
 //! `/` for nested view models, e.g. `"breath/scaleX"`. Mirrors the C++ contract
 //! in `docs/cpp/data-binding.mdx`.
 //!
-//! Covers number / bool / trigger / color / string / enum. The component itself
-//! is tier-agnostic; the apply/read helpers are `floor`-only for now (the
-//! `zero_copy` tier will reuse the component and call the same `Artboard` methods).
+//! Covers number / bool / trigger / color / string / enum. The component is
+//! tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance
+//! system applies them inline; the `zero_copy` tier ferries them to the render
+//! world (where its instances live) via a per-frame staging buffer. **Watch
+//! read-back** is `floor`-only for now — `zero_copy` advances in the render world
+//! and a render→main back-channel for reads is deferred (see
+//! `docs/feature-support.md`); registering a watch under `zero_copy` is a no-op.
 
 use std::collections::HashMap;
 
@@ -50,6 +54,11 @@ enum WatchKind {
 pub struct RiveViewModel {
     /// Pending writes, drained + applied before each advance.
     writes: Vec<(String, RiveValue)>,
+    /// `zero_copy` double-buffer: `writes` are moved here (main world) so the
+    /// read-only extract step can ferry them to the render world, then they are
+    /// cleared the following frame. Absent under `floor` (it drains `writes` inline).
+    #[cfg(feature = "zero_copy")]
+    staged: Vec<(String, RiveValue)>,
     /// Paths refreshed into `values` after each advance, with how to read each.
     watch: Vec<(String, WatchKind)>,
     /// Latest read-back of each watched path (refreshed every frame).
@@ -163,28 +172,65 @@ impl RiveViewModel {
             _ => None,
         }
     }
+
+    /// `zero_copy`: true if there is staging work this frame. Cheap read (no
+    /// change-detection mark), so the staging system can skip idle components.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn has_staging_work(&self) -> bool {
+        !self.writes.is_empty() || !self.staged.is_empty()
+    }
+
+    /// `zero_copy`: move this frame's queued writes into the staging buffer (or
+    /// clear last frame's), so the read-only extract can ferry them. Called once
+    /// per frame after gameplay, before extract.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn stage_writes(&mut self) {
+        if self.writes.is_empty() {
+            self.staged.clear();
+        } else {
+            self.staged = std::mem::take(&mut self.writes);
+        }
+    }
+
+    /// `zero_copy`: the writes staged for this frame (ferried by extract).
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn staged(&self) -> &[(String, RiveValue)] {
+        &self.staged
+    }
 }
 
-// ---- floor-tier apply/read (operate on the native rive_renderer::Artboard) ----
+// ---- apply/read (operate on the native rive_renderer::Artboard) ----
 
-/// Drains queued writes to the artboard's bound view model. Call **before**
-/// advancing so the state machine / scripts observe them this tick.
-#[cfg(feature = "floor")]
-pub(crate) fn apply_writes(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
-    for (path, value) in vm.writes.drain(..) {
+/// Applies a slice of view-model writes to the artboard's bound view model.
+/// Shared by both tiers (`floor` drains inline; `zero_copy` ferries a slice to
+/// the render world). Per-write failures `warn!` and continue.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn apply_writes_slice(
+    artboard: &rive_renderer::Artboard,
+    writes: &[(String, RiveValue)],
+) {
+    for (path, value) in writes {
         let res = match value {
-            RiveValue::Number(n) => artboard.vm_set_number(&path, n),
-            RiveValue::Bool(b) => artboard.vm_set_bool(&path, b),
-            RiveValue::Color(c) => artboard.vm_set_color(&path, c),
-            RiveValue::Text(s) => artboard.vm_set_string(&path, &s),
-            RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(&path, i),
-            RiveValue::EnumName(n) => artboard.vm_set_enum_name(&path, &n),
-            RiveValue::Trigger => artboard.vm_fire_trigger(&path),
+            RiveValue::Number(n) => artboard.vm_set_number(path, *n),
+            RiveValue::Bool(b) => artboard.vm_set_bool(path, *b),
+            RiveValue::Color(c) => artboard.vm_set_color(path, *c),
+            RiveValue::Text(s) => artboard.vm_set_string(path, s),
+            RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(path, *i),
+            RiveValue::EnumName(n) => artboard.vm_set_enum_name(path, n),
+            RiveValue::Trigger => artboard.vm_fire_trigger(path),
         };
         if let Err(e) = res {
             warn!("rive: view-model write {path:?} failed: {e}");
         }
     }
+}
+
+/// Drains queued writes to the artboard's bound view model. Call **before**
+/// advancing so the state machine / scripts observe them this tick.
+#[cfg(feature = "floor")]
+pub(crate) fn apply_writes(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
+    let writes = std::mem::take(&mut vm.writes);
+    apply_writes_slice(artboard, &writes);
 }
 
 /// Refreshes watched paths into [`RiveViewModel::values`]. Call **after**

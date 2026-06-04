@@ -21,6 +21,12 @@
 //!   RIVE_NO_CLOCKWISE=1           force the atomic PLS path (M2c default is clockwise
 //!                                 wherever pixel interlock is available); RIVE_CLOCKWISE=1
 //!                                 forces clockwise; RIVE_FORCE_ATOMIC=1 suppresses interlock.
+//!   RIVE_VM_SET_ENUM="path=index" attach a RiveViewModel to each face and re-assert this
+//!                                 enum write every frame — proves view-model WRITE forwarding
+//!                                 in the render-world (zero-copy) tier. Pair with a face that
+//!                                 has a visible enum, e.g.
+//!                                 RIVE_RIV=voxelien_face.riv RIVE_VM_SET_ENUM="viseme=8"
+//!                                 (mouth shape changes vs index 0).
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the
@@ -38,7 +44,7 @@ use bevy::winit::WinitSettings;
 
 use bevy_rive::{
     install_interlock_device_callback, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile,
-    RiveSampling, RiveSurface, RiveTarget, RiveZeroCopyPlugin,
+    RiveSampling, RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -67,6 +73,15 @@ struct Cfg {
     /// M-SCALE Phase 4: number of `RiveAtlasKey` pools to round-robin atlas faces across
     /// (`RIVE_KEYS`, default 1). >1 exercises key partitioning (distinct keys ⇒ distinct pages).
     keys: u32,
+    /// M-DATA: `RIVE_VM_SET_ENUM="path=index"` — attach a `RiveViewModel` to each face and
+    /// re-assert this enum write every frame, proving view-model WRITE forwarding through the
+    /// render-world (zero-copy) advance path. `None` (no VM write) by default.
+    vm_set_enum: Option<(String, u32)>,
+    /// M-DATA: `RIVE_VM_ONESHOT=1` — queue the `vm_set_enum` write ONCE at spawn (before the
+    /// `.riv` finishes loading) and never re-assert it. Proves the write is RETAINED across the
+    /// async-load window and applied once the face goes live (the lost-update fix), vs the
+    /// default every-frame re-assert which self-heals.
+    vm_oneshot: bool,
 }
 
 #[derive(Resource, Default)]
@@ -135,6 +150,12 @@ fn main() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(1u32)
         .clamp(1, 16);
+    // M-DATA: RIVE_VM_SET_ENUM="path=index" — drive a view-model enum every frame to
+    // prove WRITE forwarding through the zero-copy (render-world) advance path.
+    let vm_set_enum = std::env::var("RIVE_VM_SET_ENUM").ok().and_then(|s| {
+        let (path, idx) = s.split_once('=')?;
+        Some((path.trim().to_string(), idx.trim().parse().ok()?))
+    });
     // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
     // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
     // frame budget past that so the run self-terminates with the summary printed.
@@ -209,6 +230,8 @@ fn main() {
         atlas: std::env::var_os("RIVE_ATLAS").is_some(),
         cull: std::env::var_os("RIVE_CULL").is_some(),
         keys,
+        vm_set_enum,
+        vm_oneshot: std::env::var_os("RIVE_VM_ONESHOT").is_some(),
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
@@ -218,6 +241,7 @@ fn main() {
             attach_display,
             resync_atlas_sprites,
             drive_cull,
+            drive_vm_writes,
             drive_capture,
             drive_perf_exit,
         )
@@ -260,6 +284,33 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         if cfg.cull {
             e.insert(RiveActive(true));
         }
+        // M-DATA: attach a RiveViewModel so `drive_vm_writes` can queue an enum write
+        // (forwarded to the render world and applied before advance). Under RIVE_VM_ONESHOT,
+        // queue the write ONCE here at spawn (before the .riv loads) and never re-assert it —
+        // the write must be retained across the load window to land.
+        if let Some((path, index)) = &cfg.vm_set_enum {
+            let mut vm = RiveViewModel::default();
+            if cfg.vm_oneshot {
+                vm.set_enum_index(path.clone(), *index);
+            }
+            e.insert(vm);
+        }
+    }
+}
+
+/// M-DATA: re-assert the configured view-model enum write on every face each frame
+/// (a held value — robust even if the state machine re-evaluates it), proving WRITE
+/// forwarding through the zero-copy advance path. No-op unless `RIVE_VM_SET_ENUM` was set.
+fn drive_vm_writes(cfg: Res<Cfg>, mut q: Query<&mut RiveViewModel>) {
+    let Some((path, index)) = cfg.vm_set_enum.as_ref() else {
+        return;
+    };
+    // One-shot mode queues the write once at spawn (in `setup`); do NOT re-assert here.
+    if cfg.vm_oneshot {
+        return;
+    }
+    for mut vm in &mut q {
+        vm.set_enum_index(path.clone(), *index);
     }
 }
 

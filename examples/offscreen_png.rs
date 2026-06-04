@@ -57,19 +57,62 @@ fn main() -> Result<()> {
         .default_state_machine()
         .context("instantiating the default state machine")?;
 
-    // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind)
-    // — use it to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
+    // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
+    // recursing into nested view models and list items via the handle API — use it
+    // to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
     if std::env::var("RIVE_VM_DUMP").is_ok() {
-        let props = artboard.vm_properties();
-        println!("  view-model: {} propertie(s)", props.len());
-        for (name, kind) in &props {
-            print!("    {name:?}: {kind:?}");
-            if matches!(kind, rive_renderer::RiveValueKind::Enum) {
-                if let Ok(vals) = artboard.vm_enum_values(name) {
-                    print!(" {vals:?}");
+        use rive_renderer::{Artboard, RiveValueKind, RiveViewModelInstance};
+        // Recurse a VM instance. `path` is the `/`-route from the root and is only
+        // valid while `addressable` (true for the root + named-nested VMs); once we
+        // descend into a list item it goes false (list items can't be `/`-addressed,
+        // so enum-label lookup — which is path-based — is skipped there).
+        fn dump(
+            ab: &Artboard,
+            vmi: &RiveViewModelInstance,
+            path: &str,
+            addressable: bool,
+            indent: usize,
+            depth: usize,
+        ) {
+            let pad = "  ".repeat(indent);
+            for (name, kind) in vmi.properties() {
+                let child_path = if path.is_empty() { name.clone() } else { format!("{path}/{name}") };
+                print!("{pad}{name:?}: {kind:?}");
+                match kind {
+                    RiveValueKind::Enum => {
+                        if addressable {
+                            if let Ok(vals) = ab.vm_enum_values(&child_path) {
+                                print!(" {vals:?}");
+                            }
+                        }
+                        println!();
+                    }
+                    RiveValueKind::ViewModel if depth > 0 => {
+                        println!();
+                        if let Some(child) = vmi.view_model(&name) {
+                            dump(ab, &child, &child_path, addressable, indent + 1, depth - 1);
+                        }
+                    }
+                    RiveValueKind::List if depth > 0 => {
+                        let n = vmi.list_size(&name).unwrap_or(0);
+                        println!(" (len {n})");
+                        for i in 0..n {
+                            if let Some(item) = vmi.list_item(&name, i) {
+                                println!("{pad}  [{i}]:");
+                                dump(ab, &item, "", false, indent + 2, depth - 1);
+                            }
+                        }
+                    }
+                    _ => println!(),
                 }
             }
-            println!();
+        }
+        match artboard.vm_root() {
+            Some(root) => {
+                println!("  view-model: {} top-level propertie(s)", root.properties().len());
+                dump(&artboard, &root, "", true, 2, 4);
+            }
+            None => println!("  view-model: none"),
         }
     }
 

@@ -129,6 +129,13 @@ mod zero_copy;
 #[cfg(feature = "zero_copy")]
 pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZeroCopyPlugin};
 
+// Per-feature module (the "add a Rive feature" convention — see
+// docs/feature-support.md). The `RiveViewModel` component is tier-agnostic; its
+// apply/read helpers are `floor`-gated inside the module (the `zero_copy` tier
+// will reuse the component and call the same `rive_renderer::Artboard` methods).
+mod view_model;
+pub use view_model::{RiveValue, RiveViewModel};
+
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
 /// This is the whole public surface a game touches. The floor's three-step flow —
@@ -141,7 +148,7 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RivePointer,
-        RiveSampling, RiveSurface, RiveTarget, StateMachineSelector,
+        RiveSampling, RiveSurface, RiveTarget, RiveValue, RiveViewModel, StateMachineSelector,
     };
 
     // Floor (default): the CPU-copy plugin entry point.
@@ -720,13 +727,19 @@ fn advance_and_upload_rive(
     mut instances: NonSendMut<RiveInstances>,
     time: Res<Time>,
     mut images: ResMut<Assets<Image>>,
-    query: Query<(Entity, &RiveAnimation, &RiveTarget, Option<&RivePointer>)>,
+    mut query: Query<(
+        Entity,
+        &RiveAnimation,
+        &RiveTarget,
+        Option<&RivePointer>,
+        Option<&mut RiveViewModel>,
+    )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, anim, target, pointer) in &query {
+    for (entity, anim, target, pointer, mut view_model) in &mut query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
@@ -757,6 +770,12 @@ fn advance_and_upload_rive(
             }
         }
 
+        // Apply queued view-model writes BEFORE advancing, so the state machine /
+        // scripts observe them this tick (same reason as pointer input above).
+        if let Some(vm) = view_model.as_deref_mut() {
+            crate::view_model::apply_writes(vm, &inst.artboard);
+        }
+
         // Guard the native state machine against NaN/negative/non-finite steps
         // (`speed` is user-controlled). Relies on `Time` being virtual-clamped
         // (~250 ms max) to bound a huge real delta.
@@ -764,6 +783,13 @@ fn advance_and_upload_rive(
         if step.is_finite() {
             inst.state_machine.advance(step.max(0.0));
         }
+
+        // Read watched view-model properties AFTER advancing (reflects this tick's
+        // script / state-machine output, e.g. a script-driven "breath/scaleX").
+        if let Some(vm) = view_model.as_deref_mut() {
+            crate::view_model::refresh_watch(vm, &inst.artboard);
+        }
+
         if let Err(e) = render_instance(ctx, inst) {
             warn!("rive: frame failed for {entity:?}: {e}");
             continue;

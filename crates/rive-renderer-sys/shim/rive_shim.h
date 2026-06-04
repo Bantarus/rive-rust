@@ -97,6 +97,27 @@ void               rive_state_machine_destroy(RiveStateMachine*);
  * result to its backing artboard. */
 void               rive_state_machine_advance(RiveStateMachine*, float dt_seconds);
 
+/* --- View-model data binding (get/set named view-model properties) ----------
+ * Operate on the artboard's bound DEFAULT view-model instance (see
+ * data-binding.mdx). `path` is a UTF-8 property name; nested view models use a
+ * '/' separator (e.g. "group/child/x"). Each verb returns RiveStatus (RIVE_OK,
+ * else nonzero + rive_last_error) — nonzero on no-view-model / path-not-found /
+ * wrong-type. Slice 1 = number/bool/trigger + schema introspection; color,
+ * string and enum follow. Implemented in rive_shim_viewmodel.cpp. */
+RiveStatus         rive_artboard_vm_set_number(RiveArtboard*, const char* path, float value);
+RiveStatus         rive_artboard_vm_get_number(RiveArtboard*, const char* path, float* out);
+RiveStatus         rive_artboard_vm_set_bool(RiveArtboard*, const char* path, uint8_t value);
+RiveStatus         rive_artboard_vm_get_bool(RiveArtboard*, const char* path, uint8_t* out);
+RiveStatus         rive_artboard_vm_fire_trigger(RiveArtboard*, const char* path);
+/* Schema introspection (discover property names + types). `property_at` writes
+ * up to `cap` name bytes (NOT NUL-terminated), always sets *out_len to the full
+ * name length (call with cap=0 to size first), and *out_type to the rive
+ * DataType ordinal (number=2, boolean=3, color=4, string=1, enum=6, trigger=7). */
+uint32_t           rive_artboard_vm_property_count(RiveArtboard*);
+RiveStatus         rive_artboard_vm_property_at(RiveArtboard*, uint32_t index,
+                                                char* name_buf, size_t cap,
+                                                size_t* out_len, int* out_type);
+
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 
 /* Begins a frame against `target`, clearing to the given straight (non-

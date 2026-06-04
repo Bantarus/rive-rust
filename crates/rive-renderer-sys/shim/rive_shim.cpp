@@ -7,6 +7,7 @@
  */
 
 #include "rive_shim.h"
+#include "rive_shim_internal.hpp" // shared handle struct (RiveArtboard) + shim_set_error
 
 #include <chrono>
 #include <cstdio>
@@ -200,15 +201,8 @@ struct RiveFile
     rive::rcp<rive::File> file;
 };
 
-struct RiveArtboard
-{
-    std::unique_ptr<rive::ArtboardInstance> artboard;
-    // The artboard's default view-model instance, bound so editor-authored data
-    // bindings (incl. scripted view-model inputs) resolve at runtime. Held here
-    // so the SAME instance can also be bound to the state machine. Null for
-    // artboards with no view model.
-    rive::rcp<rive::ViewModelInstance> vmInstance;
-};
+// RiveArtboard is defined in rive_shim_internal.hpp (shared with the view-model
+// TU). The remaining handle structs stay file-local until a second TU needs them.
 
 struct RiveStateMachine
 {
@@ -220,6 +214,10 @@ struct RiveStateMachine
 // ---------------------------------------------------------------------------
 
 extern "C" const char* rive_last_error(void) { return last_error_storage().c_str(); }
+
+// Cross-TU error reporter declared in rive_shim_internal.hpp: `set_error` has
+// internal linkage (anonymous namespace), so per-feature TUs route through this.
+void shim_set_error(const char* msg) { set_error(msg); }
 
 // ---------------------------------------------------------------------------
 // Context.
@@ -518,6 +516,11 @@ extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
     {
         handle->artboard->bindViewModelInstance(vmi);
         handle->vmInstance = std::move(vmi);
+        // Wrap the SAME bound instance for name-based property get/set (data
+        // binding). The public ctor just holds the rcp — no new instance, so the
+        // script/data-binding context above is untouched (see data-binding.mdx).
+        handle->vmRuntime =
+            rive::make_rcp<rive::ViewModelInstanceRuntime>(handle->vmInstance);
     }
     return handle;
 }

@@ -171,6 +171,45 @@ extern "C" {
         h: f32,
     ) -> u8;
 
+    // ===== View-model data binding ==========================================
+    // Get/set named view-model properties on an artboard's bound default
+    // instance (see shim/rive_shim_viewmodel.cpp). `path` is a UTF-8 C string;
+    // verbs return RiveStatus (0 ok; nonzero + rive_last_error). Slice 1:
+    // number/bool/trigger + schema introspection.
+    pub fn rive_artboard_vm_set_number(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        value: f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_get_number(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_set_bool(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        value: u8,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_get_bool(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut u8,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_fire_trigger(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_property_count(artboard: *mut RiveArtboard) -> u32;
+    pub fn rive_artboard_vm_property_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+        name_buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+        out_type: *mut i32,
+    ) -> RiveStatus;
+
     pub fn rive_frame_begin(
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,

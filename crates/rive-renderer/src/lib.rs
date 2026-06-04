@@ -76,6 +76,12 @@ use rive_renderer_sys as sys;
 /// Result alias for this crate.
 pub type Result<T> = std::result::Result<T, Error>;
 
+// Per-feature modules (the "add a Rive feature" convention — see
+// docs/feature-support.md). Each wraps one Rive feature area's FFI in safe
+// methods; the public types are re-exported here so the crate's API is flat.
+mod view_model;
+pub use view_model::RiveValueKind;
+
 /// Errors returned by the safe wrapper.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -114,6 +120,15 @@ pub enum Error {
     /// so it is rejected here rather than executed.
     #[error("handle belongs to a different Context")]
     ContextMismatch,
+    /// A view-model data-binding operation failed: the artboard has no view
+    /// model, the property path was not found, or the property has a different
+    /// type than the accessor used.
+    #[error("view-model data binding failed: {0}")]
+    ViewModel(String),
+    /// A view-model property path contained an interior NUL byte (cannot be
+    /// passed across the C ABI).
+    #[error("view-model property path contained an interior NUL byte")]
+    InvalidPath,
 }
 
 /// Returns the shim's most recent error string (empty if none).

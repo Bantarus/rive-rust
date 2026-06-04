@@ -57,6 +57,37 @@ fn main() -> Result<()> {
         .default_state_machine()
         .context("instantiating the default state machine")?;
 
+    // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind)
+    // — use it to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
+    if std::env::var("RIVE_VM_DUMP").is_ok() {
+        let props = artboard.vm_properties();
+        println!("  view-model: {} propertie(s)", props.len());
+        for (name, kind) in &props {
+            println!("    {name:?}: {kind:?}");
+        }
+    }
+
+    // RIVE_VM_SET="path=value" writes a view-model property BEFORE advancing (so
+    // the state machine / script observes it this tick). `=true`/`=false` set a
+    // bool; anything else parses as a number.
+    if let Ok(spec) = std::env::var("RIVE_VM_SET") {
+        if let Some((path, val)) = spec.split_once('=') {
+            let (path, val) = (path.trim(), val.trim());
+            match val {
+                "true" => artboard.vm_set_bool(path, true),
+                "false" => artboard.vm_set_bool(path, false),
+                _ => {
+                    let n: f32 = val
+                        .parse()
+                        .context("RIVE_VM_SET value must be a number or true/false")?;
+                    artboard.vm_set_number(path, n)
+                }
+            }
+            .with_context(|| format!("setting view-model property {path:?}"))?;
+            println!("  set view-model {path:?} = {val}");
+        }
+    }
+
     // Advance the state machine, then render a single offscreen snapshot.
     // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
     // forward N 60Hz frames before the snapshot, so two runs at different frame
@@ -76,6 +107,16 @@ fn main() -> Result<()> {
             state_machine.pointer_move(px, py, width, height);
         }
         state_machine.advance(FRAME_DT_SECONDS);
+    }
+
+    // RIVE_VM_GET="path" reads a view-model number AFTER advancing — read-back of
+    // a value the script / state machine wrote this frame.
+    if let Ok(path) = std::env::var("RIVE_VM_GET") {
+        let path = path.trim();
+        match artboard.vm_get_number(path) {
+            Ok(v) => println!("  view-model {path:?} = {v}"),
+            Err(e) => println!("  view-model {path:?} read failed: {e}"),
+        }
     }
 
     let frame = ctx

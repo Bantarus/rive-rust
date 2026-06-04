@@ -99,6 +99,13 @@ name = "voxelien_face"
 path = "../../examples/voxelien_face.rs"
 required-features = ["floor"]
 
+# Live viewer for the Nimai face (floor tier) that forwards the mouse cursor into
+# the state machine so its pointer Listeners fire (eyes/head follow the cursor).
+[[example]]
+name = "nimai_face"
+path = "../../examples/nimai_face.rs"
+required-features = ["floor"]
+
 # The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
 [[example]]
 name = "sprite_riv_zerocopy"

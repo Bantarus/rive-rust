@@ -1120,6 +1120,30 @@ impl std::fmt::Debug for Artboard {
     }
 }
 
+/// Result of forwarding a pointer event to a [`StateMachine`]'s Listeners
+/// (mirrors rive's `HitResult`). Tells you how to route the same event to UI
+/// behind Rive: `None` — nothing fired, forward it; `Hit` — a listener fired on
+/// a transparent shape, forward it too; `HitOpaque` — a listener fired on an
+/// opaque shape, Rive consumed the event, don't forward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum HitResult {
+    None = 0,
+    Hit = 1,
+    HitOpaque = 2,
+}
+
+impl HitResult {
+    /// Maps the shim's byte to a variant (unknown bytes → [`HitResult::None`]).
+    fn from_u8(v: u8) -> Self {
+        match v {
+            1 => HitResult::Hit,
+            2 => HitResult::HitOpaque,
+            _ => HitResult::None,
+        }
+    }
+}
+
 /// A state machine (or animation/scene) instance driving an [`Artboard`].
 ///
 /// Holds a shared reference to its [`Artboard`] so the native scene never
@@ -1134,6 +1158,45 @@ impl StateMachine {
     pub fn advance(&mut self, dt_seconds: f32) {
         // SAFETY: `self.ptr` is a live state-machine handle.
         unsafe { sys::rive_state_machine_advance(self.ptr, dt_seconds) };
+    }
+
+    /// Forwards a pointer **move** to the state machine's Listeners. `(x, y)` is
+    /// in target-pixel space (`0..w`, `0..h`, top-left origin); `w`×`h` is the
+    /// render-target size the coords are relative to. The shim inverts the same
+    /// Fit/alignment used to draw, so input lines up with the rendered pixels.
+    /// Drives pointer-driven Listeners — eye/head joysticks, hover, etc.
+    pub fn pointer_move(&mut self, x: f32, y: f32, w: u32, h: u32) -> HitResult {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        HitResult::from_u8(unsafe {
+            sys::rive_state_machine_pointer_move(self.ptr, x, y, w as f32, h as f32)
+        })
+    }
+
+    /// Forwards a pointer **press**. See [`StateMachine::pointer_move`] for the
+    /// coordinate contract.
+    pub fn pointer_down(&mut self, x: f32, y: f32, w: u32, h: u32) -> HitResult {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        HitResult::from_u8(unsafe {
+            sys::rive_state_machine_pointer_down(self.ptr, x, y, w as f32, h as f32)
+        })
+    }
+
+    /// Forwards a pointer **release**. See [`StateMachine::pointer_move`] for the
+    /// coordinate contract.
+    pub fn pointer_up(&mut self, x: f32, y: f32, w: u32, h: u32) -> HitResult {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        HitResult::from_u8(unsafe {
+            sys::rive_state_machine_pointer_up(self.ptr, x, y, w as f32, h as f32)
+        })
+    }
+
+    /// Forwards a pointer **exit** (cursor left the surface). See
+    /// [`StateMachine::pointer_move`] for the coordinate contract.
+    pub fn pointer_exit(&mut self, x: f32, y: f32, w: u32, h: u32) -> HitResult {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        HitResult::from_u8(unsafe {
+            sys::rive_state_machine_pointer_exit(self.ptr, x, y, w as f32, h as f32)
+        })
     }
 }
 

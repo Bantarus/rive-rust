@@ -66,7 +66,15 @@ fn main() -> Result<()> {
         .and_then(|v| v.parse().ok())
         .unwrap_or(1)
         .max(1);
+    // RIVE_POINTER="x,y" (target-pixel space, top-left origin) forwards a pointer
+    // move each frame before advancing, so pointer-driven Listeners / joysticks
+    // (e.g. an eye that follows the cursor) respond. Two runs at different
+    // positions can be diffed to prove pointer input reaches the state machine.
+    let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| parse_xy(&s));
     for _ in 0..advance_frames {
+        if let Some((px, py)) = pointer {
+            state_machine.pointer_move(px, py, width, height);
+        }
         state_machine.advance(FRAME_DT_SECONDS);
     }
 
@@ -101,6 +109,12 @@ fn main() -> Result<()> {
 
     println!("wrote {}", output.display());
     Ok(())
+}
+
+/// Parses an `"x,y"` pair of `f32`s (for `RIVE_POINTER`). `None` if malformed.
+fn parse_xy(s: &str) -> Option<(f32, f32)> {
+    let (a, b) = s.split_once(',')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
 fn parse_or(arg: Option<String>, default: u32, name: &str) -> Result<u32> {

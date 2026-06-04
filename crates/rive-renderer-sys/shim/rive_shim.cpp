@@ -591,6 +591,70 @@ extern "C" void rive_state_machine_advance(RiveStateMachine* sm, float dt_second
 }
 
 // ---------------------------------------------------------------------------
+// Pointer input -> state-machine Listeners (eye/head joysticks, buttons, hover).
+// ---------------------------------------------------------------------------
+
+// Map a pointer in TARGET-PIXEL space (0..w, 0..h, top-left origin) into the
+// artboard's local space by INVERTING the same alignment `rive_artboard_draw`
+// uses to draw (Fit::contain / Alignment::center). MUST stay in sync with
+// rive_artboard_draw above, or pointer hits won't line up with the rendered
+// pixels. `scene->bounds()` is the artboard's {0,0,w,h} for a state machine.
+static rive::Vec2D pointer_to_artboard(RiveStateMachine* sm,
+                                       float x, float y, float w, float h)
+{
+    const rive::AABB frame(0.0f, 0.0f, w, h);
+    const rive::Mat2D m = rive::computeAlignment(rive::Fit::contain,
+                                                 rive::Alignment::center,
+                                                 frame,
+                                                 sm->scene->bounds());
+    return m.invertOrIdentity() * rive::Vec2D{x, y};
+}
+
+// The four pointer events. `x,y` are in target-pixel space; `w,h` are the
+// render-target pixel size those coords are relative to (the same W/H passed to
+// the offscreen target). Returns rive::HitResult as a byte: 0 none / 1 hit /
+// 2 hitOpaque (and 0 on null/degenerate args). `!(w > 0)` also rejects NaN.
+extern "C" uint8_t rive_state_machine_pointer_move(RiveStateMachine* sm,
+                                                   float x, float y,
+                                                   float w, float h)
+{
+    if (sm == nullptr || sm->scene == nullptr || !(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    return static_cast<uint8_t>(
+        sm->scene->pointerMove(pointer_to_artboard(sm, x, y, w, h), 0.0f));
+}
+
+extern "C" uint8_t rive_state_machine_pointer_down(RiveStateMachine* sm,
+                                                   float x, float y,
+                                                   float w, float h)
+{
+    if (sm == nullptr || sm->scene == nullptr || !(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    return static_cast<uint8_t>(
+        sm->scene->pointerDown(pointer_to_artboard(sm, x, y, w, h)));
+}
+
+extern "C" uint8_t rive_state_machine_pointer_up(RiveStateMachine* sm,
+                                                 float x, float y,
+                                                 float w, float h)
+{
+    if (sm == nullptr || sm->scene == nullptr || !(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    return static_cast<uint8_t>(
+        sm->scene->pointerUp(pointer_to_artboard(sm, x, y, w, h)));
+}
+
+extern "C" uint8_t rive_state_machine_pointer_exit(RiveStateMachine* sm,
+                                                   float x, float y,
+                                                   float w, float h)
+{
+    if (sm == nullptr || sm->scene == nullptr || !(w > 0.0f) || !(h > 0.0f))
+        return 0;
+    return static_cast<uint8_t>(
+        sm->scene->pointerExit(pointer_to_artboard(sm, x, y, w, h)));
+}
+
+// ---------------------------------------------------------------------------
 // Frame: begin -> draw -> flush.
 // ---------------------------------------------------------------------------
 

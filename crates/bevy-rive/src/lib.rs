@@ -140,8 +140,8 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RiveSampling,
-        RiveSurface, RiveTarget, StateMachineSelector,
+        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RivePointer,
+        RiveSampling, RiveSurface, RiveTarget, StateMachineSelector,
     };
 
     // Floor (default): the CPU-copy plugin entry point.
@@ -467,6 +467,31 @@ impl Default for RiveActive {
     }
 }
 
+/// Pointer input for a rive face's state-machine **Listeners** (eye/head
+/// joysticks, hover, clickable shapes). The consumer writes this each frame from
+/// its own input; the plugin forwards it to the native state machine **before**
+/// advancing, so listeners fire and pointer-driven joysticks track the cursor.
+///
+/// [`pos`](Self::pos) is in **target-pixel** space — `0..`[`RiveTarget::width`]
+/// on x, `0..`[`RiveTarget::height`] on y, **top-left origin** (matching the
+/// rendered image). `None` means the pointer left the surface (the plugin sends
+/// `pointerExit`). While `pos` is `Some`, the plugin re-asserts `pointerMove`
+/// **every frame** (a joystick eases toward the latched target on each advance,
+/// so a one-shot event would stall), and emits press/release on
+/// [`primary_down`](Self::primary_down) edges.
+///
+/// The consumer owns the cursor→target-pixel mapping because it owns the display
+/// (e.g. a centered `Sprite`) — see `examples/nimai_face.rs`. Absent on an entity
+/// ⇒ no pointer input (existing faces are unaffected). Honored by the `floor`
+/// tier; the `zero_copy` tier ignores it for now.
+#[derive(Component, Debug, Clone, Default)]
+pub struct RivePointer {
+    /// Pointer position in target-pixel space, or `None` when off-surface.
+    pub pos: Option<Vec2>,
+    /// Whether the primary (left) button is currently held.
+    pub primary_down: bool,
+}
+
 /// Maps a [`RiveSurface`] to a consumer's sampling parameters. An atlas face occupies a
 /// sub-rect of a SHARED page, so a consumer cannot bind the whole texture — it sets the 2D
 /// `Sprite.rect` or the 3D `StandardMaterial.uv_transform` from these. For a non-atlas face
@@ -557,6 +582,11 @@ struct RiveInstance {
     target: RenderTarget,
     /// Reused readback scratch (`w*h*4`); avoids a per-frame allocation.
     readback: Vec<u8>,
+    /// Previous pointer edge state, so `advance_and_upload_rive` can emit
+    /// `pointer_down`/`pointer_up` on button edges and a single `pointer_exit`
+    /// when the cursor leaves (see [`RivePointer`]).
+    last_pointer_down: bool,
+    last_pointer_present: bool,
 }
 
 /// Per-entity native instances, keyed by [`Entity`]. `!Send`. Links the
@@ -675,6 +705,8 @@ fn instantiate_rive_instances(
                 state_machine,
                 target: rt,
                 readback,
+                last_pointer_down: false,
+                last_pointer_present: false,
             },
         );
     }
@@ -688,16 +720,42 @@ fn advance_and_upload_rive(
     mut instances: NonSendMut<RiveInstances>,
     time: Res<Time>,
     mut images: ResMut<Assets<Image>>,
-    query: Query<(Entity, &RiveAnimation, &RiveTarget)>,
+    query: Query<(Entity, &RiveAnimation, &RiveTarget, Option<&RivePointer>)>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, anim, target) in &query {
+    for (entity, anim, target, pointer) in &query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
+
+        // Forward pointer input to the state machine's Listeners BEFORE advancing:
+        // a listener latches the pointer target, then the joystick eases toward it
+        // on `advance` — so re-assert `pointer_move` every frame while the cursor
+        // is present, and emit press/release/exit only on edges (see `RivePointer`).
+        let (pw, ph) = (target.width, target.height);
+        match pointer.and_then(|p| p.pos.map(|pos| (pos, p.primary_down))) {
+            Some((pos, down)) => {
+                inst.state_machine.pointer_move(pos.x, pos.y, pw, ph);
+                if down && !inst.last_pointer_down {
+                    inst.state_machine.pointer_down(pos.x, pos.y, pw, ph);
+                } else if !down && inst.last_pointer_down {
+                    inst.state_machine.pointer_up(pos.x, pos.y, pw, ph);
+                }
+                inst.last_pointer_down = down;
+                inst.last_pointer_present = true;
+            }
+            None => {
+                if inst.last_pointer_present {
+                    // The exit position is ignored by the SM; (0,0) is fine.
+                    inst.state_machine.pointer_exit(0.0, 0.0, pw, ph);
+                }
+                inst.last_pointer_down = false;
+                inst.last_pointer_present = false;
+            }
+        }
 
         // Guard the native state machine against NaN/negative/non-finite steps
         // (`speed` is user-controlled). Relies on `Time` being virtual-clamped

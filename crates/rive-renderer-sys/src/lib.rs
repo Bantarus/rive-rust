@@ -137,6 +137,40 @@ extern "C" {
     pub fn rive_state_machine_destroy(sm: *mut RiveStateMachine);
     pub fn rive_state_machine_advance(sm: *mut RiveStateMachine, dt_seconds: f32);
 
+    // Pointer input → state-machine Listeners. `x,y` are in target-pixel space
+    // (0..w, 0..h, top-left origin); `w,h` are the render-target pixel size those
+    // coords are relative to. The shim inverts the SAME Fit::contain/center
+    // alignment used to draw, then forwards to the rive `Scene`. Each returns the
+    // `rive::HitResult` as a byte (0 none / 1 hit / 2 hitOpaque; 0 on bad args).
+    pub fn rive_state_machine_pointer_move(
+        sm: *mut RiveStateMachine,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> u8;
+    pub fn rive_state_machine_pointer_down(
+        sm: *mut RiveStateMachine,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> u8;
+    pub fn rive_state_machine_pointer_up(
+        sm: *mut RiveStateMachine,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> u8;
+    pub fn rive_state_machine_pointer_exit(
+        sm: *mut RiveStateMachine,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> u8;
+
     pub fn rive_frame_begin(
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,

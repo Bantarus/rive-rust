@@ -63,7 +63,13 @@ fn main() -> Result<()> {
         let props = artboard.vm_properties();
         println!("  view-model: {} propertie(s)", props.len());
         for (name, kind) in &props {
-            println!("    {name:?}: {kind:?}");
+            print!("    {name:?}: {kind:?}");
+            if matches!(kind, rive_renderer::RiveValueKind::Enum) {
+                if let Ok(vals) = artboard.vm_enum_values(name) {
+                    print!(" {vals:?}");
+                }
+            }
+            println!();
         }
     }
 
@@ -85,6 +91,21 @@ fn main() -> Result<()> {
             }
             .with_context(|| format!("setting view-model property {path:?}"))?;
             println!("  set view-model {path:?} = {val}");
+        }
+    }
+
+    // RIVE_VM_SET_ENUM="path=index" sets an enum property by index before advancing
+    // (e.g. drive `viseme` to change the mouth shape — a visible write to diff).
+    if let Ok(spec) = std::env::var("RIVE_VM_SET_ENUM") {
+        if let Some((path, idx)) = spec.split_once('=') {
+            let (path, idx) = (path.trim(), idx.trim());
+            let index: u32 = idx
+                .parse()
+                .context("RIVE_VM_SET_ENUM index must be an integer")?;
+            artboard
+                .vm_set_enum_index(path, index)
+                .with_context(|| format!("setting enum {path:?} = index {index}"))?;
+            println!("  set view-model enum {path:?} = index {index}");
         }
     }
 

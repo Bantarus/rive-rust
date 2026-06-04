@@ -6,10 +6,9 @@
 //! `/` for nested view models, e.g. `"breath/scaleX"`. Mirrors the C++ contract
 //! in `docs/cpp/data-binding.mdx`.
 //!
-//! Slice 1 wires number / bool / trigger. Color, string and enum follow (tracked
-//! in `docs/feature-support.md`). The component itself is tier-agnostic; the
-//! apply/read helpers are `floor`-only for now (the `zero_copy` tier will reuse
-//! the component and call the same `rive_renderer::Artboard` methods).
+//! Covers number / bool / trigger / color / string / enum. The component itself
+//! is tier-agnostic; the apply/read helpers are `floor`-only for now (the
+//! `zero_copy` tier will reuse the component and call the same `Artboard` methods).
 
 use std::collections::HashMap;
 
@@ -22,17 +21,28 @@ pub enum RiveValue {
     Number(f32),
     /// Boolean.
     Bool(bool),
+    /// ARGB color (e.g. `0xFF_33_AA_FF`).
+    Color(u32),
+    /// UTF-8 string.
+    Text(String),
+    /// Enum value as a 0-based index.
+    EnumIndex(u32),
+    /// Enum value as a label (write-only; reads come back as [`RiveValue::EnumIndex`]).
+    EnumName(String),
     /// One-shot trigger (write-only).
     Trigger,
 }
 
 /// Which typed getter to use when refreshing a watched path (the property's type
-/// isn't introspected for nested paths in slice 1, so the caller declares it via
-/// [`RiveViewModel::watch_number`] / [`RiveViewModel::watch_bool`]).
+/// isn't introspected for nested paths, so the caller declares it via the
+/// `watch_*` methods).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WatchKind {
     Number,
     Bool,
+    Color,
+    String,
+    EnumIndex,
 }
 
 /// Read/write a face's view-model properties. Spawn alongside `RiveAnimation`.
@@ -57,6 +67,26 @@ impl RiveViewModel {
         self.writes.push((path.into(), RiveValue::Bool(value)));
     }
 
+    /// Queues a write to a **color** property (ARGB).
+    pub fn set_color(&mut self, path: impl Into<String>, argb: u32) {
+        self.writes.push((path.into(), RiveValue::Color(argb)));
+    }
+
+    /// Queues a write to a **string** property.
+    pub fn set_string(&mut self, path: impl Into<String>, value: impl Into<String>) {
+        self.writes.push((path.into(), RiveValue::Text(value.into())));
+    }
+
+    /// Queues a write to an **enum** property by 0-based value index.
+    pub fn set_enum_index(&mut self, path: impl Into<String>, index: u32) {
+        self.writes.push((path.into(), RiveValue::EnumIndex(index)));
+    }
+
+    /// Queues a write to an **enum** property by value label (name).
+    pub fn set_enum_name(&mut self, path: impl Into<String>, name: impl Into<String>) {
+        self.writes.push((path.into(), RiveValue::EnumName(name.into())));
+    }
+
     /// Queues a one-shot **trigger** fire.
     pub fn fire_trigger(&mut self, path: impl Into<String>) {
         self.writes.push((path.into(), RiveValue::Trigger));
@@ -71,6 +101,21 @@ impl RiveViewModel {
     /// Registers a **bool** property to read back each frame. Idempotent.
     pub fn watch_bool(&mut self, path: impl Into<String>) {
         self.add_watch(path.into(), WatchKind::Bool);
+    }
+
+    /// Registers a **color** property to read back each frame. Idempotent.
+    pub fn watch_color(&mut self, path: impl Into<String>) {
+        self.add_watch(path.into(), WatchKind::Color);
+    }
+
+    /// Registers a **string** property to read back each frame. Idempotent.
+    pub fn watch_string(&mut self, path: impl Into<String>) {
+        self.add_watch(path.into(), WatchKind::String);
+    }
+
+    /// Registers an **enum** property to read back (as an index) each frame. Idempotent.
+    pub fn watch_enum_index(&mut self, path: impl Into<String>) {
+        self.add_watch(path.into(), WatchKind::EnumIndex);
     }
 
     fn add_watch(&mut self, path: String, kind: WatchKind) {
@@ -94,6 +139,30 @@ impl RiveViewModel {
             _ => None,
         }
     }
+
+    /// Last read-back **color** (ARGB) for `path` (if watched as a color).
+    pub fn color(&self, path: &str) -> Option<u32> {
+        match self.values.get(path) {
+            Some(RiveValue::Color(c)) => Some(*c),
+            _ => None,
+        }
+    }
+
+    /// Last read-back **string** for `path` (if watched as a string).
+    pub fn text(&self, path: &str) -> Option<&str> {
+        match self.values.get(path) {
+            Some(RiveValue::Text(s)) => Some(s.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Last read-back **enum index** for `path` (if watched as an enum).
+    pub fn enum_index(&self, path: &str) -> Option<u32> {
+        match self.values.get(path) {
+            Some(RiveValue::EnumIndex(i)) => Some(*i),
+            _ => None,
+        }
+    }
 }
 
 // ---- floor-tier apply/read (operate on the native rive_renderer::Artboard) ----
@@ -106,6 +175,10 @@ pub(crate) fn apply_writes(vm: &mut RiveViewModel, artboard: &rive_renderer::Art
         let res = match value {
             RiveValue::Number(n) => artboard.vm_set_number(&path, n),
             RiveValue::Bool(b) => artboard.vm_set_bool(&path, b),
+            RiveValue::Color(c) => artboard.vm_set_color(&path, c),
+            RiveValue::Text(s) => artboard.vm_set_string(&path, &s),
+            RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(&path, i),
+            RiveValue::EnumName(n) => artboard.vm_set_enum_name(&path, &n),
             RiveValue::Trigger => artboard.vm_fire_trigger(&path),
         };
         if let Err(e) = res {
@@ -127,6 +200,9 @@ pub(crate) fn refresh_watch(vm: &mut RiveViewModel, artboard: &rive_renderer::Ar
         let read = match kind {
             WatchKind::Number => artboard.vm_get_number(path).map(RiveValue::Number),
             WatchKind::Bool => artboard.vm_get_bool(path).map(RiveValue::Bool),
+            WatchKind::Color => artboard.vm_get_color(path).map(RiveValue::Color),
+            WatchKind::String => artboard.vm_get_string(path).map(RiveValue::Text),
+            WatchKind::EnumIndex => artboard.vm_get_enum_index(path).map(RiveValue::EnumIndex),
         };
         match read {
             Ok(v) => {

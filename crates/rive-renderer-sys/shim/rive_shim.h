@@ -109,6 +109,20 @@ RiveStatus         rive_artboard_vm_get_number(RiveArtboard*, const char* path, 
 RiveStatus         rive_artboard_vm_set_bool(RiveArtboard*, const char* path, uint8_t value);
 RiveStatus         rive_artboard_vm_get_bool(RiveArtboard*, const char* path, uint8_t* out);
 RiveStatus         rive_artboard_vm_fire_trigger(RiveArtboard*, const char* path);
+/* Slice 2: color (ARGB u32), string, enum. Strings/enum-names use the two-call
+ * buffer protocol (call with buf=NULL, cap=0 to get *out_len, then size + refill;
+ * bytes are NOT NUL-terminated). Enum get/set by index or name; enumerate labels. */
+RiveStatus         rive_artboard_vm_set_color(RiveArtboard*, const char* path, uint32_t argb);
+RiveStatus         rive_artboard_vm_get_color(RiveArtboard*, const char* path, uint32_t* out);
+RiveStatus         rive_artboard_vm_set_string(RiveArtboard*, const char* path, const char* value);
+RiveStatus         rive_artboard_vm_get_string(RiveArtboard*, const char* path,
+                                               char* buf, size_t cap, size_t* out_len);
+RiveStatus         rive_artboard_vm_set_enum_index(RiveArtboard*, const char* path, uint32_t index);
+RiveStatus         rive_artboard_vm_get_enum_index(RiveArtboard*, const char* path, uint32_t* out);
+RiveStatus         rive_artboard_vm_set_enum_name(RiveArtboard*, const char* path, const char* name);
+RiveStatus         rive_artboard_vm_enum_value_count(RiveArtboard*, const char* path, uint32_t* out);
+RiveStatus         rive_artboard_vm_enum_value_at(RiveArtboard*, const char* path, uint32_t index,
+                                                  char* buf, size_t cap, size_t* out_len);
 /* Schema introspection (discover property names + types). `property_at` writes
  * up to `cap` name bytes (NOT NUL-terminated), always sets *out_len to the full
  * name length (call with cap=0 to size first), and *out_type to the rive

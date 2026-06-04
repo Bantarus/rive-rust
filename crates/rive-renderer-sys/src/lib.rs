@@ -200,6 +200,58 @@ extern "C" {
         artboard: *mut RiveArtboard,
         path: *const c_char,
     ) -> RiveStatus;
+    // Slice 2: color (ARGB u32), string, enum. Strings/enum-names use the
+    // two-call buffer protocol (buf=null, cap=0 to size; bytes not NUL-terminated).
+    pub fn rive_artboard_vm_set_color(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        argb: u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_get_color(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_set_string(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        value: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_get_string(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_set_enum_index(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        index: u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_get_enum_index(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_set_enum_name(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        name: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_enum_value_count(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_vm_enum_value_at(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
     pub fn rive_artboard_vm_property_count(artboard: *mut RiveArtboard) -> u32;
     pub fn rive_artboard_vm_property_at(
         artboard: *mut RiveArtboard,

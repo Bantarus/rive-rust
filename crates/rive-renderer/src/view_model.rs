@@ -160,6 +160,87 @@ impl Artboard {
             .filter_map(|i| self.vm_property_at(i))
             .collect()
     }
+
+    // ---- slice 2: color / string / enum ----
+
+    /// Sets a view-model **color** property (ARGB, e.g. `0xFF_33_AA_FF`).
+    pub fn vm_set_color(&self, path: &str, argb: u32) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_artboard_vm_set_color(self.inner.ptr, c.as_ptr(), argb) };
+        vm_status(st)
+    }
+
+    /// Reads a view-model **color** property (ARGB).
+    pub fn vm_get_color(&self, path: &str) -> Result<u32> {
+        let c = Self::vm_path(path)?;
+        let mut out = 0_u32;
+        // SAFETY: live handle + valid C string; `out` is a valid u32 slot.
+        let st = unsafe { sys::rive_artboard_vm_get_color(self.inner.ptr, c.as_ptr(), &mut out) };
+        vm_status(st).map(|()| out)
+    }
+
+    /// Sets a view-model **string** property.
+    pub fn vm_set_string(&self, path: &str, value: &str) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        let v = CString::new(value).map_err(|_| Error::InvalidPath)?;
+        // SAFETY: live handle + valid C strings.
+        let st = unsafe { sys::rive_artboard_vm_set_string(self.inner.ptr, c.as_ptr(), v.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Reads a view-model **string** property.
+    pub fn vm_get_string(&self, path: &str) -> Result<String> {
+        let c = Self::vm_path(path)?;
+        // SAFETY: live handle + valid C string; the shim's two-call protocol.
+        read_string_via(|buf, cap, out_len| unsafe {
+            sys::rive_artboard_vm_get_string(self.inner.ptr, c.as_ptr(), buf, cap, out_len)
+        })
+    }
+
+    /// Sets a view-model **enum** property by 0-based value index.
+    pub fn vm_set_enum_index(&self, path: &str, index: u32) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_artboard_vm_set_enum_index(self.inner.ptr, c.as_ptr(), index) };
+        vm_status(st)
+    }
+
+    /// Reads a view-model **enum** property's current value index.
+    pub fn vm_get_enum_index(&self, path: &str) -> Result<u32> {
+        let c = Self::vm_path(path)?;
+        let mut out = 0_u32;
+        // SAFETY: live handle + valid C string; `out` is a valid u32 slot.
+        let st = unsafe { sys::rive_artboard_vm_get_enum_index(self.inner.ptr, c.as_ptr(), &mut out) };
+        vm_status(st).map(|()| out)
+    }
+
+    /// Sets a view-model **enum** property by value label (name).
+    pub fn vm_set_enum_name(&self, path: &str, name: &str) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        let n = CString::new(name).map_err(|_| Error::InvalidPath)?;
+        // SAFETY: live handle + valid C strings.
+        let st = unsafe { sys::rive_artboard_vm_set_enum_name(self.inner.ptr, c.as_ptr(), n.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// The ordered value labels of a view-model **enum** property (index ↔ name).
+    pub fn vm_enum_values(&self, path: &str) -> Result<Vec<String>> {
+        let c = Self::vm_path(path)?;
+        let mut count = 0_u32;
+        // SAFETY: live handle + valid C string; `count` is a valid u32 slot.
+        let st =
+            unsafe { sys::rive_artboard_vm_enum_value_count(self.inner.ptr, c.as_ptr(), &mut count) };
+        vm_status(st)?;
+        (0..count)
+            .map(|i| {
+                // SAFETY: live handle + valid C string; the shim's two-call protocol.
+                read_string_via(|buf, cap, out_len| unsafe {
+                    sys::rive_artboard_vm_enum_value_at(self.inner.ptr, c.as_ptr(), i, buf, cap, out_len)
+                })
+            })
+            .collect()
+    }
 }
 
 /// Maps a shim `RiveStatus` to `Result<()>`, attaching the shim error on failure.
@@ -169,4 +250,18 @@ fn vm_status(st: sys::RiveStatus) -> Result<()> {
     } else {
         Err(Error::ViewModel(last_error()))
     }
+}
+
+/// Runs the shim's two-call string protocol (size with a null buffer, then fill)
+/// via `call`, returning the bytes as a `String`. `call(buf, cap, out_len)`.
+fn read_string_via<F>(call: F) -> Result<String>
+where
+    F: Fn(*mut c_char, usize, *mut usize) -> sys::RiveStatus,
+{
+    let mut len = 0_usize;
+    vm_status(call(std::ptr::null_mut(), 0, &mut len))?;
+    let mut buf = vec![0_u8; len];
+    let mut written = 0_usize;
+    vm_status(call(buf.as_mut_ptr().cast::<c_char>(), buf.len(), &mut written))?;
+    Ok(String::from_utf8_lossy(&buf[..written.min(buf.len())]).into_owned())
 }

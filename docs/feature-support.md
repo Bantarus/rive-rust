@@ -77,7 +77,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 |---------|:------:|------------|-------|
 | Advance / playback tick | ✅ | [state-machines](cpp/state-machines.mdx) | `StateMachine::advance`; `RiveAnimation.speed` |
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](cpp/state-machines.mdx) | move/down/up/exit; `RivePointer` (floor). zero-copy/atlas-tile mapping 🔜 |
-| **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | **number/bool/trigger get/set + top-level schema introspection** ✅ (floor); `RiveViewModel`. **Gaps:** color/string/enum, nested-VM introspection, lists, image/artboard props, zero-copy forwarding |
+| **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | **number/bool/trigger/color/string/enum get/set + top-level introspection** ✅ (floor); `RiveViewModel` (queued writes + typed watch read-back). **Gaps:** nested-VM introspection, lists, image/artboard ref props, zero-copy forwarding |
 | State-machine inputs (bool/number/trigger) | 🔜 | [state-machines](cpp/state-machines.mdx) | the classic control path; `Scene::getBool/getNumber/getTrigger`. (Data binding is the modern path) |
 | Events read-back (state changes, custom / open-url / audio) | 🔜 | [state-machines](cpp/state-machines.mdx) | `stateChanged*` + `reportedEvent*` → an ECS event each frame so gameplay reacts |
 | Named artboard / state-machine selection | 🔜 | [file-and-artboard](cpp/file-and-artboard.mdx) | `ArtboardSelector` / `StateMachineSelector` reserved; only `Default` honored today |
@@ -92,9 +92,9 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **View-model data binding — slice 2:** color (`u32` ARGB), string (buffer protocol),
-   enum (index + name + `values()`), nested-VM introspection. Plus a visible bevy demo
-   (drive `viseme` to change the mouth). Then **zero-copy forwarding** of `RiveViewModel`.
+1. **View-model data binding — remaining:** nested-VM introspection, lists, image/artboard
+   reference props, then **zero-copy-tier forwarding** of `RiveViewModel`. (Slice-2
+   color/string/enum shipped; setting `viseme` is headless-verified to change the mouth.)
 2. **State-machine inputs** (bool/number/trigger) — the other half of the write channel,
    for `.riv` content authored without view models.
 3. **Events read-back** — the read channel: surface state changes + custom/open-url/audio

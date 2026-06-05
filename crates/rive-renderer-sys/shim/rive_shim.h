@@ -89,14 +89,34 @@ RiveFile*          rive_file_load(RiveRenderContext* ctx,
                                   size_t len);
 void               rive_file_destroy(RiveFile*);
 
-/* Instantiates the file's default artboard. Returns NULL if the file has none. */
+/* Instantiates an artboard. `_default` uses the file's default; `_named` /`_at`
+ * select by name / 0-based index. All bind the artboard's default view model
+ * identically. Return NULL (+ rive_last_error) if the file is invalid or the
+ * artboard isn't found. */
 RiveArtboard*      rive_file_artboard_default(RiveFile*);
+RiveArtboard*      rive_file_artboard_named(RiveFile*, const char* name);
+RiveArtboard*      rive_file_artboard_at(RiveFile*, uint32_t index);
+/* Selection introspection: discover the names a ByName/ByIndex selector can pick.
+ * `name_at` uses the two-call buffer protocol (buf=NULL, cap=0 to size first;
+ * bytes are NOT NUL-terminated). Returns nonzero on invalid handle / index. */
+uint32_t           rive_file_artboard_count(RiveFile*);
+RiveStatus         rive_file_artboard_name_at(RiveFile*, uint32_t index,
+                                              char* buf, size_t cap, size_t* out_len);
 void               rive_artboard_destroy(RiveArtboard*);
 
-/* Instantiates the artboard's default state machine, falling back to its
- * default Scene (first state machine, else first animation, else static).
- * Returns NULL if nothing is playable. */
+/* Instantiates a scene/state machine to play. `_default` prefers the designer
+ * default state machine, then falls back to the default Scene (first state
+ * machine, else first animation, else static). `_named` /`_at` select a state
+ * machine by name / 0-based index — state-machine ONLY, no animation fallback
+ * (a miss is an error, not a silent default). Return NULL (+ rive_last_error)
+ * if nothing is playable / the name/index isn't found. */
 RiveStateMachine*  rive_artboard_state_machine_default(RiveArtboard*);
+RiveStateMachine*  rive_artboard_state_machine_named(RiveArtboard*, const char* name);
+RiveStateMachine*  rive_artboard_state_machine_at(RiveArtboard*, uint32_t index);
+/* Selection introspection (see the artboard pair above). */
+uint32_t           rive_artboard_state_machine_count(RiveArtboard*);
+RiveStatus         rive_artboard_state_machine_name_at(RiveArtboard*, uint32_t index,
+                                                       char* buf, size_t cap, size_t* out_len);
 void               rive_state_machine_destroy(RiveStateMachine*);
 
 /* Advances the state machine (advanceAndApply) by `dt_seconds`, applying the

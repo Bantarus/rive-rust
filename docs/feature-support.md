@@ -79,9 +79,9 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](cpp/state-machines.mdx) | move/down/up/exit; `RivePointer` (floor). zero-copy/atlas-tile mapping 🔜 |
 | **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list mutation + per-item writes, image/artboard ref props (blocked — see backlog) |
 | State-machine inputs (bool/number/trigger) | ⛔ | [state-machines](cpp/state-machines.mdx) | **Deprecated — not supported.** The classic `Scene::getBool/getNumber/getTrigger` path is superseded by view-model **data binding** (the modern channel, already shipped). See Excluded. |
-| View-model change / trigger observation | 🔜 | [data-binding](cpp/data-binding.mdx) | the **read** channel (modern *events* replacement): after advance, poll `ViewModelInstanceValueRuntime::flushChanges()` per watched path → emit a Bevy event when the rig fires a trigger or changes a property. Supersedes the deprecated events read-back below. |
+| View-model change / trigger observation | 🟡 | [data-binding](cpp/data-binding.mdx) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property ✅ (floor). Supersedes the deprecated events read-back below. **Deferred:** zero-copy observe (render→main back-channel, like watch read-back). |
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](cpp/state-machines.mdx) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
-| Named artboard / state-machine selection | 🔜 | [file-and-artboard](cpp/file-and-artboard.mdx) | `ArtboardSelector` / `StateMachineSelector` reserved; only `Default` honored today |
+| Named artboard / state-machine selection | ✅ | [file-and-artboard](cpp/file-and-artboard.mdx) | `ArtboardSelector` / `StateMachineSelector` honor **Default / ByName / ByIndex** in BOTH tiers (`File::artboard_named/_at`, `Artboard::state_machine_named/_at`); discover names via `artboard_names()` / `state_machine_names()` |
 | Runtime text value get/set | 🔜 | — | `TextValueRun` — set/read a text run's string |
 | Out-of-band asset loading (images/fonts/audio) | 🔜 | [asset-loading](cpp/asset-loading.mdx) | `FileAssetLoader` callback → supply textures/fonts the `.riv` references externally |
 | Audio playback | 🔜 | — | `WITH_RIVE_AUDIO` + an engine audio bridge (route to the host mixer) |
@@ -93,15 +93,12 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **View-model change / trigger observation** — the read/signal channel: after advance,
-   poll `flushChanges()` per watched path and emit a Bevy event when the rig fires a
-   trigger or changes a property. This is the **modern replacement for events read-back**
-   (which Rive deprecated): the rig signals gameplay by driving a view-model trigger/property,
-   the game observes it via data binding.
-2. **Named artboard / state-machine selection** — honor `ArtboardSelector::ByName/ByIndex`.
-3. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
+1. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
    *Unblocks* view-model **image refs** (`propertyImage` needs a `RenderImage` to set).
-4. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+2. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+
+*(Recently shipped: view-model **change/trigger observation** — the modern events replacement;
+**named artboard / state-machine selection** — Default/ByName/ByIndex in both tiers.)*
 
 (State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
 both deprecated; view-model data binding is the modern write *and* read channel. See Excluded.)

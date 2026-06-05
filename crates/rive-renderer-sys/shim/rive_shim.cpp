@@ -483,19 +483,16 @@ extern "C" void rive_file_destroy(RiveFile* file)
     delete file;
 }
 
-extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
+// Wraps a freshly-instanced ArtboardInstance into a RiveArtboard handle, binding
+// its DEFAULT view-model instance. Shared by the default / named / by-index
+// selectors so all three get identical data-binding + scripting setup. Takes
+// ownership of `ab`; `ab == nullptr` means the caller's lookup missed (the caller
+// has already set the specific error), so this just forwards null.
+static RiveArtboard* make_artboard_handle(rive::File* file,
+                                          std::unique_ptr<rive::ArtboardInstance> ab)
 {
-    if (file == nullptr || file->file == nullptr)
-    {
-        set_error("rive_file_artboard_default: invalid file");
-        return nullptr;
-    }
-    std::unique_ptr<rive::ArtboardInstance> ab = file->file->artboardDefault();
     if (ab == nullptr)
-    {
-        set_error("rive::File::artboardDefault returned null (no artboards)");
         return nullptr;
-    }
     auto handle = new (std::nothrow) RiveArtboard();
     if (handle == nullptr)
     {
@@ -511,8 +508,7 @@ extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
     // before the state machine is instanced: the SM clones scripted objects with
     // the artboard's data context. `createDefaultViewModelInstance` returns null
     // for artboards with no view model, so non-data-bound content is unchanged.
-    if (auto vmi =
-            file->file->createDefaultViewModelInstance(handle->artboard.get()))
+    if (auto vmi = file->createDefaultViewModelInstance(handle->artboard.get()))
     {
         handle->artboard->bindViewModelInstance(vmi);
         handle->vmInstance = std::move(vmi);
@@ -525,12 +521,129 @@ extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
     return handle;
 }
 
+extern "C" RiveArtboard* rive_file_artboard_default(RiveFile* file)
+{
+    if (file == nullptr || file->file == nullptr)
+    {
+        set_error("rive_file_artboard_default: invalid file");
+        return nullptr;
+    }
+    std::unique_ptr<rive::ArtboardInstance> ab = file->file->artboardDefault();
+    if (ab == nullptr)
+    {
+        set_error("rive::File::artboardDefault returned null (no artboards)");
+        return nullptr;
+    }
+    return make_artboard_handle(file->file.get(), std::move(ab));
+}
+
+extern "C" RiveArtboard* rive_file_artboard_named(RiveFile* file, const char* name)
+{
+    if (file == nullptr || file->file == nullptr)
+    {
+        set_error("rive_file_artboard_named: invalid file");
+        return nullptr;
+    }
+    if (name == nullptr)
+    {
+        set_error("rive_file_artboard_named: name is null");
+        return nullptr;
+    }
+    std::unique_ptr<rive::ArtboardInstance> ab = file->file->artboardNamed(name);
+    if (ab == nullptr)
+    {
+        set_error("rive::File::artboardNamed found no artboard with that name");
+        return nullptr;
+    }
+    return make_artboard_handle(file->file.get(), std::move(ab));
+}
+
+extern "C" RiveArtboard* rive_file_artboard_at(RiveFile* file, uint32_t index)
+{
+    if (file == nullptr || file->file == nullptr)
+    {
+        set_error("rive_file_artboard_at: invalid file");
+        return nullptr;
+    }
+    std::unique_ptr<rive::ArtboardInstance> ab = file->file->artboardAt(index);
+    if (ab == nullptr)
+    {
+        set_error("rive::File::artboardAt index out of range");
+        return nullptr;
+    }
+    return make_artboard_handle(file->file.get(), std::move(ab));
+}
+
+// Copies `s` into a caller buffer per the two-call protocol: sets *out_len to the
+// full length (call with cap=0 to size first), copies min(cap, len) bytes with NO
+// NUL terminator (caller slices to *out_len). Used by the selection introspection.
+static void copy_name(const std::string& s, char* buf, size_t cap, size_t* out_len)
+{
+    if (out_len != nullptr)
+        *out_len = s.size();
+    if (buf != nullptr && cap > 0)
+        std::memcpy(buf, s.data(), s.size() < cap ? s.size() : cap);
+}
+
+// Selection introspection: discover the names a ByName/ByIndex selector can pick.
+extern "C" uint32_t rive_file_artboard_count(RiveFile* file)
+{
+    if (file == nullptr || file->file == nullptr)
+        return 0;
+    return static_cast<uint32_t>(file->file->artboardCount());
+}
+
+extern "C" RiveStatus rive_file_artboard_name_at(RiveFile* file, uint32_t index,
+                                                 char* buf, size_t cap, size_t* out_len)
+{
+    if (file == nullptr || file->file == nullptr)
+    {
+        set_error("rive_file_artboard_name_at: invalid file");
+        return 1;
+    }
+    if (index >= file->file->artboardCount())
+    {
+        set_error("rive_file_artboard_name_at: index out of range");
+        return 1;
+    }
+    copy_name(file->file->artboardNameAt(index), buf, cap, out_len);
+    return RIVE_OK;
+}
+
 extern "C" void rive_artboard_destroy(RiveArtboard* artboard)
 {
     if (artboard == nullptr)
         return;
     artboard->artboard.reset();
     delete artboard;
+}
+
+// Wraps a Scene (state machine / animation) into a RiveStateMachine handle,
+// binding the artboard's view-model instance to it. Shared by the default / named
+// / by-index selectors. Takes ownership of `scene`; `scene == nullptr` means the
+// caller's lookup missed (error already set), so this forwards null.
+static RiveStateMachine* make_sm_handle(RiveArtboard* artboard,
+                                        std::unique_ptr<rive::Scene> scene)
+{
+    if (scene == nullptr)
+        return nullptr;
+    auto handle = new (std::nothrow) RiveStateMachine();
+    if (handle == nullptr)
+    {
+        set_error("out of memory allocating RiveStateMachine");
+        return nullptr;
+    }
+    handle->scene = std::move(scene);
+
+    // Bind the SAME view-model instance to the state machine too (per the
+    // data-binding contract: the artboard binding drives layout-affecting
+    // properties; the SM binding drives transitions + listener conditions).
+    // No-op when the artboard had no view model.
+    if (artboard->vmInstance)
+    {
+        handle->scene->bindViewModelInstance(artboard->vmInstance);
+    }
+    return handle;
 }
 
 extern "C" RiveStateMachine* rive_artboard_state_machine_default(
@@ -558,24 +671,75 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_default(
         set_error("artboard has no playable state machine, animation, or scene");
         return nullptr;
     }
+    return make_sm_handle(artboard, std::move(scene));
+}
 
-    auto handle = new (std::nothrow) RiveStateMachine();
-    if (handle == nullptr)
+extern "C" RiveStateMachine* rive_artboard_state_machine_named(
+    RiveArtboard* artboard, const char* name)
+{
+    if (artboard == nullptr || artboard->artboard == nullptr)
     {
-        set_error("out of memory allocating RiveStateMachine");
+        set_error("rive_artboard_state_machine_named: invalid artboard");
         return nullptr;
     }
-    handle->scene = std::move(scene);
-
-    // Bind the SAME view-model instance to the state machine too (per the
-    // data-binding contract: the artboard binding drives layout-affecting
-    // properties; the SM binding drives transitions + listener conditions).
-    // No-op when the artboard had no view model.
-    if (artboard->vmInstance)
+    if (name == nullptr)
     {
-        handle->scene->bindViewModelInstance(artboard->vmInstance);
+        set_error("rive_artboard_state_machine_named: name is null");
+        return nullptr;
     }
-    return handle;
+    // Named lookup is a state machine ONLY (no animation/static fallback): the
+    // caller asked for a specific SM, so a miss is an error, not a silent default.
+    std::unique_ptr<rive::StateMachineInstance> sm =
+        artboard->artboard->stateMachineNamed(name);
+    if (sm == nullptr)
+    {
+        set_error("artboard has no state machine with that name");
+        return nullptr;
+    }
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()));
+}
+
+extern "C" RiveStateMachine* rive_artboard_state_machine_at(
+    RiveArtboard* artboard, uint32_t index)
+{
+    if (artboard == nullptr || artboard->artboard == nullptr)
+    {
+        set_error("rive_artboard_state_machine_at: invalid artboard");
+        return nullptr;
+    }
+    std::unique_ptr<rive::StateMachineInstance> sm =
+        artboard->artboard->stateMachineAt(index);
+    if (sm == nullptr)
+    {
+        set_error("state machine index out of range");
+        return nullptr;
+    }
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()));
+}
+
+// Selection introspection: discover the state-machine names selectable by name/index.
+extern "C" uint32_t rive_artboard_state_machine_count(RiveArtboard* artboard)
+{
+    if (artboard == nullptr || artboard->artboard == nullptr)
+        return 0;
+    return static_cast<uint32_t>(artboard->artboard->stateMachineCount());
+}
+
+extern "C" RiveStatus rive_artboard_state_machine_name_at(RiveArtboard* artboard, uint32_t index,
+                                                          char* buf, size_t cap, size_t* out_len)
+{
+    if (artboard == nullptr || artboard->artboard == nullptr)
+    {
+        set_error("rive_artboard_state_machine_name_at: invalid artboard");
+        return 1;
+    }
+    if (index >= artboard->artboard->stateMachineCount())
+    {
+        set_error("rive_artboard_state_machine_name_at: index out of range");
+        return 1;
+    }
+    copy_name(artboard->artboard->stateMachineNameAt(index), buf, cap, out_len);
+    return RIVE_OK;
 }
 
 extern "C" void rive_state_machine_destroy(RiveStateMachine* sm)

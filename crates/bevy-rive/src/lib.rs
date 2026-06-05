@@ -311,9 +311,9 @@ impl AssetLoader for RivLoader {
 pub struct RiveAnimation {
     /// The loaded `.riv` asset.
     pub handle: Handle<RiveFile>,
-    /// Which artboard to instantiate (M1a honors only [`ArtboardSelector::Default`]).
+    /// Which artboard to instantiate (default / by name / by index). Both tiers.
     pub artboard: ArtboardSelector,
-    /// Which scene/state machine to play (M1a honors only [`StateMachineSelector::Default`]).
+    /// Which scene/state machine to play (default / by name / by index). Both tiers.
     pub state_machine: StateMachineSelector,
     /// Playback speed multiplier applied to `Time::delta` (`1.0` == realtime).
     pub speed: f32,
@@ -332,24 +332,30 @@ impl RiveAnimation {
     }
 }
 
-/// Selects an artboard. Additively extensible; M1a only matches `Default`.
-#[derive(Debug, Clone, Default)]
+/// Selects which artboard of a `.riv` to instantiate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ArtboardSelector {
     /// The file's default artboard.
     #[default]
     Default,
-    // Future (additive): ByName(String), ByIndex(usize)
+    /// The artboard with this name.
+    ByName(String),
+    /// The artboard at this 0-based index.
+    ByIndex(usize),
 }
 
-/// Selects a scene/state machine. Additively extensible; M1a only matches `Default`.
-#[derive(Debug, Clone, Default)]
+/// Selects which scene/state machine to play on the instantiated artboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StateMachineSelector {
     /// The default state machine (else first animation, else static scene).
     #[default]
     Default,
-    // Future (additive): ByName(String), ByIndex(usize)
+    /// The state machine with this name (state machines only — no animation fallback).
+    ByName(String),
+    /// The state machine at this 0-based index (state machines only).
+    ByIndex(usize),
 }
 
 /// Offscreen render configuration: the pixel size and the [`Image`] the renderer
@@ -624,12 +630,42 @@ fn build_instance(
     bytes: &[u8],
     width: u32,
     height: u32,
+    artboard_sel: &ArtboardSelector,
+    sm_sel: &StateMachineSelector,
 ) -> rive_renderer::Result<(Artboard, StateMachine, RenderTarget)> {
     let file = ctx.load_file(bytes)?;
-    let artboard = file.default_artboard()?;
-    let state_machine = artboard.default_state_machine()?;
+    let artboard = select_artboard(&file, artboard_sel)?;
+    let state_machine = select_state_machine(&artboard, sm_sel)?;
     let target = ctx.offscreen_target(width, height)?;
     Ok((artboard, state_machine, target))
+}
+
+/// Resolves an [`ArtboardSelector`] against a loaded [`File`](rive_renderer::File).
+/// Shared by both tiers' instantiation paths.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn select_artboard(
+    file: &rive_renderer::File,
+    sel: &ArtboardSelector,
+) -> rive_renderer::Result<rive_renderer::Artboard> {
+    match sel {
+        ArtboardSelector::Default => file.default_artboard(),
+        ArtboardSelector::ByName(name) => file.artboard_named(name),
+        ArtboardSelector::ByIndex(index) => file.artboard_at(*index),
+    }
+}
+
+/// Resolves a [`StateMachineSelector`] against an instantiated artboard.
+/// Shared by both tiers' instantiation paths.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn select_state_machine(
+    artboard: &rive_renderer::Artboard,
+    sel: &StateMachineSelector,
+) -> rive_renderer::Result<rive_renderer::StateMachine> {
+    match sel {
+        StateMachineSelector::Default => artboard.default_state_machine(),
+        StateMachineSelector::ByName(name) => artboard.state_machine_named(name),
+        StateMachineSelector::ByIndex(index) => artboard.state_machine_at(*index),
+    }
 }
 
 /// Advance → render → flush → readback for one instance. Disjoint field borrows
@@ -694,9 +730,16 @@ fn instantiate_rive_instances(
             continue; // GPU init failed (already logged once)
         };
 
-        // M1a: ArtboardSelector::Default / StateMachineSelector::Default only.
-        let (artboard, state_machine, rt) =
-            match build_instance(ctx, &file_asset.bytes, target.width, target.height) {
+        // Honor the entity's artboard / state-machine selectors (default / by
+        // name / by index).
+        let (artboard, state_machine, rt) = match build_instance(
+            ctx,
+            &file_asset.bytes,
+            target.width,
+            target.height,
+            &anim.artboard,
+            &anim.state_machine,
+        ) {
                 Ok(parts) => parts,
                 Err(e) => {
                     // Terminal for this entity (corrupt/unsupported file or bad

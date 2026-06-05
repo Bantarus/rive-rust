@@ -1121,6 +1121,12 @@ struct ExtractedRive {
     /// floor advance system's inline `apply_writes`. Empty for faces with no
     /// `RiveViewModel` or no queued writes. Reads/watch are not ferried (floor-only).
     vm_writes: Vec<(String, RiveValue)>,
+    /// Artboard / state-machine selectors (default / by name / by index), honored
+    /// once when the node first builds this entity's instance. Ferried each frame
+    /// but read only at build time; cheap for the common `Default` (a bare enum —
+    /// a `String` clone only when `ByName` is used).
+    artboard_sel: crate::ArtboardSelector,
+    state_machine_sel: crate::StateMachineSelector,
 }
 
 /// Render-world resource holding this frame's extracted rive instances. Replaced
@@ -1545,6 +1551,8 @@ fn extract_rive_instances(
                 // Paused: skip advance, so applying writes (which take effect on
                 // advance) is pointless this frame — ferry none.
                 vm_writes: Vec::new(),
+                artboard_sel: anim.artboard.clone(),
+                state_machine_sel: anim.state_machine.clone(),
             });
             continue;
         }
@@ -1585,6 +1593,8 @@ fn extract_rive_instances(
             // render world, where this tier's instances live). `stage_vm_writes`
             // populated `staged` from `writes` earlier this frame.
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
+            artboard_sel: anim.artboard.clone(),
+            state_machine_sel: anim.state_machine.clone(),
         });
     }
 }
@@ -2319,8 +2329,8 @@ fn build_instance(
     item: &ExtractedRive,
 ) -> rive_renderer::Result<RiveInstance> {
     let file = ctx.load_file(&item.bytes)?;
-    let artboard = file.default_artboard()?;
-    let state_machine = artboard.default_state_machine()?;
+    let artboard = crate::select_artboard(&file, &item.artboard_sel)?;
+    let state_machine = crate::select_state_machine(&artboard, &item.state_machine_sel)?;
 
     // wgpu allocates the shared color texture; rive renders into its VkImage.
     let shared_tex = render_device.create_texture(&TextureDescriptor {
@@ -2435,8 +2445,8 @@ fn build_atlas_instance(
     item: &ExtractedRive,
 ) -> rive_renderer::Result<AtlasInstance> {
     let file = ctx.load_file(&item.bytes)?;
-    let artboard = file.default_artboard()?;
-    let state_machine = artboard.default_state_machine()?;
+    let artboard = crate::select_artboard(&file, &item.artboard_sel)?;
+    let state_machine = crate::select_state_machine(&artboard, &item.state_machine_sel)?;
     Ok(AtlasInstance {
         artboard,
         state_machine,

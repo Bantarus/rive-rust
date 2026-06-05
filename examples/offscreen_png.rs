@@ -48,14 +48,53 @@ fn main() -> Result<()> {
         .offscreen_target(width, height)
         .context("creating the offscreen render target")?;
 
-    // Load content and grab the default artboard + state machine.
+    // Load content and grab an artboard + state machine (honoring selection knobs).
     let file = ctx.load_file(&riv_bytes).context("importing the .riv file")?;
-    let artboard = file
-        .default_artboard()
-        .context("instantiating the default artboard")?;
-    let mut state_machine = artboard
-        .default_state_machine()
-        .context("instantiating the default state machine")?;
+
+    // RIVE_LIST: print the selectable artboard names (and, below, the chosen
+    // artboard's state-machine names), to discover what RIVE_ARTBOARD /
+    // RIVE_STATE_MACHINE can pick.
+    let list = std::env::var("RIVE_LIST").is_ok();
+    if list {
+        let names = file.artboard_names();
+        println!("  artboards ({}): {:?}", names.len(), names);
+    }
+
+    // Artboard selection: RIVE_ARTBOARD="name" or RIVE_ARTBOARD_INDEX=N (else default).
+    let artboard = if let Ok(name) = std::env::var("RIVE_ARTBOARD") {
+        let name = name.trim();
+        file.artboard_named(name)
+            .with_context(|| format!("selecting artboard {name:?}"))?
+    } else if let Ok(idx) = std::env::var("RIVE_ARTBOARD_INDEX") {
+        let i: usize = idx.trim().parse().context("RIVE_ARTBOARD_INDEX must be an integer")?;
+        file.artboard_at(i)
+            .with_context(|| format!("selecting artboard at index {i}"))?
+    } else {
+        file.default_artboard()
+            .context("instantiating the default artboard")?
+    };
+
+    if list {
+        let names = artboard.state_machine_names();
+        println!("  state machines ({}): {:?}", names.len(), names);
+    }
+
+    // State-machine selection: RIVE_STATE_MACHINE="name" or RIVE_SM_INDEX=N (else default).
+    let mut state_machine = if let Ok(name) = std::env::var("RIVE_STATE_MACHINE") {
+        let name = name.trim();
+        artboard
+            .state_machine_named(name)
+            .with_context(|| format!("selecting state machine {name:?}"))?
+    } else if let Ok(idx) = std::env::var("RIVE_SM_INDEX") {
+        let i: usize = idx.trim().parse().context("RIVE_SM_INDEX must be an integer")?;
+        artboard
+            .state_machine_at(i)
+            .with_context(|| format!("selecting state machine at index {i}"))?
+    } else {
+        artboard
+            .default_state_machine()
+            .context("instantiating the default state machine")?
+    };
 
     // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
     // recursing into nested view models and list items via the handle API — use it

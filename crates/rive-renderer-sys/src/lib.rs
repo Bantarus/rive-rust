@@ -138,11 +138,39 @@ extern "C" {
     pub fn rive_file_destroy(file: *mut RiveFile);
 
     pub fn rive_file_artboard_default(file: *mut RiveFile) -> *mut RiveArtboard;
+    pub fn rive_file_artboard_named(file: *mut RiveFile, name: *const c_char) -> *mut RiveArtboard;
+    pub fn rive_file_artboard_at(file: *mut RiveFile, index: u32) -> *mut RiveArtboard;
+    /// Selection introspection (two-call string for `name_at`).
+    pub fn rive_file_artboard_count(file: *mut RiveFile) -> u32;
+    pub fn rive_file_artboard_name_at(
+        file: *mut RiveFile,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
     pub fn rive_artboard_destroy(artboard: *mut RiveArtboard);
 
     pub fn rive_artboard_state_machine_default(
         artboard: *mut RiveArtboard,
     ) -> *mut RiveStateMachine;
+    pub fn rive_artboard_state_machine_named(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+    ) -> *mut RiveStateMachine;
+    pub fn rive_artboard_state_machine_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+    ) -> *mut RiveStateMachine;
+    /// Selection introspection (two-call string for `name_at`).
+    pub fn rive_artboard_state_machine_count(artboard: *mut RiveArtboard) -> u32;
+    pub fn rive_artboard_state_machine_name_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
     pub fn rive_state_machine_destroy(sm: *mut RiveStateMachine);
     pub fn rive_state_machine_advance(sm: *mut RiveStateMachine, dt_seconds: f32);
 

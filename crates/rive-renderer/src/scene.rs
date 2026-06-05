@@ -6,9 +6,30 @@
 //! `lib.rs`. View-model data binding adds methods to [`Artboard`] in
 //! `view_model.rs`.
 
+use std::ffi::CString;
+use std::os::raw::c_char;
 use std::rc::Rc;
 
 use crate::{last_error, sys, ContextInner, Error, Result};
+
+/// Runs the shim's two-call string protocol (size with a null buffer, then fill)
+/// via `call`, returning the bytes as a `String` (empty on a shim error). Used by
+/// the selection-introspection accessors. `call(buf, cap, out_len)`.
+fn read_name<F>(call: F) -> String
+where
+    F: Fn(*mut c_char, usize, *mut usize) -> sys::RiveStatus,
+{
+    let mut len = 0_usize;
+    if call(std::ptr::null_mut(), 0, &mut len) != sys::RIVE_OK {
+        return String::new();
+    }
+    let mut buf = vec![0_u8; len];
+    let mut written = 0_usize;
+    if call(buf.as_mut_ptr().cast::<c_char>(), buf.len(), &mut written) != sys::RIVE_OK {
+        return String::new();
+    }
+    String::from_utf8_lossy(&buf[..written.min(buf.len())]).into_owned()
+}
 
 /// An imported `.riv` file.
 ///
@@ -26,7 +47,34 @@ impl File {
     /// Returns [`Error::NoArtboard`] if the file contains no artboards.
     pub fn default_artboard(&self) -> Result<Artboard> {
         // SAFETY: `self.ptr` is a live file handle.
-        let ptr = unsafe { sys::rive_file_artboard_default(self.ptr) };
+        self.artboard_from_ptr(unsafe { sys::rive_file_artboard_default(self.ptr) })
+    }
+
+    /// Instantiates the artboard with the given `name`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoArtboard`] if the file has no artboard with that name.
+    pub fn artboard_named(&self, name: &str) -> Result<Artboard> {
+        let c = CString::new(name)
+            .map_err(|_| Error::NoArtboard("artboard name contained an interior NUL byte".into()))?;
+        // SAFETY: `self.ptr` is a live file handle; `c` is a valid C string.
+        self.artboard_from_ptr(unsafe { sys::rive_file_artboard_named(self.ptr, c.as_ptr()) })
+    }
+
+    /// Instantiates the artboard at the 0-based `index`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoArtboard`] if `index` is out of range.
+    pub fn artboard_at(&self, index: usize) -> Result<Artboard> {
+        // SAFETY: `self.ptr` is a live file handle.
+        self.artboard_from_ptr(unsafe { sys::rive_file_artboard_at(self.ptr, index as u32) })
+    }
+
+    /// Wraps a shim artboard pointer into an [`Artboard`] sharing this file's
+    /// context, or maps null to [`Error::NoArtboard`]. Shared by the selectors.
+    fn artboard_from_ptr(&self, ptr: *mut sys::RiveArtboard) -> Result<Artboard> {
         if ptr.is_null() {
             return Err(Error::NoArtboard(last_error()));
         }
@@ -36,6 +84,26 @@ impl File {
                 ctx: Rc::clone(&self._ctx),
             }),
         })
+    }
+
+    /// The number of artboards in the file.
+    pub fn artboard_count(&self) -> usize {
+        // SAFETY: `self.ptr` is a live file handle.
+        unsafe { sys::rive_file_artboard_count(self.ptr) as usize }
+    }
+
+    /// The names of all artboards in index order — for discovering what
+    /// [`artboard_named`](Self::artboard_named) / [`artboard_at`](Self::artboard_at)
+    /// can select.
+    pub fn artboard_names(&self) -> Vec<String> {
+        (0..self.artboard_count())
+            .map(|i| {
+                // SAFETY: live file handle; `i` < count; the shim's two-call protocol.
+                read_name(|buf, cap, out_len| unsafe {
+                    sys::rive_file_artboard_name_at(self.ptr, i as u32, buf, cap, out_len)
+                })
+            })
+            .collect()
     }
 }
 
@@ -93,7 +161,46 @@ impl Artboard {
     /// Returns [`Error::NoStateMachine`] if nothing is playable.
     pub fn default_state_machine(&self) -> Result<StateMachine> {
         // SAFETY: `self.inner.ptr` is a live artboard handle.
-        let ptr = unsafe { sys::rive_artboard_state_machine_default(self.inner.ptr) };
+        self.state_machine_from_ptr(unsafe {
+            sys::rive_artboard_state_machine_default(self.inner.ptr)
+        })
+    }
+
+    /// Instantiates the state machine with the given `name`.
+    ///
+    /// Unlike [`default_state_machine`](Self::default_state_machine), this never
+    /// falls back to an animation/static scene: a missing name is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoStateMachine`] if no state machine has that name.
+    pub fn state_machine_named(&self, name: &str) -> Result<StateMachine> {
+        let c = CString::new(name).map_err(|_| {
+            Error::NoStateMachine("state machine name contained an interior NUL byte".into())
+        })?;
+        // SAFETY: `self.inner.ptr` is a live artboard handle; `c` is a valid C string.
+        self.state_machine_from_ptr(unsafe {
+            sys::rive_artboard_state_machine_named(self.inner.ptr, c.as_ptr())
+        })
+    }
+
+    /// Instantiates the state machine at the 0-based `index` (state machines only;
+    /// no animation fallback).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoStateMachine`] if `index` is out of range.
+    pub fn state_machine_at(&self, index: usize) -> Result<StateMachine> {
+        // SAFETY: `self.inner.ptr` is a live artboard handle.
+        self.state_machine_from_ptr(unsafe {
+            sys::rive_artboard_state_machine_at(self.inner.ptr, index as u32)
+        })
+    }
+
+    /// Wraps a shim state-machine pointer into a [`StateMachine`] keeping this
+    /// artboard alive, or maps null to [`Error::NoStateMachine`]. Shared by the
+    /// selectors.
+    fn state_machine_from_ptr(&self, ptr: *mut sys::RiveStateMachine) -> Result<StateMachine> {
         if ptr.is_null() {
             return Err(Error::NoStateMachine(last_error()));
         }
@@ -101,6 +208,26 @@ impl Artboard {
             ptr,
             _artboard: Rc::clone(&self.inner),
         })
+    }
+
+    /// The number of state machines on this artboard.
+    pub fn state_machine_count(&self) -> usize {
+        // SAFETY: `self.inner.ptr` is a live artboard handle.
+        unsafe { sys::rive_artboard_state_machine_count(self.inner.ptr) as usize }
+    }
+
+    /// The names of all state machines in index order — for discovering what
+    /// [`state_machine_named`](Self::state_machine_named) /
+    /// [`state_machine_at`](Self::state_machine_at) can select.
+    pub fn state_machine_names(&self) -> Vec<String> {
+        (0..self.state_machine_count())
+            .map(|i| {
+                // SAFETY: live artboard handle; `i` < count; the shim's two-call protocol.
+                read_name(|buf, cap, out_len| unsafe {
+                    sys::rive_artboard_state_machine_name_at(self.inner.ptr, i as u32, buf, cap, out_len)
+                })
+            })
+            .collect()
     }
 }
 

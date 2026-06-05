@@ -138,6 +138,14 @@ RiveStatus         rive_artboard_vm_property_at(RiveArtboard*, uint32_t index,
                                                 char* name_buf, size_t cap,
                                                 size_t* out_len, int* out_type);
 
+/* Change / trigger OBSERVATION (the modern, non-deprecated events replacement —
+ * Rive deprecated runtime event listening; use data binding instead). Sets *out
+ * to 1 if the property at `path` changed (or, for a trigger, FIRED) on the last
+ * advance, else 0 — consuming the flag (next call returns 0 until it changes
+ * again). Type-agnostic (any property type incl. trigger). Subscribe by calling
+ * once BEFORE the first advance (prime), then poll each frame AFTER advance. */
+RiveStatus         rive_artboard_vm_flush_changed(RiveArtboard*, const char* path, uint8_t* out);
+
 /* --- View-model handle API (nested VMs + lists) -----------------------------
  * Operate on a RiveViewModelInstance* (root / nested / list item). The flat path
  * above reaches NAMED nested view models via '/', but cannot index lists nor
@@ -162,6 +170,7 @@ RiveStatus         rive_vmi_get_color(RiveViewModelInstance*, const char* path, 
 RiveStatus         rive_vmi_get_string(RiveViewModelInstance*, const char* path,
                                        char* buf, size_t cap, size_t* out_len);
 RiveStatus         rive_vmi_get_enum_index(RiveViewModelInstance*, const char* path, uint32_t* out);
+RiveStatus         rive_vmi_flush_changed(RiveViewModelInstance*, const char* path, uint8_t* out);
 
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 

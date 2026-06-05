@@ -270,6 +270,14 @@ extern "C" {
         out_len: *mut usize,
         out_type: *mut i32,
     ) -> RiveStatus;
+    /// Change / trigger observation: `*out` = 1 if the property changed (or trigger
+    /// FIRED) on the last advance, consuming the flag. Subscribe by priming before
+    /// the first advance, then poll after each advance.
+    pub fn rive_artboard_vm_flush_changed(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        out: *mut u8,
+    ) -> RiveStatus;
     // Handle API (nested VMs + lists). Navigation returns a borrowed
     // `*mut RiveViewModelInstance` (null on miss/null-input); reads + introspection
     // mirror the artboard-rooted verbs. `out_type` ordinals add list=5,
@@ -324,6 +332,11 @@ extern "C" {
         vmi: *mut RiveViewModelInstance,
         path: *const c_char,
         out: *mut u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_flush_changed(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        out: *mut u8,
     ) -> RiveStatus;
 
     pub fn rive_frame_begin(

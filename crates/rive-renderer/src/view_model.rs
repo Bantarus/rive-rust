@@ -120,6 +120,27 @@ impl Artboard {
         vm_status(st)
     }
 
+    /// Observes whether the property at `path` **changed** — or, for a trigger,
+    /// **fired** — on the last [`StateMachine::advance`](crate::StateMachine::advance),
+    /// consuming the flag (a later call returns `false` until it changes again).
+    ///
+    /// This is the modern, non-deprecated replacement for events read-back: the rig
+    /// signals gameplay by driving a view-model trigger/property, and the game
+    /// observes it here (Rive deprecated runtime *event* listening — see
+    /// `docs/feature-support.md`). Type-agnostic — works for triggers and any
+    /// scalar property.
+    ///
+    /// **Subscribe before the first advance:** the first call subscribes the
+    /// property and returns `false`; call it once at setup so the very first
+    /// fire/change isn't missed, then poll each frame *after* advancing.
+    pub fn vm_flush_changed(&self, path: &str) -> Result<bool> {
+        let c = Self::vm_path(path)?;
+        let mut out = 0_u8;
+        // SAFETY: live handle + valid C string; `out` is a valid u8 slot.
+        let st = unsafe { sys::rive_artboard_vm_flush_changed(self.inner.ptr, c.as_ptr(), &mut out) };
+        vm_status(st).map(|()| out != 0)
+    }
+
     /// Number of top-level view-model properties (0 if the artboard has none).
     pub fn vm_property_count(&self) -> usize {
         // SAFETY: `self.inner.ptr` is a live artboard handle.
@@ -413,5 +434,16 @@ impl<'a> RiveViewModelInstance<'a> {
         // SAFETY: live handle + valid C string; `out` valid.
         let st = unsafe { sys::rive_vmi_get_enum_index(self.ptr, c.as_ptr(), &mut out) };
         vm_status(st).map(|()| out)
+    }
+
+    /// Observes whether the property at `path` **changed** — or, for a trigger,
+    /// **fired** — on the last advance, consuming the flag. The handle-based
+    /// counterpart of [`Artboard::vm_flush_changed`] (same prime-then-poll contract).
+    pub fn flush_changed(&self, path: &str) -> Result<bool> {
+        let c = Self::path(path)?;
+        let mut out = 0_u8;
+        // SAFETY: live handle + valid C string; `out` valid.
+        let st = unsafe { sys::rive_vmi_flush_changed(self.ptr, c.as_ptr(), &mut out) };
+        vm_status(st).map(|()| out != 0)
     }
 }

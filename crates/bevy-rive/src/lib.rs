@@ -135,7 +135,7 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 // writes to the render world and calls it there); only the watch read-back path
 // remains `floor`-only for now.
 mod view_model;
-pub use view_model::{RiveValue, RiveViewModel};
+pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
@@ -149,7 +149,8 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RivePointer,
-        RiveSampling, RiveSurface, RiveTarget, RiveValue, RiveViewModel, StateMachineSelector,
+        RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveValue, RiveViewModel,
+        StateMachineSelector,
     };
 
     // Floor (default): the CPU-copy plugin entry point.
@@ -230,6 +231,11 @@ impl Plugin for RivePlugin {
         //     lazily on first use, so `build` is infallible and touches no GPU.
         app.init_non_send_resource::<RiveContext>()
             .init_non_send_resource::<RiveInstances>();
+
+        // View-model change/trigger observation (the modern events replacement):
+        // `advance_and_upload_rive` emits one per observed path that fired this tick.
+        // (Bevy 0.18 calls buffered events "messages" — `add_message`/`MessageWriter`.)
+        app.add_message::<RivePropertyChanged>();
 
         // (3) Main-thread systems, chained so a handle written this frame is
         //     visible to the next system the same frame.
@@ -732,6 +738,7 @@ fn advance_and_upload_rive(
     mut instances: NonSendMut<RiveInstances>,
     time: Res<Time>,
     mut images: ResMut<Assets<Image>>,
+    mut vm_changes: MessageWriter<RivePropertyChanged>,
     mut query: Query<(
         Entity,
         &RiveAnimation,
@@ -777,8 +784,11 @@ fn advance_and_upload_rive(
 
         // Apply queued view-model writes BEFORE advancing, so the state machine /
         // scripts observe them this tick (same reason as pointer input above).
+        // Also prime any newly-observed paths so a change/fire on THIS advance is
+        // caught (the shim's change flag only sees changes after subscription).
         if let Some(vm) = view_model.as_deref_mut() {
             crate::view_model::apply_writes(vm, &inst.artboard);
+            crate::view_model::prime_observed(vm, &inst.artboard);
         }
 
         // Guard the native state machine against NaN/negative/non-finite steps
@@ -790,9 +800,14 @@ fn advance_and_upload_rive(
         }
 
         // Read watched view-model properties AFTER advancing (reflects this tick's
-        // script / state-machine output, e.g. a script-driven "breath/scaleX").
+        // script / state-machine output, e.g. a script-driven "breath/scaleX"), and
+        // emit a RivePropertyChanged for each observed path that changed / fired this
+        // tick (the modern, non-deprecated replacement for events read-back).
         if let Some(vm) = view_model.as_deref_mut() {
             crate::view_model::refresh_watch(vm, &inst.artboard);
+            for path in crate::view_model::drain_observed(vm, &inst.artboard) {
+                vm_changes.write(RivePropertyChanged { entity, path });
+            }
         }
 
         if let Err(e) = render_instance(ctx, inst) {

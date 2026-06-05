@@ -166,11 +166,39 @@ fn main() -> Result<()> {
     // (e.g. an eye that follows the cursor) respond. Two runs at different
     // positions can be diffed to prove pointer input reaches the state machine.
     let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| parse_xy(&s));
+    // RIVE_VM_OBSERVE="path1,path2" observes change/trigger fires via the modern
+    // data-binding read-back (the non-deprecated replacement for events read-back):
+    // PRIME each path (subscribe before advancing), then after every advance report
+    // which changed / fired. Proves `vm_flush_changed` end-to-end — e.g. observing
+    // a script-driven number like "breath/scaleX" reports a change each frame.
+    let observe: Vec<String> = std::env::var("RIVE_VM_OBSERVE")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    for path in &observe {
+        // Prime: subscribe before the first advance; discard the initial flag.
+        let _ = artboard.vm_flush_changed(path);
+    }
+    let mut observe_fires: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     for _ in 0..advance_frames {
         if let Some((px, py)) = pointer {
             state_machine.pointer_move(px, py, width, height);
         }
         state_machine.advance(FRAME_DT_SECONDS);
+        for path in &observe {
+            if artboard.vm_flush_changed(path).unwrap_or(false) {
+                *observe_fires.entry(path.clone()).or_insert(0) += 1;
+            }
+        }
+    }
+    for path in &observe {
+        let n = observe_fires.get(path).copied().unwrap_or(0);
+        println!("  view-model observe {path:?}: changed/fired in {n}/{advance_frames} frame(s)");
     }
 
     // RIVE_VM_GET="path" reads a view-model number AFTER advancing — read-back of

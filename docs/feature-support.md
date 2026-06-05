@@ -78,8 +78,9 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Advance / playback tick | ✅ | [state-machines](cpp/state-machines.mdx) | `StateMachine::advance`; `RiveAnimation.speed` |
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](cpp/state-machines.mdx) | move/down/up/exit; `RivePointer` (floor). zero-copy/atlas-tile mapping 🔜 |
 | **View-model data binding** | 🟡 | [data-binding](cpp/data-binding.mdx) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list mutation + per-item writes, image/artboard ref props (blocked — see backlog) |
-| State-machine inputs (bool/number/trigger) | 🔜 | [state-machines](cpp/state-machines.mdx) | the classic control path; `Scene::getBool/getNumber/getTrigger`. (Data binding is the modern path) |
-| Events read-back (state changes, custom / open-url / audio) | 🔜 | [state-machines](cpp/state-machines.mdx) | `stateChanged*` + `reportedEvent*` → an ECS event each frame so gameplay reacts |
+| State-machine inputs (bool/number/trigger) | ⛔ | [state-machines](cpp/state-machines.mdx) | **Deprecated — not supported.** The classic `Scene::getBool/getNumber/getTrigger` path is superseded by view-model **data binding** (the modern channel, already shipped). See Excluded. |
+| View-model change / trigger observation | 🔜 | [data-binding](cpp/data-binding.mdx) | the **read** channel (modern *events* replacement): after advance, poll `ViewModelInstanceValueRuntime::flushChanges()` per watched path → emit a Bevy event when the rig fires a trigger or changes a property. Supersedes the deprecated events read-back below. |
+| ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](cpp/state-machines.mdx) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
 | Named artboard / state-machine selection | 🔜 | [file-and-artboard](cpp/file-and-artboard.mdx) | `ArtboardSelector` / `StateMachineSelector` reserved; only `Default` honored today |
 | Runtime text value get/set | 🔜 | — | `TextValueRun` — set/read a text run's string |
 | Out-of-band asset loading (images/fonts/audio) | 🔜 | [asset-loading](cpp/asset-loading.mdx) | `FileAssetLoader` callback → supply textures/fonts the `.riv` references externally |
@@ -92,14 +93,18 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **State-machine inputs** (bool/number/trigger) — the other half of the write channel,
-   for `.riv` content authored without view models.
-2. **Events read-back** — the read channel: surface state changes + custom/open-url/audio
-   events as Bevy events so gameplay reacts to the face.
-3. **Named artboard / state-machine selection** — honor `ArtboardSelector::ByName/ByIndex`.
-4. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
+1. **View-model change / trigger observation** — the read/signal channel: after advance,
+   poll `flushChanges()` per watched path and emit a Bevy event when the rig fires a
+   trigger or changes a property. This is the **modern replacement for events read-back**
+   (which Rive deprecated): the rig signals gameplay by driving a view-model trigger/property,
+   the game observes it via data binding.
+2. **Named artboard / state-machine selection** — honor `ArtboardSelector::ByName/ByIndex`.
+3. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
    *Unblocks* view-model **image refs** (`propertyImage` needs a `RenderImage` to set).
-5. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+4. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+
+(State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
+both deprecated; view-model data binding is the modern write *and* read channel. See Excluded.)
 
 **View-model data binding — what's deferred (lower-value or blocked, not on the critical path):**
 - **zero-copy watch read-back** — writes forward in both tiers; *reads* (watch) are floor-only.
@@ -119,6 +124,8 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Item | Why |
 |------|-----|
 | Low-level `LinearAnimationInstance` direct playback | Superseded by state machines as the playback unit; we fall back to the default scene only when no SM exists. (Seek/pause control may still be added under "playback controls".) |
+| State-machine inputs (`Scene::getBool/getNumber/getTrigger`) | **Deprecated.** The classic input path is superseded by view-model **data binding** (shipped: number/bool/trigger/color/string/enum get/set). Not supported by project decision. |
+| Events read-back (`reportedEvent*` / `stateChanged*` runtime listening) | **Deprecated by Rive** (per [feature-support](https://rive.app/docs/feature-support)): "Listening to Rive Events at runtime is deprecated and will be removed in future versions. Use Data Binding to listen for triggers or changes to properties instead." Replaced by **view-model change / trigger observation** (`flushChanges`). Audio events still play automatically during advance (rendering feature); open-url/custom signals come through data binding. |
 | `CommandQueue` / `CommandServer` | An *alternative* thread-decoupled API; we drive rive directly from the render-adjacent main thread (NonSend), so it is redundant, not additive. |
 | `WITH_RIVE_TOOLS` editor surface | Editor/tooling mode that alters core runtime behavior (blanks rendering); never enabled in a playback runtime. |
 | Deprecated `Factory` paths (e.g. `makeEmptyRenderPath`) | Legacy; the current `RenderContext` factory path is used. |

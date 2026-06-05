@@ -259,6 +259,31 @@ RiveStatus vmi_property_at_core(ViewModelInstanceRuntime* vm, uint32_t index,
     return RIVE_OK;
 }
 
+// Type-agnostic CHANGE / TRIGGER observation — the modern, non-deprecated
+// replacement for events read-back (Rive deprecated runtime event listening; see
+// docs/feature-support.md). `property(path)` returns the value runtime for ANY
+// property type, creating + caching + SUBSCRIBING it as a dependent on first call.
+// `flushChanges()` returns true ONCE per change/fire the rig produced on the last
+// advance, then resets. Usage: prime once at setup (so the wrapper is subscribed
+// before the first advance), then poll each frame AFTER advance. Works uniformly
+// for triggers (a fire) and scalar properties (a value change).
+RiveStatus vmi_flush_changed(ViewModelInstanceRuntime* vm, const char* path, uint8_t* out)
+{
+    if (out == nullptr)
+    {
+        shim_set_error("out pointer is null");
+        return 1;
+    }
+    auto* p = vm->property(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model property not found");
+        return 1;
+    }
+    *out = p->flushChanges() ? 1 : 0;
+    return RIVE_OK;
+}
+
 } // namespace
 
 // ===========================================================================
@@ -446,6 +471,14 @@ extern "C" RiveStatus rive_artboard_vm_property_at(RiveArtboard* artboard,
     return vmi_property_at_core(vm, index, name_buf, cap, out_len, out_type);
 }
 
+// Change / trigger observation (modern events replacement — see vmi_flush_changed).
+extern "C" RiveStatus rive_artboard_vm_flush_changed(RiveArtboard* artboard,
+                                                     const char* path, uint8_t* out)
+{
+    ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
+    return vm == nullptr ? 1 : vmi_flush_changed(vm, path, out);
+}
+
 // ===========================================================================
 // Handle-based ABI — operate on a RiveViewModelInstance* (root, nested VM, or
 // list item). Enables nested-VM introspection + list access the flat path can't
@@ -578,4 +611,10 @@ extern "C" RiveStatus rive_vmi_get_enum_index(RiveViewModelInstance* handle,
 {
     ViewModelInstanceRuntime* vm = vmi_path(handle, path);
     return vm == nullptr ? 1 : vmi_get_enum_index(vm, path, out);
+}
+extern "C" RiveStatus rive_vmi_flush_changed(RiveViewModelInstance* handle,
+                                             const char* path, uint8_t* out)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_flush_changed(vm, path, out);
 }

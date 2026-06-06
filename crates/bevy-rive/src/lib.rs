@@ -552,8 +552,10 @@ impl Default for RiveActive {
 ///
 /// The consumer owns the cursor→target-pixel mapping because it owns the display
 /// (e.g. a centered `Sprite`) — see `examples/nimai_face.rs`. Absent on an entity
-/// ⇒ no pointer input (existing faces are unaffected). Honored by the `floor`
-/// tier; the `zero_copy` tier ignores it for now.
+/// ⇒ no pointer input (existing faces are unaffected). Honored by both tiers on a
+/// **dedicated** face (`floor`, and `zero_copy` with `RiveTarget.atlas == None`);
+/// `zero_copy` atlas faces ignore it (the tile-rect draw needs tile-aware
+/// inversion — deferred).
 #[derive(Component, Debug, Clone, Default)]
 pub struct RivePointer {
     /// Pointer position in target-pixel space, or `None` when off-surface.

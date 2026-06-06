@@ -89,8 +89,8 @@ use rive_renderer::{
 };
 
 use crate::{
-    RiveActive, RiveAnimation, RiveFile, RiveFit, RivePlugin, RiveSurface, RiveTarget, RiveValue,
-    RiveViewModel,
+    RiveActive, RiveAnimation, RiveFile, RiveFit, RivePlugin, RivePointer, RiveSurface, RiveTarget,
+    RiveValue, RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -494,6 +494,13 @@ struct RiveInstance {
     /// Built once on first render and reused — the shared texture is zero-copy and
     /// never changes, so this removes a per-frame `create_bind_group` per instance.
     bind_group: Option<wgpu::BindGroup>,
+    /// Pointer edge-tracking (the zero_copy analogue of the floor `RiveInstance`'s
+    /// fields): emit `pointer_down`/`pointer_up` on button edges and a single
+    /// `pointer_exit` when the cursor leaves. Lives on the instance (not the
+    /// component) because edges are per-native-state. Dedicated path only — the
+    /// atlas path does not forward pointer input (see the atlas advance loop).
+    last_pointer_down: bool,
+    last_pointer_present: bool,
 }
 
 /// One atlas PAGE (M-SCALE): a shared `Rgba8Unorm` wgpu texture (`page_px`²) that rive
@@ -1132,6 +1139,15 @@ struct ExtractedRive {
     /// before draw — on BOTH the dedicated path (full target) and atlas tiles
     /// (within the tile rect, via draw_viewport). Copy + cheap.
     fit_align: FitAlign,
+    /// This frame's pointer input (from a `RivePointer`), in TARGET-PIXEL space.
+    /// `None` = off-surface or no `RivePointer` ⇒ `pointer_exit`. Forwarded to the
+    /// state machine's Listeners before advance on the DEDICATED path only: the
+    /// atlas path draws into a tile sub-rect (`draw_viewport`), which the shim's
+    /// full-target pointer inversion does not yet map, so an atlas face's pointer
+    /// is left neutral (see the atlas advance loop). Copy + cheap.
+    pointer: Option<Vec2>,
+    /// Whether the primary button is held this frame (paired with `pointer`).
+    pointer_down: bool,
 }
 
 /// Render-world resource holding this frame's extracted rive instances. Replaced
@@ -1525,6 +1541,7 @@ fn extract_rive_instances(
             Option<&RiveActive>,
             Option<&RiveViewModel>,
             Option<&RiveFit>,
+            Option<&RivePointer>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1534,7 +1551,7 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm, fit) in &query {
+    for (entity, anim, target, active, vm, fit, pointer) in &query {
         let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
@@ -1561,6 +1578,10 @@ fn extract_rive_instances(
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
                 fit_align,
+                // Paused faces are skipped before the node's pointer block, so this
+                // is inert; the instance's edge state persists for resume-in-place.
+                pointer: None,
+                pointer_down: false,
             });
             continue;
         }
@@ -1604,6 +1625,11 @@ fn extract_rive_instances(
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
             fit_align,
+            // Ferry this frame's pointer (target-pixel space). Absent `RivePointer`
+            // or off-surface `pos` both collapse to `None` ⇒ the node fires a single
+            // `pointer_exit` (mirrors the floor tier's absent-or-None handling).
+            pointer: pointer.and_then(|p| p.pos),
+            pointer_down: pointer.is_some_and(|p| p.primary_down),
         });
     }
 }
@@ -1820,6 +1846,37 @@ impl Node for RiveFillNode {
             // dedicated path's analogue of the floor advance system). Absent
             // `RiveFit` == contain/center, so this is a no-op for most faces.
             inst.artboard.set_fit_align(item.fit_align);
+            // The pointer inversion runs through the state machine's fit/alignment,
+            // so it must match the artboard's (above) for hits to track the pixels.
+            inst.state_machine.set_fit_align(item.fit_align);
+
+            // Forward pointer input to the state machine's Listeners BEFORE advance
+            // (the dedicated-path analogue of the floor advance system): a listener
+            // latches the target, then the joystick eases toward it on `advance` — so
+            // re-assert `pointer_move` every frame while present, emitting press/
+            // release/exit only on edges (see `RivePointer`). Dedicated path only;
+            // the atlas path's tile-rect draw would need tile-aware coords (deferred).
+            let (pw, ph) = (item.width, item.height);
+            match item.pointer.map(|pos| (pos, item.pointer_down)) {
+                Some((pos, down)) => {
+                    inst.state_machine.pointer_move(pos.x, pos.y, pw, ph);
+                    if down && !inst.last_pointer_down {
+                        inst.state_machine.pointer_down(pos.x, pos.y, pw, ph);
+                    } else if !down && inst.last_pointer_down {
+                        inst.state_machine.pointer_up(pos.x, pos.y, pw, ph);
+                    }
+                    inst.last_pointer_down = down;
+                    inst.last_pointer_present = true;
+                }
+                None => {
+                    if inst.last_pointer_present {
+                        // The exit position is ignored by the SM; (0,0) is fine.
+                        inst.state_machine.pointer_exit(0.0, 0.0, pw, ph);
+                    }
+                    inst.last_pointer_down = false;
+                    inst.last_pointer_present = false;
+                }
+            }
 
             // Advance the state machine, then run rive's frame. Two paths:
             //  * M2a non-blocking (default): RECORD rive's draws into wgpu's OWN open
@@ -2092,6 +2149,11 @@ impl Node for RiveFillNode {
                     // Fit/alignment within the tile (draw_viewport reads it). Absent
                     // `RiveFit` == contain/center — the historical per-tile fit.
                     inst.artboard.set_fit_align(item.fit_align);
+                    // NB: pointer input is NOT forwarded for atlas faces — the shim's
+                    // pointer inversion assumes a full-target draw, but an atlas face
+                    // draws into a tile sub-rect, so target-pixel coords would mis-hit.
+                    // Pointer-driven faces use the dedicated path (`RiveTarget.atlas`
+                    // = None). Tile-aware atlas pointer mapping is deferred.
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
@@ -2404,6 +2466,8 @@ fn build_instance(
         shared_view,
         bind_group: None,
         display: item.display.clone(),
+        last_pointer_down: false,
+        last_pointer_present: false,
     })
 }
 

@@ -44,7 +44,7 @@ use bevy::winit::WinitSettings;
 
 use bevy_rive::{
     install_interlock_device_callback, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile,
-    RiveSampling, RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
+    RivePointer, RiveSampling, RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -82,6 +82,13 @@ struct Cfg {
     /// async-load window and applied once the face goes live (the lost-update fix), vs the
     /// default every-frame re-assert which self-heals.
     vm_oneshot: bool,
+    /// M-INPUT: `RIVE_POINTER="x,y"` — attach a `RivePointer` at this fixed TARGET-PIXEL
+    /// position to each face, proving pointer-input forwarding through the zero-copy
+    /// (render-world) advance path. The node re-asserts `pointer_move` every frame, so a
+    /// pointer-driven joystick (e.g. nimai's gaze) eases toward it. Pair with a listener face:
+    /// `RIVE_RIV=nimai_published.riv RIVE_POINTER="80,80"` vs `"432,432"` → eyes/head track
+    /// distinct directions. `None` (no pointer) by default.
+    pointer: Option<Vec2>,
 }
 
 #[derive(Resource, Default)]
@@ -155,6 +162,12 @@ fn main() {
     let vm_set_enum = std::env::var("RIVE_VM_SET_ENUM").ok().and_then(|s| {
         let (path, idx) = s.split_once('=')?;
         Some((path.trim().to_string(), idx.trim().parse().ok()?))
+    });
+    // M-INPUT: RIVE_POINTER="x,y" — a fixed target-pixel pointer position forwarded to each
+    // face, proving pointer-input forwarding through the zero-copy advance path.
+    let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| {
+        let (x, y) = s.split_once(',')?;
+        Some(Vec2::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
     });
     // M2.0 perf mode (RIVE_PERF): the render-world collector logs a summary after
     // ~30 warm-up + RIVE_PERF_FRAMES (default 300) rendered frames; give the app a
@@ -232,6 +245,7 @@ fn main() {
         keys,
         vm_set_enum,
         vm_oneshot: std::env::var_os("RIVE_VM_ONESHOT").is_some(),
+        pointer,
     })
     .init_resource::<CaptureState>()
     .add_systems(Startup, setup)
@@ -294,6 +308,15 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
                 vm.set_enum_index(path.clone(), *index);
             }
             e.insert(vm);
+        }
+        // M-INPUT: attach a fixed-position pointer so the zero-copy node forwards it to the
+        // state machine's Listeners each frame (a joystick eases toward it). Set once here;
+        // the every-frame re-assert lives in the node (extract re-reads this component).
+        if let Some(pos) = cfg.pointer {
+            e.insert(RivePointer {
+                pos: Some(pos),
+                primary_down: false,
+            });
         }
     }
 }

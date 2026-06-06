@@ -55,7 +55,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 | Feature | Status | `docs/cpp` | Notes |
 |---------|:------:|------------|-------|
-| Artboard render (Fit::contain/center) | ✅ | [rendering-loop](cpp/rendering-loop.mdx), [renderers](cpp/renderers.mdx) | offscreen (floor) + zero-copy Vulkan tiers; atlas batching/tiling for many faces |
+| Artboard render (selectable Fit + Alignment) | ✅ | [rendering-loop](cpp/rendering-loop.mdx), [renderers](cpp/renderers.mdx) | offscreen (floor) + zero-copy Vulkan tiers; atlas batching/tiling for many faces. **`RiveFit { fit, alignment, scale_factor }`** component — all 8 rive fits (contain/cover/fill/none/layout/…) + 9 alignments, both tiers (dedicated + atlas); default contain/center. Pointer inversion tracks it. `None` = render at scale 1.0 (content grows in px, font constant) — e.g. an auto-resizing speech bubble |
 | Linear animations (as the default scene) | ✅ | [state-machines](cpp/state-machines.mdx) | played when an artboard has no default state machine |
 | State machines (advance/apply) | ✅ | [state-machines](cpp/state-machines.mdx) | `advanceAndApply`; the playback unit |
 | Shapes / paths / vertices | ✅ | [renderers](cpp/renderers.mdx) | rectangles, ellipses, polygons, stars, paths |

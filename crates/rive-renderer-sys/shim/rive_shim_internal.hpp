@@ -21,6 +21,7 @@
 #include <memory>
 
 #include "rive/artboard.hpp"                     // ArtboardInstance
+#include "rive/layout.hpp"                        // Fit, Alignment
 #include "rive/refcnt.hpp"                        // rcp, make_rcp
 #include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance
 #include "rive/viewmodel/runtime/viewmodel_instance_runtime.hpp" // ViewModelInstanceRuntime
@@ -41,6 +42,13 @@ struct RiveArtboard
     // instance; it does NOT create a new one, so it never disturbs the
     // script/data-binding context. Null whenever `vmInstance` is.
     rive::rcp<rive::ViewModelInstanceRuntime> vmRuntime;
+    // How the artboard is aligned into the draw target (rive_artboard_draw /
+    // _viewport read these). Default contain/center/1.0 == the historical
+    // hardcoded behavior, so unset artboards render byte-identically. Set via
+    // rive_artboard_set_fit_align (the RiveFit component).
+    rive::Fit fit = rive::Fit::contain;
+    rive::Alignment alignment = rive::Alignment::center;
+    float scaleFactor = 1.0f; // only used by Fit::layout
 };
 
 // Cross-TU error reporter. The canonical setter has internal linkage in

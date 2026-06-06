@@ -174,6 +174,25 @@ extern "C" {
     pub fn rive_state_machine_destroy(sm: *mut RiveStateMachine);
     pub fn rive_state_machine_advance(sm: *mut RiveStateMachine, dt_seconds: f32);
 
+    /// Fit / alignment, stored on the handle (draw reads the artboard's; pointer
+    /// inversion reads the state machine's — set both to match). `fit`: fill=0,
+    /// contain=1, cover=2, fitWidth=3, fitHeight=4, none=5, scaleDown=6, layout=7.
+    /// `align_x`/`align_y` are -1..1 (center=0,0). `scale_factor` is layout-only.
+    pub fn rive_artboard_set_fit_align(
+        artboard: *mut RiveArtboard,
+        fit: u32,
+        align_x: f32,
+        align_y: f32,
+        scale_factor: f32,
+    );
+    pub fn rive_state_machine_set_fit_align(
+        sm: *mut RiveStateMachine,
+        fit: u32,
+        align_x: f32,
+        align_y: f32,
+        scale_factor: f32,
+    );
+
     // Pointer input → state-machine Listeners. `x,y` are in target-pixel space
     // (0..w, 0..h, top-left origin); `w,h` are the render-target pixel size those
     // coords are relative to. The shim inverts the SAME Fit::contain/center

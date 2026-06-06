@@ -10,7 +10,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::rc::Rc;
 
-use crate::{last_error, sys, ContextInner, Error, Result};
+use crate::{last_error, sys, ContextInner, Error, FitAlign, Result};
 
 /// Runs the shim's two-call string protocol (size with a null buffer, then fill)
 /// via `call`, returning the bytes as a `String` (empty on a shim error). Used by
@@ -229,6 +229,17 @@ impl Artboard {
             })
             .collect()
     }
+
+    /// Sets how this artboard is scaled/aligned into its draw target (read by the
+    /// next [`Frame::draw`](crate::Frame::draw) / draw-viewport). Default
+    /// [`FitAlign`] is `Contain` / `Center` (the historical transform), so leaving
+    /// it unset renders identically. To keep pointer hits aligned, set the matching
+    /// state machine's via [`StateMachine::set_fit_align`] too.
+    pub fn set_fit_align(&self, fa: FitAlign) {
+        let (fit, ax, ay, scale) = fa.to_raw();
+        // SAFETY: `self.inner.ptr` is a live artboard handle.
+        unsafe { sys::rive_artboard_set_fit_align(self.inner.ptr, fit, ax, ay, scale) };
+    }
 }
 
 impl std::fmt::Debug for Artboard {
@@ -275,6 +286,16 @@ impl StateMachine {
     pub fn advance(&mut self, dt_seconds: f32) {
         // SAFETY: `self.ptr` is a live state-machine handle.
         unsafe { sys::rive_state_machine_advance(self.ptr, dt_seconds) };
+    }
+
+    /// Sets the [`FitAlign`] used to invert pointer coordinates back into artboard
+    /// space. **Must match** the artboard's draw fit/alignment (set via
+    /// [`Artboard::set_fit_align`]) or pointer hits won't line up with the rendered
+    /// pixels. Default is `Contain` / `Center` (the historical inversion).
+    pub fn set_fit_align(&self, fa: FitAlign) {
+        let (fit, ax, ay, scale) = fa.to_raw();
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        unsafe { sys::rive_state_machine_set_fit_align(self.ptr, fit, ax, ay, scale) };
     }
 
     /// Forwards a pointer **move** to the state machine's Listeners. `(x, y)` is

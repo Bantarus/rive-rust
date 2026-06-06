@@ -81,7 +81,9 @@ pub type Result<T> = std::result::Result<T, Error>;
 // hold the small value/param types, the scene graph, and per-feature additions.
 // All public types are re-exported here so the crate's API stays flat.
 mod value;
-pub use value::{ExternalFrameRecord, ExternalFrameSubmit, PlsMode, VulkanFeatures};
+pub use value::{
+    Alignment, ExternalFrameRecord, ExternalFrameSubmit, Fit, FitAlign, PlsMode, VulkanFeatures,
+};
 
 mod scene;
 pub use scene::{Artboard, File, HitResult, StateMachine};

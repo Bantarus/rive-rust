@@ -123,6 +123,21 @@ void               rive_state_machine_destroy(RiveStateMachine*);
  * result to its backing artboard. */
 void               rive_state_machine_advance(RiveStateMachine*, float dt_seconds);
 
+/* --- Fit / alignment (how the artboard maps into its draw target) -----------
+ * Stored on the handle; rive_artboard_draw / _viewport read the artboard's, and
+ * pointer inversion reads the state machine's (set BOTH to the same values, via
+ * the RiveFit component, or pointer hits won't line up). `fit` is a Fit ordinal:
+ * fill=0, contain=1, cover=2, fitWidth=3, fitHeight=4, none=5, scaleDown=6,
+ * layout=7 (out-of-range -> contain). `align_x`/`align_y` are -1..1 (center=0,0;
+ * bottomCenter=0,1). `scale_factor` applies only to Fit::layout. The default
+ * (contain / center / 1.0) reproduces the historical hardcoded transform. */
+void               rive_artboard_set_fit_align(RiveArtboard*, uint32_t fit,
+                                               float align_x, float align_y,
+                                               float scale_factor);
+void               rive_state_machine_set_fit_align(RiveStateMachine*, uint32_t fit,
+                                                    float align_x, float align_y,
+                                                    float scale_factor);
+
 /* --- View-model data binding (get/set named view-model properties) ----------
  * Operate on the artboard's bound DEFAULT view-model instance (see
  * data-binding.mdx). `path` is a UTF-8 property name; nested view models use a

@@ -106,6 +106,8 @@ use bevy::prelude::*;
 // the frozen API + zero-copy tier without pulling `wgpu-types` or these systems.
 #[cfg(feature = "floor")]
 use bevy::asset::RenderAssetUsages;
+// Layout types for the tier-agnostic `RiveFit` component (used by both tiers).
+use rive_renderer::{Alignment, Fit, FitAlign};
 #[cfg(feature = "floor")]
 use rive_renderer::{Artboard, Context, RenderTarget, StateMachine};
 #[cfg(feature = "floor")]
@@ -148,10 +150,12 @@ pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RivePointer,
+        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RiveFit, RivePointer,
         RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveValue, RiveViewModel,
         StateMachineSelector,
     };
+    // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
+    pub use rive_renderer::{Alignment, Fit};
 
     // Floor (default): the CPU-copy plugin entry point.
     #[cfg(feature = "floor")]
@@ -356,6 +360,52 @@ pub enum StateMachineSelector {
     ByName(String),
     /// The state machine at this 0-based index (state machines only).
     ByIndex(usize),
+}
+
+/// Controls how a Rive artboard is scaled + anchored into its render target.
+///
+/// Attach alongside [`RiveAnimation`]; **absent = `Contain` / `Center`** (the
+/// historical default — letterboxed, centered). Honored in both tiers on the
+/// dedicated path (one face → one target); zero-copy *atlas* tiles always use the
+/// default for now (see `docs/feature-support.md`).
+///
+/// `Fit::None` is the key non-default mode: the artboard renders at scale 1.0, so
+/// content (e.g. an auto-resizing speech bubble) grows in *pixels* while its font
+/// size stays constant. Pair with [`Alignment::BottomCenter`] to pin the bottom
+/// and grow upward. The pointer-input transform tracks this automatically, so
+/// listener hits stay aligned.
+///
+/// Re-exports [`Fit`] and [`Alignment`] from `rive_renderer`.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub struct RiveFit {
+    /// How to scale the artboard into the target.
+    pub fit: Fit,
+    /// Where to anchor it within the target.
+    pub alignment: Alignment,
+    /// Scale multiplier for [`Fit::Layout`]; ignored by other fits.
+    pub scale_factor: f32,
+}
+
+impl Default for RiveFit {
+    fn default() -> Self {
+        // Mirrors `FitAlign::default()` — the historical contain/center transform.
+        Self {
+            fit: Fit::Contain,
+            alignment: Alignment::Center,
+            scale_factor: 1.0,
+        }
+    }
+}
+
+impl RiveFit {
+    /// The `rive_renderer` value this maps to (passed to the artboard + state machine).
+    fn fit_align(&self) -> FitAlign {
+        FitAlign {
+            fit: self.fit,
+            alignment: self.alignment,
+            scale_factor: self.scale_factor,
+        }
+    }
 }
 
 /// Offscreen render configuration: the pixel size and the [`Image`] the renderer
@@ -774,7 +824,7 @@ fn instantiate_rive_instances(
 #[cfg(feature = "floor")]
 #[expect(
     clippy::type_complexity,
-    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> control inputs"
+    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> control inputs"
 )]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
@@ -788,16 +838,25 @@ fn advance_and_upload_rive(
         &RiveTarget,
         Option<&RivePointer>,
         Option<&mut RiveViewModel>,
+        Option<&RiveFit>,
     )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, anim, target, pointer, mut view_model) in &mut query {
+    for (entity, anim, target, pointer, mut view_model, fit) in &mut query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
+
+        // Apply the entity's fit/alignment to BOTH the artboard (draw) and the
+        // state machine (pointer inversion) so hits track the rendered pixels.
+        // Absent `RiveFit` == contain/center (unchanged). Set before the pointer
+        // block below, which inverts through the state machine's fit/alignment.
+        let fa = fit.copied().unwrap_or_default().fit_align();
+        inst.artboard.set_fit_align(fa);
+        inst.state_machine.set_fit_align(fa);
 
         // Forward pointer input to the state machine's Listeners BEFORE advancing:
         // a listener latches the pointer target, then the joystick eases toward it

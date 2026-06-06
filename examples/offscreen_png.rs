@@ -96,6 +96,18 @@ fn main() -> Result<()> {
             .context("instantiating the default state machine")?
     };
 
+    // RIVE_FIT="fit[:alignment]" overrides the draw fit + alignment (default
+    // contain:center). Proves selectable Fit — e.g. RIVE_FIT="none:bottomcenter"
+    // renders the artboard at scale 1.0, anchored bottom-center (vs the default
+    // letterboxed contain). Applied to BOTH the artboard (draw) and the state
+    // machine (so pointer inversion stays aligned).
+    if let Ok(spec) = std::env::var("RIVE_FIT") {
+        let fa = parse_fit_align(&spec)?;
+        artboard.set_fit_align(fa);
+        state_machine.set_fit_align(fa);
+        println!("  fit/align: {fa:?}");
+    }
+
     // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
     // recursing into nested view models and list items via the handle API — use it
     // to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
@@ -287,6 +299,44 @@ fn main() -> Result<()> {
 fn parse_xy(s: &str) -> Option<(f32, f32)> {
     let (a, b) = s.split_once(',')?;
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parses `"fit[:alignment]"` (case-insensitive) into a [`rive_renderer::FitAlign`],
+/// e.g. `"none:bottomcenter"`, `"fill"`, `"cover:topleft"`. Alignment defaults to
+/// `center`.
+fn parse_fit_align(spec: &str) -> Result<rive_renderer::FitAlign> {
+    use rive_renderer::{Alignment, Fit, FitAlign};
+    let (fit_s, align_s) = spec
+        .split_once(':')
+        .map_or((spec.trim(), "center"), |(f, a)| (f.trim(), a.trim()));
+    let fit = match fit_s.to_ascii_lowercase().as_str() {
+        "fill" => Fit::Fill,
+        "contain" => Fit::Contain,
+        "cover" => Fit::Cover,
+        "fitwidth" => Fit::FitWidth,
+        "fitheight" => Fit::FitHeight,
+        "none" => Fit::None,
+        "scaledown" => Fit::ScaleDown,
+        "layout" => Fit::Layout,
+        other => anyhow::bail!("unknown fit {other:?} (RIVE_FIT)"),
+    };
+    let alignment = match align_s.to_ascii_lowercase().as_str() {
+        "topleft" => Alignment::TopLeft,
+        "topcenter" => Alignment::TopCenter,
+        "topright" => Alignment::TopRight,
+        "centerleft" => Alignment::CenterLeft,
+        "center" => Alignment::Center,
+        "centerright" => Alignment::CenterRight,
+        "bottomleft" => Alignment::BottomLeft,
+        "bottomcenter" => Alignment::BottomCenter,
+        "bottomright" => Alignment::BottomRight,
+        other => anyhow::bail!("unknown alignment {other:?} (RIVE_FIT)"),
+    };
+    Ok(FitAlign {
+        fit,
+        alignment,
+        scale_factor: 1.0,
+    })
 }
 
 fn parse_or(arg: Option<String>, default: u32, name: &str) -> Result<u32> {

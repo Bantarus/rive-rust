@@ -84,12 +84,12 @@ use bevy::render::view::ExtractedWindows;
 use bevy::window::PresentMode;
 
 use rive_renderer::{
-    Artboard, Context, ExternalFrameRecord, ExternalFrameSubmit, RenderTarget, StateMachine,
-    VulkanFeatures,
+    Artboard, Context, ExternalFrameRecord, ExternalFrameSubmit, FitAlign, RenderTarget,
+    StateMachine, VulkanFeatures,
 };
 
 use crate::{
-    RiveActive, RiveAnimation, RiveFile, RivePlugin, RiveSurface, RiveTarget, RiveValue,
+    RiveActive, RiveAnimation, RiveFile, RiveFit, RivePlugin, RiveSurface, RiveTarget, RiveValue,
     RiveViewModel,
 };
 
@@ -1127,6 +1127,11 @@ struct ExtractedRive {
     /// a `String` clone only when `ByName` is used).
     artboard_sel: crate::ArtboardSelector,
     state_machine_sel: crate::StateMachineSelector,
+    /// How this face is scaled/aligned into its target (the `RiveFit` component;
+    /// `Default` = contain/center). Applied to the instance's artboard each frame
+    /// before draw — on BOTH the dedicated path (full target) and atlas tiles
+    /// (within the tile rect, via draw_viewport). Copy + cheap.
+    fit_align: FitAlign,
 }
 
 /// Render-world resource holding this frame's extracted rive instances. Replaced
@@ -1519,6 +1524,7 @@ fn extract_rive_instances(
             &RiveTarget,
             Option<&RiveActive>,
             Option<&RiveViewModel>,
+            Option<&RiveFit>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1528,7 +1534,8 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm) in &query {
+    for (entity, anim, target, active, vm, fit) in &query {
+        let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
         };
@@ -1553,6 +1560,7 @@ fn extract_rive_instances(
                 vm_writes: Vec::new(),
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
+                fit_align,
             });
             continue;
         }
@@ -1595,6 +1603,7 @@ fn extract_rive_instances(
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
+            fit_align,
         });
     }
 }
@@ -1806,6 +1815,11 @@ impl Node for RiveFillNode {
             let Some(inst) = instances.get_mut(&entity) else {
                 continue;
             };
+
+            // Apply this face's fit/alignment to the artboard before drawing (the
+            // dedicated path's analogue of the floor advance system). Absent
+            // `RiveFit` == contain/center, so this is a no-op for most faces.
+            inst.artboard.set_fit_align(item.fit_align);
 
             // Advance the state machine, then run rive's frame. Two paths:
             //  * M2a non-blocking (default): RECORD rive's draws into wgpu's OWN open
@@ -2075,6 +2089,9 @@ impl Node for RiveFillNode {
                     if apply_vm_writes && !item.vm_writes.is_empty() {
                         crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
                     }
+                    // Fit/alignment within the tile (draw_viewport reads it). Absent
+                    // `RiveFit` == contain/center — the historical per-tile fit.
+                    inst.artboard.set_fit_align(item.fit_align);
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;

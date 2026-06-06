@@ -207,6 +207,14 @@ struct RiveFile
 struct RiveStateMachine
 {
     std::unique_ptr<rive::Scene> scene;
+    // Fit/alignment for INVERTING pointer coords back into artboard space — must
+    // mirror the artboard's draw fit/alignment or hits won't line up. Default
+    // contain/center == the historical hardcoded inversion. Set via
+    // rive_state_machine_set_fit_align (kept in sync with the artboard's by the
+    // RiveFit component).
+    rive::Fit fit = rive::Fit::contain;
+    rive::Alignment alignment = rive::Alignment::center;
+    float scaleFactor = 1.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -757,23 +765,42 @@ extern "C" void rive_state_machine_advance(RiveStateMachine* sm, float dt_second
     sm->scene->advanceAndApply(dt_seconds);
 }
 
+// Sets the fit/alignment used to INVERT pointer coords (must match the artboard's
+// draw fit/alignment — the RiveFit component sets both). `fit` is a Fit ordinal
+// (fill=0 contain=1 cover=2 fitWidth=3 fitHeight=4 none=5 scaleDown=6 layout=7);
+// out-of-range falls back to contain. align_x/_y are -1..1.
+extern "C" void rive_state_machine_set_fit_align(RiveStateMachine* sm, uint32_t fit,
+                                                 float align_x, float align_y,
+                                                 float scale_factor)
+{
+    if (sm == nullptr)
+        return;
+    sm->fit = fit <= static_cast<uint32_t>(rive::Fit::layout)
+                  ? static_cast<rive::Fit>(fit)
+                  : rive::Fit::contain;
+    sm->alignment = rive::Alignment(align_x, align_y);
+    sm->scaleFactor = scale_factor;
+}
+
 // ---------------------------------------------------------------------------
 // Pointer input -> state-machine Listeners (eye/head joysticks, buttons, hover).
 // ---------------------------------------------------------------------------
 
 // Map a pointer in TARGET-PIXEL space (0..w, 0..h, top-left origin) into the
 // artboard's local space by INVERTING the same alignment `rive_artboard_draw`
-// uses to draw (Fit::contain / Alignment::center). MUST stay in sync with
-// rive_artboard_draw above, or pointer hits won't line up with the rendered
-// pixels. `scene->bounds()` is the artboard's {0,0,w,h} for a state machine.
+// uses to draw. Uses the state machine's stored fit/alignment (kept in sync with
+// the artboard's by the RiveFit component) — MUST match the draw transform or
+// hits won't line up with the rendered pixels. `scene->bounds()` is the
+// artboard's {0,0,w,h} for a state machine.
 static rive::Vec2D pointer_to_artboard(RiveStateMachine* sm,
                                        float x, float y, float w, float h)
 {
     const rive::AABB frame(0.0f, 0.0f, w, h);
-    const rive::Mat2D m = rive::computeAlignment(rive::Fit::contain,
-                                                 rive::Alignment::center,
+    const rive::Mat2D m = rive::computeAlignment(sm->fit,
+                                                 sm->alignment,
                                                  frame,
-                                                 sm->scene->bounds());
+                                                 sm->scene->bounds(),
+                                                 sm->scaleFactor);
     return m.invertOrIdentity() * rive::Vec2D{x, y};
 }
 
@@ -876,6 +903,24 @@ extern "C" RiveStatus rive_frame_begin(RiveRenderContext* ctx,
     return RIVE_OK;
 }
 
+// Sets how the artboard aligns into its draw target (full-target draw + atlas-tile
+// draw_viewport both read this). `fit` is a Fit ordinal (fill=0 contain=1 cover=2
+// fitWidth=3 fitHeight=4 none=5 scaleDown=6 layout=7); out-of-range falls back to
+// contain. align_x/_y are -1..1 (center=0,0; bottomCenter=0,1). scale_factor is
+// used only by Fit::layout. Default (contain/center/1.0) == the historical draw.
+extern "C" void rive_artboard_set_fit_align(RiveArtboard* artboard, uint32_t fit,
+                                            float align_x, float align_y,
+                                            float scale_factor)
+{
+    if (artboard == nullptr)
+        return;
+    artboard->fit = fit <= static_cast<uint32_t>(rive::Fit::layout)
+                        ? static_cast<rive::Fit>(fit)
+                        : rive::Fit::contain;
+    artboard->alignment = rive::Alignment(align_x, align_y);
+    artboard->scaleFactor = scale_factor;
+}
+
 extern "C" RiveStatus rive_artboard_draw(RiveArtboard* artboard,
                                          RiveRenderContext* ctx)
 {
@@ -891,10 +936,11 @@ extern "C" RiveStatus rive_artboard_draw(RiveArtboard* artboard,
                            0.0f,
                            static_cast<float>(target->width),
                            static_cast<float>(target->height));
-    const rive::Mat2D m = rive::computeAlignment(rive::Fit::contain,
-                                                 rive::Alignment::center,
+    const rive::Mat2D m = rive::computeAlignment(artboard->fit,
+                                                 artboard->alignment,
                                                  frame,
-                                                 artboard->artboard->bounds());
+                                                 artboard->artboard->bounds(),
+                                                 artboard->scaleFactor);
     ctx->currentRenderer->save();
     ctx->currentRenderer->transform(m);
     artboard->artboard->draw(ctx->currentRenderer);
@@ -926,10 +972,11 @@ extern "C" RiveStatus rive_artboard_draw_viewport(RiveArtboard* artboard,
     const rive::AABB tile(x, y, x + w, y + h);
     // Fit the artboard's content bounds into the tile (same Fit/Alignment as the
     // full-target rive_artboard_draw, but the frame is the tile, not the target).
-    const rive::Mat2D m = rive::computeAlignment(rive::Fit::contain,
-                                                 rive::Alignment::center,
+    const rive::Mat2D m = rive::computeAlignment(artboard->fit,
+                                                 artboard->alignment,
                                                  tile,
-                                                 artboard->artboard->bounds());
+                                                 artboard->artboard->bounds(),
+                                                 artboard->scaleFactor);
     r->save();
     // CLIP FIRST, while the matrix is still IDENTITY: clipPath captures the current
     // stack matrix as the clipRect matrix, so the tile rect stays in atlas-pixel

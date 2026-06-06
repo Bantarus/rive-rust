@@ -81,6 +81,106 @@ impl PlsMode {
     }
 }
 
+/// How an artboard is scaled/positioned into its draw target. Mirrors rive's
+/// `Fit`; the discriminants match the runtime ordinals passed across the FFI, so
+/// the variant order MUST NOT change. `Contain` is the default (the historical
+/// hardcoded fit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Fit {
+    /// Stretch to fill the frame, ignoring aspect ratio.
+    Fill,
+    /// Scale to fit inside the frame, preserving aspect (letterboxed).
+    #[default]
+    Contain,
+    /// Scale to cover the frame, preserving aspect (cropped).
+    Cover,
+    /// Scale so the content width fits the frame width.
+    FitWidth,
+    /// Scale so the content height fits the frame height.
+    FitHeight,
+    /// No fit-scaling — render at scale 1.0. Content grows in *pixels* as it
+    /// grows, but the scale (and therefore font size) stays constant.
+    None,
+    /// Like [`Fit::Contain`] but never scales *up* past 1.0.
+    ScaleDown,
+    /// Rive layout: resize the artboard to the frame; uses `scale_factor`.
+    Layout,
+}
+
+/// Where the (fit-scaled) artboard is anchored within the frame. Mirrors rive's
+/// named `Alignment` constants; mapped to (x, y) in -1..1 for the FFI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum Alignment {
+    /// Top-left corner.
+    TopLeft,
+    /// Top edge, horizontally centered.
+    TopCenter,
+    /// Top-right corner.
+    TopRight,
+    /// Left edge, vertically centered.
+    CenterLeft,
+    /// Centered (the default).
+    #[default]
+    Center,
+    /// Right edge, vertically centered.
+    CenterRight,
+    /// Bottom-left corner.
+    BottomLeft,
+    /// Bottom edge, horizontally centered (e.g. a speech bubble that grows upward).
+    BottomCenter,
+    /// Bottom-right corner.
+    BottomRight,
+}
+
+impl Alignment {
+    /// (x, y) in -1..1 (left/top = -1, center = 0, right/bottom = +1).
+    fn xy(self) -> (f32, f32) {
+        match self {
+            Alignment::TopLeft => (-1.0, -1.0),
+            Alignment::TopCenter => (0.0, -1.0),
+            Alignment::TopRight => (1.0, -1.0),
+            Alignment::CenterLeft => (-1.0, 0.0),
+            Alignment::Center => (0.0, 0.0),
+            Alignment::CenterRight => (1.0, 0.0),
+            Alignment::BottomLeft => (-1.0, 1.0),
+            Alignment::BottomCenter => (0.0, 1.0),
+            Alignment::BottomRight => (1.0, 1.0),
+        }
+    }
+}
+
+/// A complete fit specification: [`Fit`] + [`Alignment`] + a `scale_factor`
+/// (used only by [`Fit::Layout`]). The [`Default`] is `Contain` / `Center` /
+/// `1.0` — the historical render transform, so leaving it unset changes nothing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FitAlign {
+    /// How to scale the artboard into the target.
+    pub fit: Fit,
+    /// Where to anchor it within the target.
+    pub alignment: Alignment,
+    /// Scale multiplier for [`Fit::Layout`]; ignored by other fits.
+    pub scale_factor: f32,
+}
+
+impl Default for FitAlign {
+    fn default() -> Self {
+        Self {
+            fit: Fit::Contain,
+            alignment: Alignment::Center,
+            scale_factor: 1.0,
+        }
+    }
+}
+
+impl FitAlign {
+    /// The FFI tuple `(fit ordinal, align_x, align_y, scale_factor)`.
+    pub(crate) fn to_raw(self) -> (u32, f32, f32, f32) {
+        let (ax, ay) = self.alignment.xy();
+        (self.fit as u32, ax, ay, self.scale_factor)
+    }
+}
+
 /// Safe mirror of `rive::gpu::VulkanFeatures` for [`Context::from_wgpu_vulkan`].
 ///
 /// Fill this from the features wgpu **actually enabled** on the shared device

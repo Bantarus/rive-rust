@@ -1,7 +1,7 @@
 //! View-model **data binding** — read/write named properties on an artboard's
 //! bound default view-model instance. This is how a host (game) drives a face's
 //! data (and reads values a script/state-machine wrote). Mirrors the C++ runtime
-//! contract in `docs/cpp/data-binding.mdx`.
+//! contract in the Rive data-binding docs (https://rive.app/docs).
 //!
 //! The native binding is set up in the shim when the artboard is created (the
 //! same instance is bound to the artboard + state machine, so editor-authored

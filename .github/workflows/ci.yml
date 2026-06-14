@@ -1,0 +1,99 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref — the native C++ build is expensive.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Full native build (premake -> make -> clang builds rive's static libs + the
+  # C++ shim), then clippy -D warnings for BOTH tiers, rustdoc, and the non-GPU
+  # unit tests. GPU-free: nothing here opens a VkDevice (only Context::new /
+  # rendering needs a GPU, and the device tests are #[ignore]d).
+  #
+  # Note: rustfmt is not yet enforced (the codebase predates a fmt standard); see
+  # the "adopt rustfmt" tracking issue before adding a `cargo fmt --check` gate.
+  # ---------------------------------------------------------------------------
+  build-lint-doc:
+    name: build / clippy / doc / test (linux, no GPU)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # vendor/rive-runtime pinned to runtime-v0.1.106
+
+      - name: Rust toolchain (clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Native C++ toolchain for rive-runtime: clang (NOT gcc — rive uses clang
+      # vector builtins), make, python3, glslang/spirv tools (Vulkan SPIR-V),
+      # libvulkan-dev (loader dev symlink to link -lvulkan). premake clones the
+      # configure-time deps (Vulkan-Headers/VMA/...) so network egress is needed.
+      - name: Install native build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            clang make python3 \
+            glslang-tools spirv-tools \
+            libvulkan-dev pkg-config
+
+      # premake5 is NOT committed (gitignored). Fetch the pinned binary.
+      - name: Fetch premake5
+        run: tools/fetch_premake.sh
+
+      # Cache the network-cloned configure-time deps, keyed on the pinned
+      # submodule + premake config (a cache miss just re-clones — only slower).
+      - name: Cache .rive-deps
+        uses: actions/cache@v4
+        with:
+          path: .rive-deps
+          key: rive-deps-${{ runner.os }}-${{ hashFiles('.gitmodules') }}-${{ hashFiles('vendor/rive-runtime/renderer/premake5_pls_renderer.lua') }}
+
+      # Cache the built rive static libs (the expensive C++ output), keyed on the
+      # submodule + build.rs. A miss just rebuilds from source — correct, slower.
+      - name: Cache rive native libs
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/rive-runtime/renderer/out
+          key: rive-libs-${{ runner.os }}-${{ hashFiles('vendor/rive-runtime/**/*.lua') }}-${{ hashFiles('crates/rive-renderer-sys/build.rs') }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-ci
+
+      # The step that actually compiles rive's C++ libs + the shim (floor tier).
+      - name: Build workspace
+        run: cargo build --workspace --all-targets
+
+      # Strict per-tier lint contract — both tiers must be clean under -D warnings.
+      - name: Clippy (floor tier)
+        run: cargo clippy -p bevy-rive --features floor --all-targets -- -D warnings
+
+      - name: Clippy (zero_copy tier)
+        run: cargo clippy -p bevy-rive --no-default-features --features zero_copy --all-targets -- -D warnings
+
+      # Docs as a gate (catches broken intra-doc links).
+      - name: Doc
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
+      # Non-GPU unit tests. The two-device test is #[ignore]d (needs a real
+      # VkDevice), so this stays GPU-free and safe on hosted runners.
+      - name: Test (no GPU; ignored device tests skipped)
+        run: cargo test --workspace

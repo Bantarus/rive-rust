@@ -27,3 +27,25 @@ Cargo.lock.bak
 # Editor / OS
 .DS_Store
 *.swp
+
+# ---------------------------------------------------------------------------
+# Local-only — kept on disk for development, NOT published in this repo.
+# ---------------------------------------------------------------------------
+# Test .riv assets. Several are third-party (Rive Community / Marketplace
+# downloads) or project-specific faces used only for local bring-up while the
+# framework matures; their redistribution terms are not cleared for bundling.
+# Examples take a `.riv` path (CLI arg / RIVE_RIV env) — see assets/README.md.
+/assets/*.riv
+
+# Internal engineering history: milestone reports, design specs, perf logs,
+# inception notes, and the cross-project engine brief. Useful locally, but not
+# contributor-facing (and some reference private sibling projects). Distilled
+# public architecture lives in docs/architecture.md.
+/docs/internal/
+
+# Third-party reference docs mirrored locally (Rive's own C++ docs). Not
+# redistributed — see https://rive.app/docs for the upstream source.
+/docs/cpp/
+
+# Cross-project engine brief (references private sibling repos).
+/docs/engine-plugin-rive-spec.md

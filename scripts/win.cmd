@@ -9,12 +9,12 @@ rem  GNU make, Git Bash `sh`, python and premake on PATH, then forwards ALL args
 rem  to cargo. This is how rive-runtime expects to be built on Windows (its
 rem  shader step shells out to make), with rive's default clang-cl toolset.
 rem
-rem  Usage (Windows shell, repo at E:\DEV\rive-rust):
-rem    scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out.png
+rem  Usage (Windows shell, repo at C:\dev\rive-rust):
+rem    scripts\win.cmd run --release --example offscreen_png -- path\to\file.riv out.png
 rem    scripts\win.cmd build --release
 rem
 rem  From WSL2:
-rem    cmd.exe /c "scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out.png"
+rem    cmd.exe /c "scripts\win.cmd run --release --example offscreen_png -- path\to\file.riv out.png"
 rem ===========================================================================
 
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"

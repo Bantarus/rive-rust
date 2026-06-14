@@ -9,10 +9,10 @@ Builds on **Linux** (clang — §1) and **native Windows** (clang-cl via the rel
 §1b). M0 brought up Linux; M1.0 added Windows.
 
 ```
-# Linux:
-cargo run --example offscreen_png -- assets/coffee_loader.riv out.png
+# Linux (supply your own .riv — assets are not bundled, see assets/README.md):
+cargo run -p rive-renderer --example offscreen_png -- path/to/file.riv out.png
 # Windows (via the relay):
-scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
+scripts\win.cmd run --release -p rive-renderer --example offscreen_png -- path\to\file.riv out_win.png
 ```
 
 ---
@@ -59,7 +59,7 @@ against those. `libvulkan-dev` is only needed for the loader's dev symlink.
 
 The same example builds and runs natively on Windows with the MSVC-family
 toolchain and the **native NVIDIA Vulkan** driver — **no Vulkan SDK** and **no
-rive-runtime patches**. Full detail + gotchas: **[docs/M1_0_REPORT.md](docs/M1_0_REPORT.md)**.
+rive-runtime patches**.
 
 ### Prerequisites (Windows)
 
@@ -91,22 +91,23 @@ on Windows use the Windows SDK's `fxc`; Vulkan is loaded at runtime via
 > are optimized **COFF** that the default `link.exe` consumes (no `lld-link`
 > needed; rive's `LinkTimeOptimization` flag doesn't reach clang-cl through
 > MSBuild). On Linux, release adds `--no-lto` so `ld` gets ELF, not LLVM bitcode.
-> First real perf baseline: [docs/M2_0_REPORT.md](docs/M2_0_REPORT.md).
 
 ### Build & run (via the relay)
 
-The canonical repo lives on the Linux/WSL2 side; copy it to a real Windows path
-(MSBuild/MSVC don't work over `\\wsl.localhost` UNC) and build there:
+If the canonical repo lives on the Linux/WSL2 side, copy it to a real Windows
+path (MSBuild/MSVC don't work over `\\wsl.localhost` UNC) and build there. Use a
+working directory of your choice (referred to below as `%RIVE_WIN_DIR%`, e.g.
+`C:\dev\rive-rust`):
 
 ```bash
 # from WSL2:
-scripts/sync_to_windows.sh        # rsync working tree -> E:\DEV\rive-rust
-cmd.exe /c "scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png"
+scripts/sync_to_windows.sh        # rsync working tree -> %RIVE_WIN_DIR%
+cmd.exe /c "scripts\win.cmd run --release -p rive-renderer --example offscreen_png -- path\to\file.riv out_win.png"
 ```
 
 ```
-:: or from a native Windows terminal at E:\DEV\rive-rust:
-scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
+:: or from a native Windows terminal at %RIVE_WIN_DIR%:
+scripts\win.cmd run --release -p rive-renderer --example offscreen_png -- path\to\file.riv out_win.png
 ```
 
 `scripts\win.cmd` locates VS via `vswhere`, sources `vcvars64.bat` (x64), puts
@@ -119,9 +120,8 @@ compiles the shim with clang-cl; it emits **no** Vulkan link directive.
 
 ## 2. Submodule
 
-rive-runtime is a git submodule under `vendor/`, pinned to commit
-`3f868558a4596e153afdb6bc3e8058596f0d971d` (`.version` 0.1). After cloning this
-repo:
+rive-runtime is a pristine git submodule under `vendor/`, pinned to the tag
+`runtime-v0.1.106` (no patches, ever). After cloning this repo:
 
 ```bash
 git submodule update --init --recursive
@@ -158,7 +158,6 @@ those two directories.
 > disables rive's LTO by default (`RIVE_RUNTIME_NO_LTO`) so each platform's stock
 > linker handles the objects — Linux `ld` needs ELF not bitcode, and Windows
 > link.exe already gets COFF. Force the config with `RIVE_RUNTIME_CONFIG=release`.
-> See [docs/M2_0_REPORT.md](docs/M2_0_REPORT.md) §Task 1.
 
 ---
 
@@ -225,15 +224,15 @@ Treat every Bevy bump as a deliberate interop re-validation, not a `cargo update
 
 ## 7. Test assets
 
-`assets/` contains small, vector-only samples copied from rive-runtime's own
-`renderer/webgpu_player/rivs/`:
+`.riv` assets are **not bundled** in this repo (they are gitignored — see
+[assets/README.md](assets/README.md)). The examples take a `.riv` path as the first
+CLI argument (or via the `RIVE_RIV` env var), so drop any `.riv` into `assets/` and
+pass its path.
 
-- `coffee_loader.riv` (default) — a small vector loader animation.
-- `octopus_loop.riv` — a looping vector animation.
-
-More `.riv` files: rive's [awesome-rive](https://github.com/rive-app/awesome-rive)
-repo, or anything exported from the Rive editor. M0 uses no image decoders for
-its samples; an image-bearing `.riv` would need the (already-linked) decoders.
+Where to get one: rive's [awesome-rive](https://github.com/rive-app/awesome-rive)
+repo, the [Rive Community](https://rive.app/community), or anything you export from
+the Rive editor. A small vector-only animation is the simplest starting point; an
+image-bearing `.riv` exercises the (already-linked) image decoders.
 
 ---
 

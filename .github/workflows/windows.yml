@@ -1,6 +1,6 @@
 name: windows
 
-# Hermetic native-Windows build + run of the offscreen_png example.
+# Hermetic native-Windows build (the shader-provenance gate).
 #
 # Encodes the M1.0 shader-provenance policy: on a CLEAN checkout (no Linux-synced
 # SPIR-V), the **Vulkan SDK** generates rive's Vulkan SPIR-V natively
@@ -59,12 +59,11 @@ jobs:
         shell: cmd
         run: tools\fetch_premake.cmd
 
-      - name: Build + run offscreen_png (native Vulkan)
+      # Build + link only — the hermetic provenance gate: it proves the Vulkan SDK
+      # generates rive's SPIR-V on a clean checkout, with no hidden Linux->Windows
+      # build dependency. The offscreen render is intentionally NOT run here: hosted
+      # Windows runners have no Vulkan ICD, and no .riv assets are bundled. Real-GPU
+      # render/correctness validation runs on a GPU-capable runner (see ROADMAP.md).
+      - name: Build (native Vulkan toolchain)
         shell: cmd
-        run: scripts\win.cmd run --release --example offscreen_png -- assets\coffee_loader.riv out_win.png
-
-      - name: Upload render
-        uses: actions/upload-artifact@v4
-        with:
-          name: out_win.png
-          path: out_win.png
+        run: scripts\win.cmd build --release --workspace

@@ -1,7 +1,8 @@
 # Line-ending policy for a repo edited from both WSL2 and native Windows
-# (the tree is developed on Linux/ext4 and copied to E:\ for Windows builds).
-# Source is authoritative LF; Windows batch scripts are CRLF (cmd.exe's parser
-# is brittle with bare-LF in for/if/goto blocks); binary assets are untouched.
+# (the tree is developed on Linux/ext4 and copied to a separate Windows build
+# directory for Windows builds). Source is authoritative LF; Windows batch scripts
+# are CRLF (cmd.exe's parser is brittle with bare-LF in for/if/goto blocks); binary
+# assets are untouched.
 
 # Default: detect text, normalize tracked text to LF in the repository.
 * text=auto eol=lf

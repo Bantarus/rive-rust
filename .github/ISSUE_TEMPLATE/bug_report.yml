@@ -1,0 +1,142 @@
+name: Bug report
+description: Report a defect in rive-rust (the Rust bindings / Bevy plugin for Rive's native renderer).
+title: "[bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a report.
+
+        Before opening, please:
+        - Search existing issues to avoid duplicates.
+        - Check the [feature support matrix](../blob/master/docs/feature-support.md) to confirm the
+          behavior is expected to work.
+        - Note that **WSL2 (Mesa Dozen) is a development environment only** — it is atomic-only and
+          non-conformant, so it is not a supported deploy/CI target. Rendering differences there are
+          expected; please reproduce on real hardware where possible.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: A clear, concise description of the bug.
+      placeholder: What went wrong?
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Rendering tier
+      description: Which tier exhibits the bug?
+      options:
+        - floor (default — CPU-copy readback)
+        - zero_copy (opt-in — direct VkImage, Vulkan)
+        - both / not sure
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / platform
+      description: Operating system and version (and whether running under WSL2).
+      placeholder: e.g. Ubuntu 24.04 (native), Windows 11, macOS 14, WSL2 (Ubuntu 24.04)
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU + driver
+      description: GPU model and driver / Mesa version.
+      placeholder: e.g. NVIDIA RTX 4090, driver 555.42; or AMD RX 7900 XTX, Mesa 24.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: wgpu backend
+      description: Which wgpu backend is Bevy using? (Set via WGPU_BACKEND if forced.)
+      options:
+        - Vulkan
+        - D3D12
+        - Metal
+        - other / not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: vulkan_icd
+    attributes:
+      label: Vulkan ICD present?
+      description: >
+        A Vulkan ICD must be installed even on non-Vulkan wgpu backends, because rive's offscreen
+        device is self-managed Vulkan. If unsure, run `vulkaninfo --summary` (Linux) or
+        `vulkaninfo` and report the result.
+      options:
+        - "Yes — a conformant Vulkan ICD is installed"
+        - "WSL2 / Mesa Dozen (dev-only, non-conformant)"
+        - "No / unsure"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: rive-rust commit
+      description: The exact commit SHA you built from (`git rev-parse HEAD`).
+      placeholder: e.g. bf35f03
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: >
+        Minimal steps. If it depends on a specific .riv, please attach it or link a public one
+        (.riv files are not bundled in this repo). Include the exact command line you ran.
+      placeholder: |
+        1. WGPU_BACKEND=vulkan cargo run -p bevy-rive --no-default-features --features zero_copy --example sprite_riv_zerocopy -- path/to/file.riv
+        2. ...
+        3. ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      placeholder: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+      placeholder: What actually happened? Screenshots / recordings welcome.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        Relevant output. Re-run with `RUST_LOG=info` (or `debug`) and, for Vulkan, consider enabling
+        the validation layers. This will be rendered as a code block, so no backticks needed.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Anything else — crate versions, custom Cargo features, RIVE_PREBUILT_LIBS usage, etc.
+    validations:
+      required: false

@@ -4,7 +4,7 @@
  * Per-feature shim TU (see rive_shim_internal.hpp + docs/feature-support.md):
  * get/set named view-model properties on an artboard's bound DEFAULT view-model
  * instance, via the ViewModelInstanceRuntime wrapper held on RiveArtboard. The
- * API mirrors docs/cpp/data-binding.mdx.
+ * API mirrors the Rive data-binding docs (https://rive.app/docs).
  *
  * Two surfaces share one core:
  *   - artboard-rooted (`rive_artboard_vm_*`): flat path on the artboard's root

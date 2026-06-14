@@ -11,7 +11,7 @@
 //!   by driving a view-model trigger/property instead).
 //!
 //! Property paths use `/` for nested view models, e.g. `"breath/scaleX"`. Mirrors
-//! the C++ contract in `docs/cpp/data-binding.mdx`.
+//! the C++ contract in the Rive data-binding docs (https://rive.app/docs).
 //!
 //! Covers number / bool / trigger / color / string / enum. The component is
 //! tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance

@@ -38,7 +38,7 @@ struct RiveArtboard
     // with no view model.
     rive::rcp<rive::ViewModelInstance> vmInstance;
     // Runtime wrapper over the SAME `vmInstance` for name-based property get/set
-    // (data binding — see docs/cpp/data-binding.mdx). Wraps the already-bound
+    // (data binding — see the Rive data-binding docs (https://rive.app/docs)). Wraps the already-bound
     // instance; it does NOT create a new one, so it never disturbs the
     // script/data-binding context. Null whenever `vmInstance` is.
     rive::rcp<rive::ViewModelInstanceRuntime> vmRuntime;

@@ -8,20 +8,20 @@ rem  and head follow the mouse cursor (pointer Listeners / a head joystick).
 rem
 rem  Why native Windows: WSL2 forces rive/wgpu onto Mesa Dozen (a non-conformant
 rem  Vulkan->D3D12 layer) or llvmpipe, and the WSLg compositor is flaky. On the
-rem  4090 box there is a real NVIDIA Vulkan ICD and a real desktop -- so the
+rem  Windows box there is a real NVIDIA Vulkan ICD and a real desktop -- so the
 rem  window actually paints AND there is a real OS cursor to track, which is the
 rem  whole point of this example.
 rem
 rem  This sets up the VS x64 toolchain (clang-cl, MSBuild, fxc) + GNU make + Git
 rem  Bash `sh` that rive-renderer-sys's build.rs needs (premake + the shader make
 rem  step), then `cargo run --release` the example. Mirrors win.cmd /
-rem  run-windows-voxelien.cmd / ../voxelith/scripts/run-windows-rive.cmd.
+rem  run-windows-voxelien.cmd.
 rem
-rem  Prerequisite (from WSL2): push the tree to E: first so the example and the
+rem  Prerequisite (from WSL2): sync the tree to your Windows checkout first so the example and the
 rem  .riv assets are present:
 rem    scripts/sync_to_windows.sh
 rem
-rem  Usage (Windows shell, repo at E:\DEV\rive-rust):
+rem  Usage (Windows shell, repo at C:\dev\rive-rust):
 rem    scripts\run-windows-nimai.cmd                       (published/signed face)
 rem    scripts\run-windows-nimai.cmd nimai_published.riv   (explicit file)
 rem

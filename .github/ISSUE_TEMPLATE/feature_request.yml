@@ -1,0 +1,75 @@
+name: Feature request
+description: Suggest a capability or improvement for rive-rust.
+title: "[feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion.
+
+        Before opening, please check the [feature support matrix](../blob/master/docs/feature-support.md):
+        the request may already be supported, planned, or explicitly out of scope (some Rive APIs are
+        deprecated by Rive and intentionally not implemented). For open-ended ideas, a
+        [Discussion](https://github.com/Bantarus/rive-rust/discussions) is often a better starting point.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / motivation
+      description: What are you trying to do? What is missing or painful today?
+      placeholder: I'm trying to ... but rive-rust currently ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the capability or API you'd like.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of the project does this touch?
+      options:
+        - Rendering / playback
+        - Runtime control & data (pointer input, data binding, selection, ...)
+        - New platform / backend (D3D12, Metal, Android, ...)
+        - Build / packaging (rive-renderer-sys, prebuilt libs)
+        - API ergonomics / docs
+        - other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Affected tier(s)
+      description: Which rendering tier would this apply to?
+      options:
+        - floor (default)
+        - zero_copy (opt-in)
+        - both
+        - not tier-specific
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you've tried, or other designs you weighed.
+    validations:
+      required: false
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Links to relevant Rive docs, .riv files, prior art, etc.
+    validations:
+      required: false

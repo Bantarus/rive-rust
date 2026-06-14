@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Feature support matrix & roadmap
+    url: https://github.com/Bantarus/rive-rust/blob/master/docs/feature-support.md
+    about: Check what is supported, planned, or out of scope before filing — many questions are answered here.
+  - name: Questions & ideas (Discussions)
+    url: https://github.com/Bantarus/rive-rust/discussions
+    about: For usage questions, design ideas, and open-ended discussion that isn't a concrete bug or feature request.

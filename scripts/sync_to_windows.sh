@@ -1,9 +1,9 @@
 #!/bin/bash
-# sync_to_windows.sh — mirror the working tree to E:\DEV\rive-rust for a native
+# sync_to_windows.sh — mirror the working tree to your Windows checkout for a native
 # Windows build/test, run from WSL2.
 #
 # The canonical repo lives on the WSL2 ext4 filesystem (fast iteration + the
-# Linux build); it is copied to the 9p-mounted Windows drive only when testing
+# Linux build); it is copied to a 9p-mounted Windows drive only when testing
 # the Windows build. Excludes Linux build objects and target/ (Windows builds
 # its own); KEEPS vendor/ sources, the .rive-deps header cache, and the prebuilt
 # SPIR-V/generated shader headers under out/ (reused verbatim on Windows so
@@ -12,7 +12,7 @@
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/"
-DST="${1:-/mnt/e/DEV/rive-rust/}"
+DST="${1:-${RIVE_WIN_DIR:?Pass the destination as the first argument, or set RIVE_WIN_DIR to your mounted Windows checkout (e.g. /mnt/c/dev/rive-rust/)}}"
 
 mkdir -p "$DST"
 rsync -rlt --modify-window=2 \

@@ -7,19 +7,18 @@ rem  live viewer (the `voxelien_face` floor-tier example in bevy-rive).
 rem
 rem  Why native Windows: WSL2 forces rive/wgpu onto Mesa Dozen (a non-conformant
 rem  Vulkan->D3D12 layer) or llvmpipe, and the WSLg compositor is flaky. On the
-rem  4090 box there is a real NVIDIA Vulkan ICD and a real desktop, so the window
+rem  Windows box there is a real NVIDIA Vulkan ICD and a real desktop, so the window
 rem  actually paints and BallBreath plays at full speed.
 rem
 rem  This sets up the VS x64 toolchain (clang-cl, MSBuild, fxc) + GNU make + Git
 rem  Bash `sh` that rive-renderer-sys's build.rs needs (premake + the shader make
-rem  step), then `cargo run --release` the example. Mirrors win.cmd /
-rem  ../voxelith/scripts/run-windows-rive.cmd.
+rem  step), then `cargo run --release` the example. Mirrors win.cmd.
 rem
-rem  Prerequisite (from WSL2): push the tree to E: first so the example, the
+rem  Prerequisite (from WSL2): sync the tree to your Windows checkout first so the example, the
 rem  `--with_rive_scripting` build.rs flag, and the .riv assets are present:
 rem    scripts/sync_to_windows.sh
 rem
-rem  Usage (Windows shell, repo at E:\DEV\rive-rust):
+rem  Usage (Windows shell, repo at C:\dev\rive-rust):
 rem    scripts\run-windows-voxelien.cmd                       (published/signed face)
 rem    scripts\run-windows-voxelien.cmd voxelien_face.riv     (unsigned backup, for A/B)
 rem

@@ -9,14 +9,14 @@ members = [
 [workspace.package]
 edition = "2021"
 rust-version = "1.94"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/bantarus/rive-rust"
+license = "MIT"
+repository = "https://github.com/Bantarus/rive-rust"
 
-# Shared lint policy. Follows docs/rust-guidelines.txt (M-STATIC-VERIFICATION) at a
-# pragmatic baseline for a milestone-0 FFI scaffold: the always-on compiler lints plus
-# the high-signal clippy groups. The full `pedantic` + `restriction` set is intentionally
-# deferred — it is very noisy on hand-written FFI declarations and would obscure real
-# issues during bring-up. Tighten this once the API stabilises (tracked in BUILD.md).
+# Shared lint policy: a pragmatic clippy baseline for an early-stage FFI scaffold —
+# the always-on compiler lints plus the high-signal clippy groups. The full `pedantic` +
+# `restriction` set is intentionally deferred — it is very noisy on hand-written FFI
+# declarations and would obscure real issues during bring-up. Tighten this once the API
+# stabilises (tracked in BUILD.md).
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
 missing_debug_implementations = "warn"

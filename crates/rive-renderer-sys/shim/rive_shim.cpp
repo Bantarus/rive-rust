@@ -26,6 +26,13 @@
 #include "rive/animation/state_machine_instance.hpp"
 #include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance (data binding)
 #include "rive/factory.hpp"
+// Out-of-band asset loading (rive_file_load_with_assets).
+#include "rive/file_asset_loader.hpp"   // FileAssetLoader (host asset callback)
+#include "rive/assets/file_asset.hpp"   // FileAsset (name/ext/id/decode)
+#include "rive/assets/image_asset.hpp"  // ImageAsset (type discriminator)
+#include "rive/assets/font_asset.hpp"   // FontAsset  (type discriminator)
+#include "rive/assets/audio_asset.hpp"  // AudioAsset (type discriminator)
+#include "rive/simple_array.hpp"        // SimpleArray (owned copy for decode)
 #include "rive/layout.hpp"             // Fit, Alignment
 #include "rive/math/aabb.hpp"
 #include "rive/math/mat2d.hpp"
@@ -448,9 +455,74 @@ extern "C" size_t rive_render_target_pixel_buffer_size(const RiveRenderTarget* t
 // File / artboard / state machine.
 // ---------------------------------------------------------------------------
 
-extern "C" RiveFile* rive_file_load(RiveRenderContext* ctx,
-                                    const uint8_t* bytes,
-                                    size_t len)
+// A FileAssetLoader that defers to a host C callback. Used by
+// rive_file_load_with_assets to let the game supply out-of-band (Referenced)
+// images / fonts / audio. Heap-allocated and refcounted: File::import stores an
+// rcp to it for the File's lifetime, so it must NOT be a stack object (it would
+// be double-freed when the File drops). In practice assets resolve synchronously
+// during import, so the host callback only fires within the load call.
+namespace {
+class CallbackAssetLoader : public rive::FileAssetLoader
+{
+public:
+    CallbackAssetLoader(RiveAssetLoadFn fn, void* user) : m_fn(fn), m_user(user)
+    {}
+
+    bool loadContents(rive::FileAsset& asset,
+                      rive::Span<const uint8_t> inBandBytes,
+                      rive::Factory* factory) override
+    {
+        // The c_str() pointers below alias these locals; keep them in scope for
+        // the whole callback (the host must not retain them past the call).
+        const std::string name = asset.name();
+        const std::string ext = asset.fileExtension();
+        const std::string uuid = asset.cdnUuidStr();
+
+        uint16_t type = RIVE_ASSET_OTHER;
+        if (asset.is<rive::ImageAsset>())
+            type = RIVE_ASSET_IMAGE;
+        else if (asset.is<rive::FontAsset>())
+            type = RIVE_ASSET_FONT;
+        else if (asset.is<rive::AudioAsset>())
+            type = RIVE_ASSET_AUDIO;
+
+        RiveAssetRequest req;
+        req.name = name.c_str();
+        req.file_extension = ext.c_str();
+        req.cdn_uuid = uuid.c_str();
+        req.asset_id = asset.assetId();
+        req.asset_type = type;
+        req.in_band_bytes = inBandBytes.size() > 0 ? inBandBytes.data() : nullptr;
+        req.in_band_len = inBandBytes.size();
+
+        const uint8_t* out = nullptr;
+        size_t out_len = 0;
+        if (m_fn(m_user, &req, &out, &out_len) == 0 || out == nullptr ||
+            out_len == 0)
+        {
+            return false; // host declined → caller falls back to in-band bytes
+        }
+
+        // Copy the host bytes into an owned array, then let the asset's own
+        // decoder (image/font/audio) turn them into a render resource via the
+        // factory (the RenderContext — has libpng/jpeg/webp + harfbuzz built in).
+        rive::SimpleArray<uint8_t> data(out, out_len);
+        return asset.decode(data, factory);
+    }
+
+private:
+    RiveAssetLoadFn m_fn;
+    void* m_user;
+};
+} // namespace
+
+// Shared import + handle-wrap for both file-load entry points. `loader` may be a
+// null rcp (no out-of-band loading). Imports via File::import (RenderContext
+// IS-A rive::Factory); File takes its own rcp on `loader`, so ownership is clean.
+static RiveFile* load_file_impl(RiveRenderContext* ctx,
+                                const uint8_t* bytes,
+                                size_t len,
+                                rive::rcp<rive::FileAssetLoader> loader)
 {
     if (ctx == nullptr || ctx->renderContext == nullptr || bytes == nullptr ||
         len == 0)
@@ -460,11 +532,11 @@ extern "C" RiveFile* rive_file_load(RiveRenderContext* ctx,
     }
 
     rive::ImportResult result = rive::ImportResult::malformed;
-    // The RenderContext IS-A rive::Factory.
     rive::rcp<rive::File> file = rive::File::import(
         rive::Span<const uint8_t>(bytes, len),
         ctx->renderContext.get(),
-        &result);
+        &result,
+        std::move(loader));
     if (file == nullptr || result != rive::ImportResult::success)
     {
         set_error(result == rive::ImportResult::unsupportedVersion
@@ -481,6 +553,26 @@ extern "C" RiveFile* rive_file_load(RiveRenderContext* ctx,
     }
     handle->file = std::move(file);
     return handle;
+}
+
+extern "C" RiveFile* rive_file_load(RiveRenderContext* ctx,
+                                    const uint8_t* bytes,
+                                    size_t len)
+{
+    return load_file_impl(ctx, bytes, len, nullptr);
+}
+
+extern "C" RiveFile* rive_file_load_with_assets(RiveRenderContext* ctx,
+                                                const uint8_t* bytes,
+                                                size_t len,
+                                                RiveAssetLoadFn load_fn,
+                                                void* user)
+{
+    rive::rcp<rive::FileAssetLoader> loader =
+        load_fn != nullptr
+            ? rive::make_rcp<CallbackAssetLoader>(load_fn, user)
+            : nullptr;
+    return load_file_impl(ctx, bytes, len, std::move(loader));
 }
 
 extern "C" void rive_file_destroy(RiveFile* file)

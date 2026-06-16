@@ -82,7 +82,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
 | Named artboard / state-machine selection | ✅ | [artboards](https://rive.app/docs/runtimes/artboards) | `ArtboardSelector` / `StateMachineSelector` honor **Default / ByName / ByIndex** in BOTH tiers (`File::artboard_named/_at`, `Artboard::state_machine_named/_at`); discover names via `artboard_names()` / `state_machine_names()` |
 | Runtime text value get/set | 🔜 | — | `TextValueRun` — set/read a text run's string |
-| Out-of-band asset loading (images/fonts/audio) | 🔜 | [loading-assets](https://rive.app/docs/runtimes/loading-assets) | `FileAssetLoader` callback → supply textures/fonts the `.riv` references externally |
+| Out-of-band asset loading (images/fonts/audio) | ✅ | [loading-assets](https://rive.app/docs/runtimes/loading-assets) | `FileAssetLoader` callback → supply the **Referenced** (not Embedded) images / fonts / audio a `.riv` needs. **`RiveAssets`** component (name → encoded bytes), both tiers; `Context::load_file_with_assets` at the safe layer. Host returns encoded file bytes (PNG/JPEG/WEBP, font, audio); rive decodes via the context factory (libpng/jpeg/webp + harfbuzz). A name not in the map (or decode failure) falls back to in-band content |
 | Audio playback | 🔜 | — | `WITH_RIVE_AUDIO` + an engine audio bridge (route to the host mixer) |
 | Joystick / gamepad / keyboard / focus input | 🔜 | — | `Scene` gamepad/keyboard + `FocusManager`; for game-controlled rigs |
 | Animation playback controls (seek / pause / per-anim speed) | 🔜 | — | direct `LinearAnimationInstance` time control beyond the SM |
@@ -92,11 +92,11 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Out-of-band asset loading** — `FileAssetLoader` for externally-supplied images/fonts.
-   *Unblocks* view-model **image refs** (`propertyImage` needs a `RenderImage` to set).
-2. **Runtime text get/set**; **atlas-tile pointer mapping** (zero-copy); **audio bridge**.
+1. **Runtime text get/set** (`TextValueRun`); **atlas-tile pointer mapping** (zero-copy);
+   **audio bridge** (route decoded audio assets to the host mixer).
 
-*(Recently shipped: view-model **change/trigger observation** — the modern events replacement;
+*(Recently shipped: **out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`, both
+tiers; view-model **change/trigger observation** — the modern events replacement;
 **named artboard / state-machine selection** — Default/ByName/ByIndex in both tiers.)*
 
 (State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
@@ -106,10 +106,11 @@ both deprecated; view-model data binding is the modern write *and* read channel.
 - **zero-copy watch read-back** — writes forward in both tiers; *reads* (watch) are floor-only.
   Needs a render→main back-channel (`zero_copy` advances in the render world); deferred because you
   rarely read back N atlas faces and floor reads cover the single-face case.
-- **image / artboard reference props** — `propertyImage`/`propertyArtboard` are **set-only** and need a
-  value source we don't have yet: a `RenderImage` from out-of-band **asset loading** (#4), and a
-  `BindableArtboard` from **nested-artboard binding**. Wire them WITH those features, not before
-  (a setter with nothing to pass it is a dead end).
+- **image / artboard reference props** — `propertyImage`/`propertyArtboard` are **set-only**. Out-of-band
+  **asset loading** now ships (a referenced image can be supplied at load), but *data-binding* an image
+  property at runtime still needs a `RenderImage` handle exposed at the safe layer (decode → bindable
+  value); `propertyArtboard` needs a `BindableArtboard` from **nested-artboard binding**. Wire each WITH
+  its value source, not before (a setter with nothing to pass it is a dead end).
 - **list mutation + per-item writes** — list read / size / item-introspection shipped; add/remove/swap
   and writing into list items are deferred (reads cover the common game case).
 

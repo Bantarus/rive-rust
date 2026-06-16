@@ -91,6 +91,9 @@ pub use scene::{Artboard, File, HitResult, StateMachine};
 mod view_model;
 pub use view_model::{RiveValueKind, RiveViewModelInstance};
 
+mod assets;
+pub use assets::{AssetRequest, AssetType};
+
 /// Errors returned by the safe wrapper.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

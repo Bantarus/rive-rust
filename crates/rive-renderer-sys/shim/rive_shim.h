@@ -89,6 +89,51 @@ RiveFile*          rive_file_load(RiveRenderContext* ctx,
                                   size_t len);
 void               rive_file_destroy(RiveFile*);
 
+/* --- Out-of-band asset loading --------------------------------------------- */
+
+/* Asset kind reported to the loader callback (rive's FileAsset subtype). */
+#define RIVE_ASSET_OTHER 0
+#define RIVE_ASSET_IMAGE 1
+#define RIVE_ASSET_FONT  2
+#define RIVE_ASSET_AUDIO 3
+
+/* Describes one asset the file references, passed by const-pointer to the host
+ * loader callback. The `const char*` fields are NUL-terminated and valid only
+ * for the duration of the callback; `in_band_bytes` is the asset's embedded
+ * content (NULL/0 when the asset is referenced out-of-band, i.e. exported as
+ * "Referenced" rather than "Embedded"). */
+typedef struct RiveAssetRequest {
+    const char*    name;           /* authored asset name, e.g. "logo.png" */
+    const char*    file_extension; /* lowercase, no dot, e.g. "png", "ttf"  */
+    const char*    cdn_uuid;       /* CDN UUID string, or "" if none         */
+    uint32_t       asset_id;       /* file-unique asset id                   */
+    uint16_t       asset_type;     /* one of RIVE_ASSET_* above              */
+    const uint8_t* in_band_bytes;  /* embedded content, or NULL              */
+    size_t         in_band_len;    /* length of in_band_bytes, or 0          */
+} RiveAssetRequest;
+
+/* Host loader callback, invoked synchronously once per referenced asset during
+ * rive_file_load_with_assets. To supply an asset, point *out_bytes/*out_len at
+ * ENCODED file bytes (a PNG/JPEG/WEBP image, or a font/audio file) and return 1;
+ * rive decodes them via the render context's factory. The buffer need only stay
+ * valid until the callback returns (the shim copies it immediately). Return 0 to
+ * decline, letting rive fall back to the in-band content (if any). `user` is the
+ * opaque pointer passed to rive_file_load_with_assets. */
+typedef int (*RiveAssetLoadFn)(void* user,
+                               const RiveAssetRequest* req,
+                               const uint8_t** out_bytes,
+                               size_t* out_len);
+
+/* Like rive_file_load, but installs `load_fn` as the file's out-of-band asset
+ * loader (called synchronously for each referenced asset during this call;
+ * neither `load_fn` nor `user` is retained afterwards). `load_fn == NULL`
+ * behaves exactly like rive_file_load. */
+RiveFile*          rive_file_load_with_assets(RiveRenderContext* ctx,
+                                              const uint8_t* bytes,
+                                              size_t len,
+                                              RiveAssetLoadFn load_fn,
+                                              void* user);
+
 /* Instantiates an artboard. `_default` uses the file's default; `_named` /`_at`
  * select by name / 0-based index. All bind the artboard's default view model
  * identically. Return NULL (+ rive_last_error) if the file is invalid or the

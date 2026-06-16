@@ -89,8 +89,8 @@ use rive_renderer::{
 };
 
 use crate::{
-    RiveActive, RiveAnimation, RiveFile, RiveFit, RivePlugin, RivePointer, RiveSurface, RiveTarget,
-    RiveValue, RiveViewModel,
+    RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RivePlugin, RivePointer, RiveSurface,
+    RiveTarget, RiveValue, RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -1134,6 +1134,11 @@ struct ExtractedRive {
     /// a `String` clone only when `ByName` is used).
     artboard_sel: crate::ArtboardSelector,
     state_machine_sel: crate::StateMachineSelector,
+    /// Out-of-band assets (the `RiveAssets` component) supplied to the `.riv` by
+    /// authored name. Like the selectors, honored once when the node first builds
+    /// this entity's instance; ferried each frame as a cheap `Arc` refcount bump
+    /// (`None` when the entity has no `RiveAssets`).
+    assets: Option<crate::RiveAssets>,
     /// How this face is scaled/aligned into its target (the `RiveFit` component;
     /// `Default` = contain/center). Applied to the instance's artboard each frame
     /// before draw — on BOTH the dedicated path (full target) and atlas tiles
@@ -1542,6 +1547,7 @@ fn extract_rive_instances(
             Option<&RiveViewModel>,
             Option<&RiveFit>,
             Option<&RivePointer>,
+            Option<&RiveAssets>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1551,7 +1557,7 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm, fit, pointer) in &query {
+    for (entity, anim, target, active, vm, fit, pointer, assets) in &query {
         let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
@@ -1577,6 +1583,7 @@ fn extract_rive_instances(
                 vm_writes: Vec::new(),
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
+                assets: assets.cloned(),
                 fit_align,
                 // Paused faces are skipped before the node's pointer block, so this
                 // is inert; the instance's edge state persists for resume-in-place.
@@ -1624,6 +1631,7 @@ fn extract_rive_instances(
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
+            assets: assets.cloned(),
             fit_align,
             // Ferry this frame's pointer (target-pixel space). Absent `RivePointer`
             // or off-surface `pos` both collapse to `None` ⇒ the node fires a single
@@ -2407,7 +2415,7 @@ fn build_instance(
     render_device: &RenderDevice,
     item: &ExtractedRive,
 ) -> rive_renderer::Result<RiveInstance> {
-    let file = ctx.load_file(&item.bytes)?;
+    let file = crate::assets::load_file_with_assets(ctx, &item.bytes, item.assets.as_ref())?;
     let artboard = crate::select_artboard(&file, &item.artboard_sel)?;
     let state_machine = crate::select_state_machine(&artboard, &item.state_machine_sel)?;
 
@@ -2525,7 +2533,7 @@ fn build_atlas_instance(
     ctx: &Context,
     item: &ExtractedRive,
 ) -> rive_renderer::Result<AtlasInstance> {
-    let file = ctx.load_file(&item.bytes)?;
+    let file = crate::assets::load_file_with_assets(ctx, &item.bytes, item.assets.as_ref())?;
     let artboard = crate::select_artboard(&file, &item.artboard_sel)?;
     let state_machine = crate::select_state_machine(&artboard, &item.state_machine_sel)?;
     Ok(AtlasInstance {

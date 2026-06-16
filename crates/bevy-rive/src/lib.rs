@@ -139,6 +139,13 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 mod view_model;
 pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 
+// Per-feature module (the "add a Rive feature" convention). Out-of-band asset
+// loading: the `RiveAssets` component supplies externally-referenced images /
+// fonts / audio by name. Tier-agnostic — read once at instantiation in both
+// tiers (the `zero_copy` tier ferries the map to the render world).
+mod assets;
+pub use assets::RiveAssets;
+
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
 /// This is the whole public surface a game touches. The floor's three-step flow —
@@ -150,9 +157,9 @@ pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile, RiveFit, RivePointer,
-        RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveValue, RiveViewModel,
-        StateMachineSelector,
+        ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveFile, RiveFit,
+        RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveValue,
+        RiveViewModel, StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
@@ -684,8 +691,9 @@ fn build_instance(
     height: u32,
     artboard_sel: &ArtboardSelector,
     sm_sel: &StateMachineSelector,
+    assets: Option<&RiveAssets>,
 ) -> rive_renderer::Result<(Artboard, StateMachine, RenderTarget)> {
-    let file = ctx.load_file(bytes)?;
+    let file = crate::assets::load_file_with_assets(ctx, bytes, assets)?;
     let artboard = select_artboard(&file, artboard_sel)?;
     let state_machine = select_state_machine(&artboard, sm_sel)?;
     let target = ctx.offscreen_target(width, height)?;
@@ -767,11 +775,11 @@ fn make_rive_image(width: u32, height: u32) -> Image {
 fn instantiate_rive_instances(
     mut rive_ctx: NonSendMut<RiveContext>,
     mut instances: NonSendMut<RiveInstances>,
-    mut query: Query<(Entity, &RiveAnimation, &mut RiveTarget)>,
+    mut query: Query<(Entity, &RiveAnimation, &mut RiveTarget, Option<&RiveAssets>)>,
     files: Res<Assets<RiveFile>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    for (entity, anim, mut target) in &mut query {
+    for (entity, anim, mut target, assets) in &mut query {
         if instances.map.contains_key(&entity) || instances.failed.contains(&entity) {
             continue; // already built, or permanently failed
         }
@@ -791,6 +799,7 @@ fn instantiate_rive_instances(
             target.height,
             &anim.artboard,
             &anim.state_machine,
+            assets,
         ) {
                 Ok(parts) => parts,
                 Err(e) => {

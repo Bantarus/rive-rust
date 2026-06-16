@@ -49,7 +49,34 @@ fn main() -> Result<()> {
         .context("creating the offscreen render target")?;
 
     // Load content and grab an artboard + state machine (honoring selection knobs).
-    let file = ctx.load_file(&riv_bytes).context("importing the .riv file")?;
+    // RIVE_ASSETS: route the load through the out-of-band asset loader, logging
+    // every referenced asset (name / kind / extension / in-band size). Supplies
+    // bytes from a directory of files named "<asset name>" when RIVE_ASSET_DIR is
+    // set; otherwise declines (→ in-band fallback). Proves the loader callback.
+    let file = if std::env::var("RIVE_ASSETS").is_ok() {
+        let dir = std::env::var("RIVE_ASSET_DIR").ok();
+        ctx.load_file_with_assets(&riv_bytes, |req| {
+            let supplied = dir
+                .as_deref()
+                .and_then(|d| std::fs::read(std::path::Path::new(d).join(req.name)).ok());
+            let action = match &supplied {
+                Some(b) => format!("supply {}B", b.len()),
+                None => "decline (in-band fallback)".to_string(),
+            };
+            eprintln!(
+                "  asset: name={:?} kind={:?} ext={:?} id={} in_band={}B -> {action}",
+                req.name,
+                req.asset_type,
+                req.file_extension,
+                req.asset_id,
+                req.in_band.map_or(0, <[u8]>::len),
+            );
+            supplied
+        })
+        .context("importing the .riv file (with asset loader)")?
+    } else {
+        ctx.load_file(&riv_bytes).context("importing the .riv file")?
+    };
 
     // RIVE_LIST: print the selectable artboard names (and, below, the chosen
     // artboard's state-machine names), to discover what RIVE_ARTBOARD /

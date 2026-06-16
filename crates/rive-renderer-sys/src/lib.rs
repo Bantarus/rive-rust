@@ -113,6 +113,41 @@ pub struct RiveViewModelInstance {
     _opaque: [u8; 0],
 }
 
+// ===== out-of-band asset loading =====
+
+/// Asset kind reported in [`RiveAssetRequest::asset_type`] (rive's `FileAsset`
+/// subtype). Mirror of the `RIVE_ASSET_*` constants in `rive_shim.h`.
+pub const RIVE_ASSET_OTHER: u16 = 0;
+pub const RIVE_ASSET_IMAGE: u16 = 1;
+pub const RIVE_ASSET_FONT: u16 = 2;
+pub const RIVE_ASSET_AUDIO: u16 = 3;
+
+/// Describes one asset the file references, passed by const-pointer to a
+/// [`RiveAssetLoadFn`]. The `*const c_char` fields are NUL-terminated and valid
+/// only for the duration of the callback; `in_band_bytes` is the embedded
+/// content (null / 0 when the asset is referenced out-of-band).
+#[repr(C)]
+pub struct RiveAssetRequest {
+    pub name: *const c_char,
+    pub file_extension: *const c_char,
+    pub cdn_uuid: *const c_char,
+    pub asset_id: u32,
+    pub asset_type: u16,
+    pub in_band_bytes: *const u8,
+    pub in_band_len: usize,
+}
+
+/// Host loader callback (see [`rive_file_load_with_assets`]). Invoked once per
+/// referenced asset during the load. Return 1 and set `*out_bytes`/`*out_len` to
+/// encoded asset bytes to supply them; return 0 to decline (rive falls back to
+/// in-band content). The supplied buffer need only outlive the call.
+pub type RiveAssetLoadFn = extern "C" fn(
+    user: *mut std::os::raw::c_void,
+    req: *const RiveAssetRequest,
+    out_bytes: *mut *const u8,
+    out_len: *mut usize,
+) -> i32;
+
 extern "C" {
     /// Returns a static description of the most recent shim failure.
     pub fn rive_last_error() -> *const c_char;
@@ -134,6 +169,16 @@ extern "C" {
         ctx: *mut RiveRenderContext,
         bytes: *const u8,
         len: usize,
+    ) -> *mut RiveFile;
+    /// Like [`rive_file_load`] but installs `load_fn` as the out-of-band asset
+    /// loader (called synchronously per referenced asset during the load;
+    /// neither `load_fn` nor `user` is retained afterwards).
+    pub fn rive_file_load_with_assets(
+        ctx: *mut RiveRenderContext,
+        bytes: *const u8,
+        len: usize,
+        load_fn: RiveAssetLoadFn,
+        user: *mut std::os::raw::c_void,
     ) -> *mut RiveFile;
     pub fn rive_file_destroy(file: *mut RiveFile);
 

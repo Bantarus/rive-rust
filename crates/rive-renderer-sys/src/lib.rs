@@ -431,6 +431,34 @@ extern "C" {
         out: *mut u8,
     ) -> RiveStatus;
 
+    // ===== Text runs (get/set a TextValueRun's string) ======================
+    /// `name` is the run's authored name; `path` selects a nested artboard
+    /// ('/'-style) or is null/empty for the top-level artboard. `_get` /
+    /// `_name_at` use the two-call buffer protocol (buf=null, cap=0 to size).
+    /// Introspection (`_count` / `_name_at`) lists top-level runs only.
+    pub fn rive_artboard_text_set(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        path: *const c_char,
+        value: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_artboard_text_get(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        path: *const c_char,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_artboard_text_run_count(artboard: *mut RiveArtboard) -> u32;
+    pub fn rive_artboard_text_run_name_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+
     pub fn rive_frame_begin(
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,

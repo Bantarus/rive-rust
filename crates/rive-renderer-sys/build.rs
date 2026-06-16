@@ -90,6 +90,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shim/rive_shim_internal.hpp");
     println!("cargo:rerun-if-changed=shim/rive_shim.cpp");
     println!("cargo:rerun-if-changed=shim/rive_shim_viewmodel.cpp");
+    println!("cargo:rerun-if-changed=shim/rive_shim_text.cpp");
     for var in [
         "CC",
         "CXX",
@@ -379,7 +380,8 @@ fn compile_shim(
         .include(renderer_dir.join("rive_vk_bootstrap/include"))
         .file(shim_dir.join("rive_shim.cpp"))
         // Per-feature shim TUs (see rive_shim_internal.hpp). One .cpp per feature.
-        .file(shim_dir.join("rive_shim_viewmodel.cpp"));
+        .file(shim_dir.join("rive_shim_viewmodel.cpp"))
+        .file(shim_dir.join("rive_shim_text.cpp"));
 
     if windows {
         // Match the rive libs (built with clang-cl): compiling the shim with

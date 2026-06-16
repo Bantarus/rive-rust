@@ -81,7 +81,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | View-model change / trigger observation | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property ✅ (floor). Supersedes the deprecated events read-back below. **Deferred:** zero-copy observe (render→main back-channel, like watch read-back). |
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
 | Named artboard / state-machine selection | ✅ | [artboards](https://rive.app/docs/runtimes/artboards) | `ArtboardSelector` / `StateMachineSelector` honor **Default / ByName / ByIndex** in BOTH tiers (`File::artboard_named/_at`, `Artboard::state_machine_named/_at`); discover names via `artboard_names()` / `state_machine_names()` |
-| Runtime text value get/set | 🔜 | — | `TextValueRun` — set/read a text run's string |
+| Runtime text value get/set | ✅ | — | `TextValueRun` get/set by authored name (top-level or a nested artboard via a `/`-path). **`RiveText`** component queues set-writes (both tiers — `floor` inline, `zero_copy` ferried like view-model writes); `Artboard::text_get/text_set/text_set_in/text_run_names` at the safe layer. Setting re-shapes on the next advance. Bevy read-back deferred (safe-layer `text_get` covers it) |
 | Out-of-band asset loading (images/fonts/audio) | ✅ | [loading-assets](https://rive.app/docs/runtimes/loading-assets) | `FileAssetLoader` callback → supply the **Referenced** (not Embedded) images / fonts / audio a `.riv` needs. **`RiveAssets`** component (name → encoded bytes), both tiers; `Context::load_file_with_assets` at the safe layer. Host returns encoded file bytes (PNG/JPEG/WEBP, font, audio); rive decodes via the context factory (libpng/jpeg/webp + harfbuzz). A name not in the map (or decode failure) falls back to in-band content |
 | Audio playback | 🔜 | — | `WITH_RIVE_AUDIO` + an engine audio bridge (route to the host mixer) |
 | Joystick / gamepad / keyboard / focus input | 🔜 | — | `Scene` gamepad/keyboard + `FocusManager`; for game-controlled rigs |
@@ -92,12 +92,13 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Runtime text get/set** (`TextValueRun`); **atlas-tile pointer mapping** (zero-copy);
-   **audio bridge** (route decoded audio assets to the host mixer).
+1. **Atlas-tile pointer mapping** (zero-copy — tile-aware pointer inversion for atlas faces);
+   **audio bridge** (route decoded audio assets to the host mixer); **animation playback
+   controls** (seek / pause / per-anim speed).
 
-*(Recently shipped: **out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`, both
-tiers; view-model **change/trigger observation** — the modern events replacement;
-**named artboard / state-machine selection** — Default/ByName/ByIndex in both tiers.)*
+*(Recently shipped: **runtime text get/set** — `TextValueRun` / `RiveText`, both tiers;
+**out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`, both tiers; view-model
+**change/trigger observation** — the modern events replacement.)*
 
 (State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
 both deprecated; view-model data binding is the modern write *and* read channel. See Excluded.)

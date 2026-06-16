@@ -94,6 +94,10 @@ pub use view_model::{RiveValueKind, RiveViewModelInstance};
 mod assets;
 pub use assets::{AssetRequest, AssetType};
 
+// Runtime text-run get/set — extends `Artboard` with `text_*` methods (no new
+// public types; the impl block lives in its own module per the feature convention).
+mod text;
+
 /// Errors returned by the safe wrapper.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -141,6 +145,10 @@ pub enum Error {
     /// passed across the C ABI).
     #[error("view-model property path contained an interior NUL byte")]
     InvalidPath,
+    /// A runtime text-run operation failed: no run with that name (on the given
+    /// path), or a name/path/value contained an interior NUL byte.
+    #[error("text run operation failed: {0}")]
+    Text(String),
 }
 
 /// Returns the shim's most recent error string (empty if none).

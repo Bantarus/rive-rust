@@ -135,6 +135,33 @@ fn main() -> Result<()> {
         println!("  fit/align: {fa:?}");
     }
 
+    // RIVE_TEXT_LIST: print the top-level text-run names + current values.
+    // RIVE_TEXT_SET="name=value": set that run, then read it back; the change
+    // shows in the rendered PNG. RIVE_TEXT_GET="name": just read a run. Proves
+    // runtime text get/set + introspection.
+    if std::env::var("RIVE_TEXT_LIST").is_ok() {
+        let names = artboard.text_run_names();
+        println!("  text runs ({}):", names.len());
+        for name in &names {
+            let val = artboard.text_get(name).unwrap_or_default();
+            println!("    {name:?} = {val:?}");
+        }
+    }
+    if let Ok(name) = std::env::var("RIVE_TEXT_GET") {
+        println!("  text get {name:?} = {:?}", artboard.text_get(&name)?);
+    }
+    if let Ok(spec) = std::env::var("RIVE_TEXT_SET") {
+        let (name, value) = spec
+            .split_once('=')
+            .context("RIVE_TEXT_SET must be name=value")?;
+        artboard.text_set(name, value)?;
+        println!(
+            "  text set {name:?} -> {:?} (read-back: {:?})",
+            value,
+            artboard.text_get(name)?
+        );
+    }
+
     // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
     // recursing into nested view models and list items via the handle API — use it
     // to discover real property names for RIVE_VM_SET / RIVE_VM_GET.

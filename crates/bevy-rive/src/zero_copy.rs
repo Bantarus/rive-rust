@@ -90,7 +90,7 @@ use rive_renderer::{
 
 use crate::{
     RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RivePlugin, RivePointer, RiveSurface,
-    RiveTarget, RiveValue, RiveViewModel,
+    RiveTarget, RiveText, RiveValue, RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -243,8 +243,9 @@ impl Plugin for RiveZeroCopyPlugin {
         // same frame, before any consumer reads them.
         app.init_resource::<RiveAtlasState>()
             .add_systems(Update, (allocate_display_images, allocate_atlas_slots))
-            // M-DATA: stage view-model writes in `Last` (after gameplay, before extract).
-            .add_systems(Last, stage_vm_writes);
+            // M-DATA / M-TEXT: stage view-model + text-run writes in `Last` (after
+            // gameplay, before extract), so the read-only extract can ferry them.
+            .add_systems(Last, (stage_vm_writes, stage_text_writes));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             error!("rive zero-copy: RenderApp missing (enable bevy_render)");
@@ -1128,6 +1129,11 @@ struct ExtractedRive {
     /// floor advance system's inline `apply_writes`. Empty for faces with no
     /// `RiveViewModel` or no queued writes. Reads/watch are not ferried (floor-only).
     vm_writes: Vec<(String, RiveValue)>,
+    /// M-TEXT: this frame's text-run set writes (from a `RiveText`), applied to
+    /// the instance in the node before advance — the zero-copy analogue of the
+    /// floor advance system's inline `apply_text_writes`. Empty for faces with no
+    /// `RiveText` or no queued writes. Staged main-world by `stage_text_writes`.
+    text_writes: Vec<crate::text::TextWrite>,
     /// Artboard / state-machine selectors (default / by name / by index), honored
     /// once when the node first builds this entity's instance. Ferried each frame
     /// but read only at build time; cheap for the common `Default` (a bare enum —
@@ -1521,6 +1527,41 @@ fn stage_vm_writes(
     }
 }
 
+/// M-TEXT analogue of [`stage_vm_writes`]: stages each entity's queued
+/// [`RiveText`] writes (`writes` → `staged`) so the read-only extract can ferry
+/// them. Same readiness gate — a write for a not-yet-extractable face stays
+/// queued in `writes` (retained across the async-load / unallocated / culled
+/// window) rather than being stranded in `staged` and silently dropped.
+fn stage_text_writes(
+    mut query: Query<(
+        Entity,
+        &RiveAnimation,
+        &RiveTarget,
+        Option<&RiveActive>,
+        &mut RiveText,
+    )>,
+    files: Res<Assets<RiveFile>>,
+    atlas: Res<RiveAtlasState>,
+) {
+    for (entity, anim, target, active, mut text) in &mut query {
+        if !text.has_staging_work() {
+            continue;
+        }
+        // Mirror extract_rive_instances' readiness gate (asset loaded + not culled +
+        // surface allocated). Keep in sync with stage_vm_writes / extract.
+        let ready = files.get(&anim.handle).is_some()
+            && active.is_none_or(|a| a.0)
+            && if target.atlas.is_some() {
+                atlas.locs.contains_key(&entity)
+            } else {
+                target.image != Handle::default()
+            };
+        if ready {
+            text.stage_writes();
+        }
+    }
+}
+
 /// Ferries per-entity `Send` data from the main world into the [`ExtractedRives`]
 /// render-world resource each frame. Only entities whose `.riv` is loaded *and*
 /// whose display image is allocated are included.
@@ -1548,6 +1589,7 @@ fn extract_rive_instances(
             Option<&RiveFit>,
             Option<&RivePointer>,
             Option<&RiveAssets>,
+            Option<&RiveText>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1557,7 +1599,7 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm, fit, pointer, assets) in &query {
+    for (entity, anim, target, active, vm, fit, pointer, assets, text) in &query {
         let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
@@ -1581,6 +1623,7 @@ fn extract_rive_instances(
                 // Paused: skip advance, so applying writes (which take effect on
                 // advance) is pointless this frame — ferry none.
                 vm_writes: Vec::new(),
+                text_writes: Vec::new(),
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
                 assets: assets.cloned(),
@@ -1629,6 +1672,7 @@ fn extract_rive_instances(
             // render world, where this tier's instances live). `stage_vm_writes`
             // populated `staged` from `writes` earlier this frame.
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
+            text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
             assets: assets.cloned(),
@@ -1899,6 +1943,11 @@ impl Node for RiveFillNode {
             if apply_vm_writes && !item.vm_writes.is_empty() {
                 crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
             }
+            // M-TEXT: apply this frame's text-run set writes before advance too (same
+            // once-per-frame gate; text sets are idempotent so the gate is just an opt).
+            if apply_vm_writes && !item.text_writes.is_empty() {
+                crate::text::apply_text_writes_slice(&inst.artboard, &item.text_writes);
+            }
             // M-SCALE: time the per-instance state-machine tick (previously untimed
             // — it runs before the record span, so the collector never saw it).
             let advance_t0 = std::time::Instant::now();
@@ -2153,6 +2202,10 @@ impl Node for RiveFillNode {
                     // dedicated-path apply above), gated once per visual frame.
                     if apply_vm_writes && !item.vm_writes.is_empty() {
                         crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
+                    }
+                    // M-TEXT: apply text-run set writes before advance (see dedicated path).
+                    if apply_vm_writes && !item.text_writes.is_empty() {
+                        crate::text::apply_text_writes_slice(&inst.artboard, &item.text_writes);
                     }
                     // Fit/alignment within the tile (draw_viewport reads it). Absent
                     // `RiveFit` == contain/center — the historical per-tile fit.

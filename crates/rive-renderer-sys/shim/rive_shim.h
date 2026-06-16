@@ -252,6 +252,24 @@ RiveStatus         rive_vmi_get_string(RiveViewModelInstance*, const char* path,
 RiveStatus         rive_vmi_get_enum_index(RiveViewModelInstance*, const char* path, uint32_t* out);
 RiveStatus         rive_vmi_flush_changed(RiveViewModelInstance*, const char* path, uint8_t* out);
 
+/* --- Text runs (get/set a TextValueRun's string) ----------------------------
+ * Read / write a named text run's string at runtime. `name` is the run's
+ * authored name; `path` selects a NESTED artboard ('/'-style, per
+ * ArtboardInstance::getTextRun), or is NULL/"" for the top-level artboard.
+ * Setting re-shapes the run on the next advance/draw. `_get`/`_name_at` use the
+ * two-call buffer protocol (buf=NULL, cap=0 to size first; bytes are NOT
+ * NUL-terminated). Return nonzero (+ rive_last_error) on a missing run / bad
+ * handle. Introspection (`_count`/`_name_at`) lists TOP-LEVEL runs only.
+ * Implemented in rive_shim_text.cpp. */
+RiveStatus         rive_artboard_text_set(RiveArtboard*, const char* name,
+                                          const char* path, const char* value);
+RiveStatus         rive_artboard_text_get(RiveArtboard*, const char* name,
+                                          const char* path, char* buf, size_t cap,
+                                          size_t* out_len);
+uint32_t           rive_artboard_text_run_count(RiveArtboard*);
+RiveStatus         rive_artboard_text_run_name_at(RiveArtboard*, uint32_t index,
+                                                  char* buf, size_t cap, size_t* out_len);
+
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 
 /* Begins a frame against `target`, clearing to the given straight (non-

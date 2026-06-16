@@ -146,6 +146,13 @@ pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 mod assets;
 pub use assets::RiveAssets;
 
+// Per-feature module. Runtime text-run set: the `RiveText` component queues
+// `TextValueRun` string writes, applied before advance in both tiers (`floor`
+// inline; `zero_copy` ferried to the render world like view-model writes). Reads
+// are at the safe layer (`Artboard::text_get`).
+mod text;
+pub use text::RiveText;
+
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
 /// This is the whole public surface a game touches. The floor's three-step flow —
@@ -158,8 +165,8 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveFile, RiveFit,
-        RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveValue,
-        RiveViewModel, StateMachineSelector,
+        RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveText,
+        RiveValue, RiveViewModel, StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
@@ -835,7 +842,7 @@ fn instantiate_rive_instances(
 #[cfg(feature = "floor")]
 #[expect(
     clippy::type_complexity,
-    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> control inputs"
+    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> + Option<&mut RiveText> control inputs"
 )]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
@@ -850,13 +857,14 @@ fn advance_and_upload_rive(
         Option<&RivePointer>,
         Option<&mut RiveViewModel>,
         Option<&RiveFit>,
+        Option<&mut RiveText>,
     )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, anim, target, pointer, mut view_model, fit) in &mut query {
+    for (entity, anim, target, pointer, mut view_model, fit, mut text) in &mut query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
@@ -902,6 +910,12 @@ fn advance_and_upload_rive(
         if let Some(vm) = view_model.as_deref_mut() {
             crate::view_model::apply_writes(vm, &inst.artboard);
             crate::view_model::prime_observed(vm, &inst.artboard);
+        }
+
+        // Apply queued text-run set writes BEFORE advancing too, so the new text
+        // is shaped + visible this tick (same rationale as the view-model writes).
+        if let Some(text) = text.as_deref_mut() {
+            crate::text::apply_text_writes(text, &inst.artboard);
         }
 
         // Guard the native state machine against NaN/negative/non-finite steps

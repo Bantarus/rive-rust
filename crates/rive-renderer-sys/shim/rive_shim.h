@@ -286,7 +286,17 @@ RiveStatus         rive_artboard_text_run_name_at(RiveArtboard*, uint32_t index,
 uint8_t            rive_audio_is_available(void); /* 1 if audio compiled in */
 uint8_t            rive_audio_start(void);        /* open/resume device; 1 if engine present */
 void               rive_audio_stop(void);         /* pause + release device (no-op if none) */
-void               rive_audio_set_volume(float volume); /* 0 = mute, 1 = unity */
+void               rive_audio_set_volume(float volume); /* 0 = mute, 1 = unity (both modes) */
+
+/* External (host-mixer) mode — --with_rive_audio=external (EXTERNAL_RIVE_AUDIO_ENGINE,
+ * the `audio-external` cargo feature). rive owns NO device; the host PULLS the mixed
+ * interleaved f32 PCM and routes it to its own mixer. The engine clock advances only
+ * as the host reads. Built in any other mode these are inert stubs (report 0 / write
+ * nothing) for a stable ABI. `frames` holds num_frames * channels() floats. */
+uint32_t           rive_audio_channels(void);     /* PCM channels (default 2); 0 if N/A */
+uint32_t           rive_audio_sample_rate(void);  /* PCM sample rate Hz (default 48000) */
+uint64_t           rive_audio_read_frames(float* frames, uint64_t num_frames); /* -> frames written */
+uint8_t            rive_audio_sum_frames(float* frames, uint64_t num_frames);  /* mix-add; 1 = ok */
 
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 

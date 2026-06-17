@@ -73,6 +73,10 @@ const VMA_DIR: &str = "GPUOpen-LibrariesAndSDKs_VulkanMemoryAllocator_v3.3.0";
 struct RiveLibBuild<'a> {
     config: &'a str,
     no_lto: bool,
+    /// rive's audio mode: "system" (rive owns the OS device + auto-plays) or
+    /// "external" (rive owns no device; the host pulls the mixed PCM). Selected by
+    /// the `audio-external` cargo feature.
+    audio_mode: &'a str,
 }
 
 fn main() {
@@ -188,15 +192,28 @@ fn main() {
     // existing synced trees (and the prebuilt SPIR-V headers there) are undisturbed.
     // RIVE_BUILD_OUT is anchored to premake's CWD (renderer/), so `--out` is
     // concatenated onto it and must be RELATIVE.
+    // Audio mode (cargo feature `audio-external`). Cargo re-runs build.rs when the
+    // feature set changes, so CARGO_FEATURE_* is an authoritative trigger. External
+    // mode is a DIFFERENT compile of librive + miniaudio (EXTERNAL_RIVE_AUDIO_ENGINE /
+    // MA_NO_DEVICE_IO change the `AudioEngine` ABI and miniaudio's device path), so it
+    // builds into its OWN out-dir (`-extaudio` suffix): switching modes never links a
+    // stale archive (the make-keys-on-source-timestamps, not on -D flags, gotcha), at
+    // the cost of a parallel tree + a one-time shader regen — exactly as the
+    // debug/release out-dir split already behaves.
+    let audio_external = std::env::var_os("CARGO_FEATURE_AUDIO_EXTERNAL").is_some();
+    let audio_mode = if audio_external { "external" } else { "system" };
+    let audio_suffix = if audio_external { "-extaudio" } else { "" };
+
     let out_rel = if rive_config == "release" {
-        "out/rive-rust-m0-release"
+        format!("out/rive-rust-m0-release{audio_suffix}")
     } else {
-        "out/rive-rust-m0"
+        format!("out/rive-rust-m0{audio_suffix}")
     };
-    let rive_out = renderer_dir.join(out_rel);
+    let rive_out = renderer_dir.join(&out_rel);
     let lib_build = RiveLibBuild {
         config: &rive_config,
         no_lto,
+        audio_mode,
     };
 
     if windows {
@@ -205,7 +222,7 @@ fn main() {
             &renderer_dir,
             &premake_build_dir,
             &deps_cache,
-            out_rel,
+            &out_rel,
             &rive_out,
             &lib_build,
         );
@@ -215,14 +232,14 @@ fn main() {
             &renderer_dir,
             &premake_build_dir,
             &deps_cache,
-            out_rel,
+            &out_rel,
             &rive_out,
             &lib_build,
         );
     }
 
     verify_archives(&rive_out, windows);
-    compile_shim(&shim_dir, &rive_root, &renderer_dir, &rive_out, &deps_cache, windows);
+    compile_shim(&shim_dir, &rive_root, &renderer_dir, &rive_out, &deps_cache, windows, audio_external);
     emit_link_directives(&rive_out, windows);
 }
 
@@ -248,6 +265,12 @@ fn build_rive_libs_unix(
     // premake5 generates gmake2 Makefiles (and runs the shader build). `--no-lto`
     // (a release-only rive option) is appended for non-LTO linkers; `Option<&str>`
     // is a 0-or-1 element iterator, so it is a no-op when LTO stays on.
+    //
+    // Audio: `=system` (default) — rive owns a miniaudio device that plays audio
+    // events straight to the OS output (WITH_RIVE_AUDIO). `=external` (the
+    // `audio-external` cargo feature) — rive owns NO device; the host pulls the mixed
+    // PCM for its own mixer (EXTERNAL_RIVE_AUDIO_ENGINE + MA_NO_DEVICE_IO).
+    let audio_arg = format!("--with_rive_audio={}", build.audio_mode);
     run(
         Command::new(premake5)
             .current_dir(renderer_dir)
@@ -263,10 +286,7 @@ fn build_rive_libs_unix(
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--with_rive_scripting",
-                // System mode: rive owns a miniaudio device that plays audio events
-                // straight to the OS output (WITH_RIVE_AUDIO). `=external` would
-                // instead expose a PCM pull for a host mixer — a later slice.
-                "--with_rive_audio=system",
+                &audio_arg,
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),
@@ -308,6 +328,7 @@ fn build_rive_libs_windows(
     // prebuilt SPIR-V headers (no glslangValidator/spirv-opt), `d3d` is generated
     // by the Windows SDK's fxc. Requires sh+make+python+fxc on PATH (win.cmd).
     // No CC/CXX env: vs2022 ignores them and selects ClangCL from the project.
+    let audio_arg = format!("--with_rive_audio={}", build.audio_mode);
     run(
         Command::new(premake5)
             .current_dir(renderer_dir)
@@ -321,10 +342,9 @@ fn build_rive_libs_windows(
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--with_rive_scripting",
-                // System mode: rive owns a miniaudio device that plays audio events
-                // straight to the OS output (WITH_RIVE_AUDIO). `=external` would
-                // instead expose a PCM pull for a host mixer — a later slice.
-                "--with_rive_audio=system",
+                // Audio mode: `=system` (default) or `=external` (the `audio-external`
+                // cargo feature → host-pulled PCM). See the gmake2 builder for detail.
+                &audio_arg,
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),
@@ -361,6 +381,7 @@ fn compile_shim(
     rive_out: &Path,
     deps_cache: &Path,
     windows: bool,
+    audio_external: bool,
 ) {
     let vk_headers_inc = deps_cache.join(VULKAN_HEADERS_DIR).join("include");
     let vma_inc = deps_cache.join(VMA_DIR).join("include");
@@ -401,6 +422,17 @@ fn compile_shim(
         .file(shim_dir.join("rive_shim_viewmodel.cpp"))
         .file(shim_dir.join("rive_shim_text.cpp"))
         .file(shim_dir.join("rive_shim_audio.cpp"));
+
+    // External audio mode (cargo feature `audio-external`) gives `rive::AudioEngine`
+    // an extra `#ifdef EXTERNAL_RIVE_AUDIO_ENGINE` member (`m_readFrames`) and exposes
+    // its `readAudioFrames`/`sumAudioFrames` methods. The shim includes
+    // audio_engine.hpp, so it MUST define the same flag or the class layout mismatches
+    // across the shim<->librive boundary (the same ABI-parity rule as WITH_RIVE_AUDIO).
+    // MA_NO_DEVICE_IO / MA_NO_RESOURCE_MANAGER only gate miniaudio.h (not included
+    // here), so they are not needed in the shim.
+    if audio_external {
+        build.define("EXTERNAL_RIVE_AUDIO_ENGINE", None);
+    }
 
     if windows {
         // Match the rive libs (built with clang-cl): compiling the shim with

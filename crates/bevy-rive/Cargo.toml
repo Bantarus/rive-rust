@@ -39,6 +39,15 @@ zero_copy = [
     "bevy/raw_vulkan_init",
 ]
 
+# Audio host-mixer routing (opt-in; tier-agnostic — composes with floor or zero_copy).
+# Switches the native build to rive's `external` audio mode (rive owns no device) and
+# routes the mixed PCM into Bevy's own audio graph: pulls `bevy_audio` (rodio + cpal)
+# and adds a `RiveAudioStream` `Decodable` source so a `.riv`'s audio plays through
+# `bevy_audio` like any other sound (unified mixing under Bevy's `GlobalVolume`),
+# instead of rive owning a separate OS device (the default `system` mode). The
+# `RiveAudio` volume/mute resource still applies (as rive's master gain on the mix).
+audio-external = ["rive-renderer/audio-external", "bevy/bevy_audio"]
+
 [dependencies]
 rive-renderer = { path = "../rive-renderer" }
 # The plugin only defines an asset + loader, ECS components/systems, and fills a
@@ -112,6 +121,13 @@ required-features = ["floor"]
 name = "interactive"
 path = "../../examples/interactive.rs"
 required-features = ["floor"]
+
+# External-audio counterpart: the same interactive window, but rive's audio is routed
+# THROUGH Bevy's audio graph (rive owns no device) — demonstrates `audio-external`.
+[[example]]
+name = "interactive_external_audio"
+path = "../../examples/interactive_external_audio.rs"
+required-features = ["floor", "audio-external"]
 
 # The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
 [[example]]

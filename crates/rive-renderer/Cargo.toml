@@ -8,6 +8,13 @@ repository.workspace = true
 description = "Safe RAII wrapper over the native Rive Renderer (offscreen Vulkan), shaped for a future rive-rs Renderer impl."
 publish = false
 
+[features]
+# Audio host-mixer routing: rive owns no device; the host pulls the mixed PCM.
+# Forwards to `rive-renderer-sys` (which drives the native build) and gates the
+# `audio::{channels,sample_rate,read_frames,sum_frames}` pull API. See that crate's
+# feature + docs/feature-support.md.
+audio-external = ["rive-renderer-sys/audio-external"]
+
 [dependencies]
 rive-renderer-sys = { path = "../rive-renderer-sys" }
 thiserror = "2"

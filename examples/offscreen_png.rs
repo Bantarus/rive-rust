@@ -317,6 +317,22 @@ fn main() -> Result<()> {
         state_machine.set_pointer_tile(tw, th);
         println!("  pointer tile: {tw}x{th}");
     }
+    // RIVE_FLICK="x0,y0,x1,y1[,drag_frames]" simulates a press-drag-release gesture
+    // (target-pixel space) to drive interaction-gated content — e.g. flicking the
+    // big-wheel to spin it, which fires its timeline audio. Press at (x0,y0) on frame
+    // 0, drag linearly to (x1,y1) over drag_frames (default 8), release, then keep
+    // advancing. Pair with RIVE_DUMP_PCM to capture the resulting audio (external mode).
+    let flick: Option<(f32, f32, f32, f32, u32)> = std::env::var("RIVE_FLICK").ok().and_then(|s| {
+        let p: Vec<f32> = s.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+        match p.len() {
+            4 => Some((p[0], p[1], p[2], p[3], 8)),
+            5 => Some((p[0], p[1], p[2], p[3], p[4] as u32)),
+            _ => None,
+        }
+    });
+    if let Some(f) = flick {
+        println!("  flick gesture: {f:?}");
+    }
     // RIVE_VM_OBSERVE="path1,path2" observes change/trigger fires via the modern
     // data-binding read-back (the non-deprecated replacement for events read-back):
     // PRIME each path (subscribe before advancing), then after every advance report
@@ -336,8 +352,38 @@ fn main() -> Result<()> {
         let _ = artboard.vm_flush_changed(path);
     }
     let mut observe_fires: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    for _ in 0..advance_frames {
-        if let Some((px, py)) = pointer {
+    // RIVE_DUMP_PCM="out.wav" (audio-external feature only): in external mode rive owns
+    // NO device — the host pulls the mixed PCM. This pulls one video-frame of audio
+    // (sample_rate/60 frames) after each advance and writes a 16-bit WAV, proving rive
+    // mixes REAL audio into host-pulled PCM. The reported peak/RMS being non-zero is the
+    // CI-friendly assertion that audio is flowing without needing a device to open.
+    #[cfg(feature = "audio-external")]
+    let dump_path = std::env::var("RIVE_DUMP_PCM").ok();
+    #[cfg(feature = "audio-external")]
+    let (dump_channels, dump_sr) = (
+        rive_renderer::audio::external::channels().max(1),
+        rive_renderer::audio::external::sample_rate().max(1),
+    );
+    #[cfg(feature = "audio-external")]
+    let dump_frames_per_advance = (dump_sr / 60).max(1) as usize;
+    #[cfg(feature = "audio-external")]
+    let mut dump_samples: Vec<f32> = Vec::new();
+    #[cfg(feature = "audio-external")]
+    if dump_path.is_some() {
+        println!("  audio external: pulling {dump_channels}ch @ {dump_sr}Hz, {dump_frames_per_advance} frames/advance");
+    }
+    for i in 0..advance_frames {
+        if let Some((x0, y0, x1, y1, drag)) = flick {
+            let drag = drag.max(1);
+            if i == 0 {
+                state_machine.pointer_down(x0, y0, width, height);
+            } else if i <= drag {
+                let t = i as f32 / drag as f32;
+                state_machine.pointer_move(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, width, height);
+            } else if i == drag + 1 {
+                state_machine.pointer_up(x1, y1, width, height);
+            }
+        } else if let Some((px, py)) = pointer {
             state_machine.pointer_move(px, py, width, height);
         }
         state_machine.advance(FRAME_DT_SECONDS);
@@ -346,10 +392,22 @@ fn main() -> Result<()> {
                 *observe_fires.entry(path.clone()).or_insert(0) += 1;
             }
         }
+        // External audio: pull this frame's mixed PCM right after advance (which fired
+        // any audio events), keeping the engine clock in lockstep with the timeline.
+        #[cfg(feature = "audio-external")]
+        if dump_path.is_some() {
+            let mut buf = vec![0.0f32; dump_frames_per_advance * dump_channels as usize];
+            let n = rive_renderer::audio::external::read_frames(&mut buf);
+            dump_samples.extend_from_slice(&buf[..n * dump_channels as usize]);
+        }
         // Pace to wall-clock in realtime mode so audio plays audibly (see above).
         if realtime_secs.is_some() {
             std::thread::sleep(std::time::Duration::from_secs_f32(FRAME_DT_SECONDS));
         }
+    }
+    #[cfg(feature = "audio-external")]
+    if let Some(path) = dump_path {
+        write_wav_and_report(&path, &dump_samples, dump_channels as u16, dump_sr)?;
     }
     for path in &observe {
         let n = observe_fires.get(path).copied().unwrap_or(0);
@@ -475,5 +533,51 @@ fn write_png(path: &std::path::Path, width: u32, height: u32, rgba: &[u8]) -> Re
     encoder.set_depth(png::BitDepth::Eight);
     let mut writer = encoder.write_header()?;
     writer.write_image_data(rgba)?;
+    Ok(())
+}
+
+/// Reports peak/RMS of host-pulled rive PCM and writes it as a 16-bit PCM WAV (the
+/// `audio-external` proof — no audio crate needed). `samples` is interleaved f32.
+#[cfg(feature = "audio-external")]
+fn write_wav_and_report(path: &str, samples: &[f32], channels: u16, sample_rate: u32) -> Result<()> {
+    let peak = samples.iter().fold(0.0f32, |m, &s| m.max(s.abs()));
+    let rms = if samples.is_empty() {
+        0.0
+    } else {
+        (samples.iter().map(|&s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    };
+    let frames = samples.len() / channels.max(1) as usize;
+    println!(
+        "  audio external: pulled {frames} frames ({:.2}s), peak={peak:.4} rms={rms:.4} -> {path}",
+        frames as f32 / sample_rate.max(1) as f32
+    );
+    if peak == 0.0 {
+        eprintln!("  WARNING: pulled PCM is pure silence (no audio events fired?)");
+    }
+
+    // Minimal canonical 16-bit PCM WAV (RIFF) — header + clamped i16 samples.
+    let bits = 16u16;
+    let block_align = channels * bits / 8;
+    let byte_rate = sample_rate * u32::from(block_align);
+    let data_bytes = (samples.len() * 2) as u32;
+    let mut out = Vec::with_capacity(44 + samples.len() * 2);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(36 + data_bytes).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    out.extend_from_slice(&channels.to_le_bytes());
+    out.extend_from_slice(&sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_bytes.to_le_bytes());
+    for &s in samples {
+        let v = (s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16;
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    std::fs::write(path, out)?;
     Ok(())
 }

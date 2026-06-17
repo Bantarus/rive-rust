@@ -155,9 +155,13 @@ pub use text::RiveText;
 
 // Per-feature module. Audio control: the optional `RiveAudio` resource sets the
 // master volume / mute over rive's process-global audio engine (audio plays
-// automatically during advance in both tiers; `--with_rive_audio=system`).
+// automatically during advance in both tiers; `--with_rive_audio=system`). With the
+// `audio-external` feature it ALSO routes rive's mixed PCM into Bevy's own audio graph
+// (`RiveExternalAudioPlugin` + the `RiveAudioStream` source).
 mod audio;
 pub use audio::RiveAudio;
+#[cfg(feature = "audio-external")]
+pub use audio::{monitor_peak, RiveAudioDecoder, RiveAudioStream, RiveExternalAudioPlugin};
 
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
@@ -184,6 +188,10 @@ pub mod prelude {
     // Zero-copy (opt-in): the Vulkan fast-path plugin + its graph anchor + device wiring.
     #[cfg(feature = "zero_copy")]
     pub use crate::{install_interlock_device_callback, RiveGraphAnchor, RiveZeroCopyPlugin};
+
+    // External audio (opt-in): route rive's mixed PCM into Bevy's audio graph.
+    #[cfg(feature = "audio-external")]
+    pub use crate::{monitor_peak, RiveAudioStream, RiveExternalAudioPlugin};
 }
 
 /// The texture format M1a allocates the [`RiveTarget::image`] in.

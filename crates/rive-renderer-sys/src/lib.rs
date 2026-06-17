@@ -477,6 +477,16 @@ extern "C" {
     pub fn rive_audio_stop();
     pub fn rive_audio_set_volume(volume: f32);
 
+    // External (host-mixer) mode — `audio-external` feature
+    // (`--with_rive_audio=external`). rive owns no device; the host PULLS the mixed
+    // interleaved f32 PCM and routes it to its own mixer. `read_frames` returns the
+    // frame count written; `sum_frames` ADDS into an existing buffer (1 = ok). Built
+    // in any other mode these report 0 / write nothing (inert stubs).
+    pub fn rive_audio_channels() -> u32;
+    pub fn rive_audio_sample_rate() -> u32;
+    pub fn rive_audio_read_frames(frames: *mut f32, num_frames: u64) -> u64;
+    pub fn rive_audio_sum_frames(frames: *mut f32, num_frames: u64) -> u8;
+
     pub fn rive_frame_begin(
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,

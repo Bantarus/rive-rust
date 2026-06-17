@@ -12,6 +12,15 @@ publish = false
 links = "rive_shim"
 build = "build.rs"
 
+[features]
+# Audio host-mixer routing (`--with_rive_audio=external`). OFF by default = rive's
+# `system` mode (it owns a miniaudio device and plays to the OS automatically during
+# advance). ON: rive owns NO device (`EXTERNAL_RIVE_AUDIO_ENGINE` + `MA_NO_DEVICE_IO`)
+# and the host pulls the mixed PCM (`rive_audio_read_frames`/`sum_frames`) into its own
+# mixer. A whole-build, mutually-exclusive choice — see build.rs (it flips the premake
+# flag, matches the shim's `AudioEngine` ABI, and builds into a separate out-dir).
+audio-external = []
+
 [build-dependencies]
 cc = "1"
 

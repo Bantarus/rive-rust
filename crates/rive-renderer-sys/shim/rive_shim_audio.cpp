@@ -10,6 +10,10 @@
  *   - start / stop:  open / pause the device (resume / mute-all + release).
  *   - set_volume:    master gain for all rive audio (0 = mute, 1 = unity).
  *
+ * With `--with_rive_audio=external` (EXTERNAL_RIVE_AUDIO_ENGINE) rive owns NO device;
+ * instead the host PULLS the mixed PCM via the channels/sample_rate/read_frames/
+ * sum_frames entry points below and routes it into its own mixer.
+ *
  * Built without WITH_RIVE_AUDIO (audio off), the entry points still exist (stable
  * ABI) but report unavailable / no-op, so the Rust layer links identically and can
  * degrade gracefully.
@@ -70,7 +74,8 @@ extern "C" void rive_audio_stop(void)
 // Master volume for ALL rive audio: 0.0 = silent (mute), 1.0 = unity, > 1.0
 // amplifies. Applies to the runtime engine's miniaudio engine; creates the engine
 // if needed so the setting sticks for subsequently-played sounds. No-op when audio
-// is unavailable.
+// is unavailable. Valid in BOTH modes: in external mode it scales the mixed PCM the
+// host pulls (composes with the host mixer's own gain).
 extern "C" void rive_audio_set_volume(float volume)
 {
 #ifdef WITH_RIVE_AUDIO
@@ -81,3 +86,80 @@ extern "C" void rive_audio_set_volume(float volume)
     (void)volume;
 #endif
 }
+
+/*
+ * External (host-mixer) mode — `--with_rive_audio=external` (the `audio-external`
+ * cargo feature → EXTERNAL_RIVE_AUDIO_ENGINE). rive owns NO output device; the host
+ * PULLS the mixed PCM and routes it to its own mixer/device. These four entry points
+ * expose that pull. The runtime engine still auto-collects audio events during
+ * advance (via AudioEngine::play); the difference is solely WHO drains the mix.
+ *
+ * The engine clock only advances as the host reads frames, so the host must pull
+ * continuously (e.g. from its audio callback) for playback to progress. Reading is
+ * safe to do from the host's audio thread concurrently with advance on the main
+ * thread — the same producer/consumer split miniaudio's own device thread uses in
+ * system mode.
+ *
+ * Built WITHOUT external mode (system mode or audio-off) these are inert stubs so the
+ * Rust FFI links identically and degrades gracefully (channels/sample_rate report 0;
+ * read/sum yield no frames).
+ */
+#ifdef EXTERNAL_RIVE_AUDIO_ENGINE
+
+// Channels in the pulled PCM (interleaved). rive's runtime engine default is 2.
+extern "C" uint32_t rive_audio_channels(void)
+{
+    auto engine = rive::AudioEngine::RuntimeEngine(true);
+    return engine != nullptr ? engine->channels() : 0;
+}
+
+// Sample rate (Hz) of the pulled PCM. rive's runtime engine default is 48000.
+extern "C" uint32_t rive_audio_sample_rate(void)
+{
+    auto engine = rive::AudioEngine::RuntimeEngine(true);
+    return engine != nullptr ? engine->sampleRate() : 0;
+}
+
+// Pull up to `num_frames` frames of mixed interleaved f32 PCM into `frames` (which
+// must hold num_frames * channels() floats). Returns the number of frames actually
+// written (silence is produced when nothing is playing, so this is normally
+// num_frames). 0 on a null engine/buffer.
+extern "C" uint64_t rive_audio_read_frames(float* frames, uint64_t num_frames)
+{
+    auto engine = rive::AudioEngine::RuntimeEngine(true);
+    if (engine == nullptr || frames == nullptr)
+        return 0;
+    uint64_t framesRead = 0;
+    engine->readAudioFrames(frames, num_frames, &framesRead);
+    return framesRead;
+}
+
+// Mix (ADD) `num_frames` frames of rive's PCM into an existing host buffer `frames`
+// (interleaved f32, num_frames * channels() floats) — for summing rive into a buffer
+// that already holds other audio. Returns 1 on success, 0 on a null engine/buffer.
+extern "C" uint8_t rive_audio_sum_frames(float* frames, uint64_t num_frames)
+{
+    auto engine = rive::AudioEngine::RuntimeEngine(true);
+    if (engine == nullptr || frames == nullptr)
+        return 0;
+    return engine->sumAudioFrames(frames, num_frames) ? 1 : 0;
+}
+
+#else // !EXTERNAL_RIVE_AUDIO_ENGINE — inert stubs (stable ABI).
+
+extern "C" uint32_t rive_audio_channels(void) { return 0; }
+extern "C" uint32_t rive_audio_sample_rate(void) { return 0; }
+extern "C" uint64_t rive_audio_read_frames(float* frames, uint64_t num_frames)
+{
+    (void)frames;
+    (void)num_frames;
+    return 0;
+}
+extern "C" uint8_t rive_audio_sum_frames(float* frames, uint64_t num_frames)
+{
+    (void)frames;
+    (void)num_frames;
+    return 0;
+}
+
+#endif // EXTERNAL_RIVE_AUDIO_ENGINE

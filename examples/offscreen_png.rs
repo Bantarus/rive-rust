@@ -271,6 +271,20 @@ fn main() -> Result<()> {
     // (e.g. an eye that follows the cursor) respond. Two runs at different
     // positions can be diffed to prove pointer input reaches the state machine.
     let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| parse_xy(&s));
+    // RIVE_POINTER_TILE="tw,th" simulates the zero-copy ATLAS path: an atlas face is
+    // drawn into a tile of this size (via draw_viewport), so pointer coords (in the
+    // face's target space) are normalized into the tile before the Fit/Alignment is
+    // inverted. For a SQUARE target the mapping is scale-invariant — ANY tile size
+    // yields the same artboard hit as the dedicated full-target path (the tile is an
+    // internal LOD detail, invisible to interaction). Proves `set_pointer_tile`. Unset
+    // / (0,0) = full-target inversion (the dedicated default).
+    if let Some((tw, th)) = std::env::var("RIVE_POINTER_TILE")
+        .ok()
+        .and_then(|s| parse_xy(&s))
+    {
+        state_machine.set_pointer_tile(tw, th);
+        println!("  pointer tile: {tw}x{th}");
+    }
     // RIVE_VM_OBSERVE="path1,path2" observes change/trigger fires via the modern
     // data-binding read-back (the non-deprecated replacement for events read-back):
     // PRIME each path (subscribe before advancing), then after every advance report

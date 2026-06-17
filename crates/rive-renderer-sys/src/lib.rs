@@ -237,6 +237,15 @@ extern "C" {
         align_y: f32,
         scale_factor: f32,
     );
+    // Atlas pointer mapping: the drawn tile size (px) an atlas face renders into
+    // (`rive_artboard_draw_viewport`). When > 0, the pointer fns normalize
+    // target-space coords into the tile before inverting; (0, 0) = full-target
+    // inversion (dedicated faces). Set per-frame by the atlas node.
+    pub fn rive_state_machine_set_pointer_tile(
+        sm: *mut RiveStateMachine,
+        tile_w: f32,
+        tile_h: f32,
+    );
 
     // Pointer input → state-machine Listeners. `x,y` are in target-pixel space
     // (0..w, 0..h, top-left origin); `w,h` are the render-target pixel size those

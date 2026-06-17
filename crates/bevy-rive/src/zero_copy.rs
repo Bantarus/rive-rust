@@ -498,8 +498,8 @@ struct RiveInstance {
     /// Pointer edge-tracking (the zero_copy analogue of the floor `RiveInstance`'s
     /// fields): emit `pointer_down`/`pointer_up` on button edges and a single
     /// `pointer_exit` when the cursor leaves. Lives on the instance (not the
-    /// component) because edges are per-native-state. Dedicated path only — the
-    /// atlas path does not forward pointer input (see the atlas advance loop).
+    /// component) because edges are per-native-state. The atlas path has its own
+    /// copy on [`AtlasInstance`] with tile-aware inversion (see the atlas loop).
     last_pointer_down: bool,
     last_pointer_present: bool,
 }
@@ -529,6 +529,11 @@ struct RiveAtlas {
 struct AtlasInstance {
     artboard: Artboard,
     state_machine: StateMachine,
+    /// Pointer edge-tracking (mirrors the dedicated [`RiveInstance`]'s fields):
+    /// emit `pointer_down`/`pointer_up` on button edges and one `pointer_exit` when
+    /// the cursor leaves. The inversion is tile-aware (see the atlas advance loop).
+    last_pointer_down: bool,
+    last_pointer_present: bool,
 }
 
 /// Identifies one atlas PAGE: the consumer's [`RiveAtlasKey`] `key` (distinct keys never
@@ -1152,10 +1157,10 @@ struct ExtractedRive {
     fit_align: FitAlign,
     /// This frame's pointer input (from a `RivePointer`), in TARGET-PIXEL space.
     /// `None` = off-surface or no `RivePointer` ⇒ `pointer_exit`. Forwarded to the
-    /// state machine's Listeners before advance on the DEDICATED path only: the
-    /// atlas path draws into a tile sub-rect (`draw_viewport`), which the shim's
-    /// full-target pointer inversion does not yet map, so an atlas face's pointer
-    /// is left neutral (see the atlas advance loop). Copy + cheap.
+    /// state machine's Listeners before advance on BOTH zero_copy draw paths: the
+    /// dedicated path inverts against the full target; the atlas path draws into a
+    /// tile sub-rect (`draw_viewport`) and inverts tile-aware (the node sets the
+    /// tile size via `set_pointer_tile`; see the atlas advance loop). Copy + cheap.
     pointer: Option<Vec2>,
     /// Whether the primary button is held this frame (paired with `pointer`).
     pointer_down: bool,
@@ -2194,9 +2199,9 @@ impl Node for RiveFillNode {
                 }
             }
             for item in &frame_items {
-                if item.atlas.is_none() {
-                    continue;
-                }
+                let Some(atlas) = &item.atlas else {
+                    continue; // dedicated or culled face (no tile this frame)
+                };
                 if let Some(inst) = atlas_instances.get_mut(&item.entity) {
                     // M-DATA: apply view-model writes before advance (see the
                     // dedicated-path apply above), gated once per visual frame.
@@ -2210,11 +2215,41 @@ impl Node for RiveFillNode {
                     // Fit/alignment within the tile (draw_viewport reads it). Absent
                     // `RiveFit` == contain/center — the historical per-tile fit.
                     inst.artboard.set_fit_align(item.fit_align);
-                    // NB: pointer input is NOT forwarded for atlas faces — the shim's
-                    // pointer inversion assumes a full-target draw, but an atlas face
-                    // draws into a tile sub-rect, so target-pixel coords would mis-hit.
-                    // Pointer-driven faces use the dedicated path (`RiveTarget.atlas`
-                    // = None). Tile-aware atlas pointer mapping is deferred.
+
+                    // Pointer input → Listeners, TILE-AWARE. An atlas face is fit into
+                    // its tile sub-rect (draw_viewport), not the full target, so the
+                    // inversion needs BOTH the same fit/alignment AND the drawn tile
+                    // size: target-space coords (`0..width`, `0..height`) are normalized
+                    // into the tile before the fit/alignment is inverted. `tile_rect` is
+                    // `[x, y, w, h]` in page px; only the drawn `w`×`h` matters (the tile
+                    // offset cancels under computeAlignment). Forward BEFORE advance and
+                    // re-assert every frame, emitting press/release/exit on edges —
+                    // exactly the dedicated path, just with the tile mapping set.
+                    inst.state_machine.set_fit_align(item.fit_align);
+                    inst.state_machine
+                        .set_pointer_tile(atlas.tile_rect[2], atlas.tile_rect[3]);
+                    let (pw, ph) = (item.width, item.height);
+                    match item.pointer.map(|pos| (pos, item.pointer_down)) {
+                        Some((pos, down)) => {
+                            inst.state_machine.pointer_move(pos.x, pos.y, pw, ph);
+                            if down && !inst.last_pointer_down {
+                                inst.state_machine.pointer_down(pos.x, pos.y, pw, ph);
+                            } else if !down && inst.last_pointer_down {
+                                inst.state_machine.pointer_up(pos.x, pos.y, pw, ph);
+                            }
+                            inst.last_pointer_down = down;
+                            inst.last_pointer_present = true;
+                        }
+                        None => {
+                            if inst.last_pointer_present {
+                                // The exit position is ignored by the SM; (0,0) is fine.
+                                inst.state_machine.pointer_exit(0.0, 0.0, pw, ph);
+                            }
+                            inst.last_pointer_down = false;
+                            inst.last_pointer_present = false;
+                        }
+                    }
+
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
@@ -2592,5 +2627,7 @@ fn build_atlas_instance(
     Ok(AtlasInstance {
         artboard,
         state_machine,
+        last_pointer_down: false,
+        last_pointer_present: false,
     })
 }

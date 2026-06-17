@@ -222,6 +222,14 @@ struct RiveStateMachine
     rive::Fit fit = rive::Fit::contain;
     rive::Alignment alignment = rive::Alignment::center;
     float scaleFactor = 1.0f;
+    // Atlas pointer mapping: the DRAWN tile size (px) an atlas face renders into via
+    // rive_artboard_draw_viewport. When both are > 0, pointer coords (in the face's
+    // logical target space) are normalized into this tile before the fit/alignment is
+    // inverted — because an atlas face is fit into its tile, not the full target. 0
+    // (the default) = full-target inversion, i.e. the historical dedicated-face path.
+    // Set per-frame by the atlas node via rive_state_machine_set_pointer_tile.
+    float ptrTileW = 0.0f;
+    float ptrTileH = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -874,26 +882,56 @@ extern "C" void rive_state_machine_set_fit_align(RiveStateMachine* sm, uint32_t 
     sm->scaleFactor = scale_factor;
 }
 
+// Sets the DRAWN tile size (px) for ATLAS pointer inversion. An atlas face draws
+// into a gutter-inset tile sub-rect via rive_artboard_draw_viewport, so its
+// fit/alignment maps the artboard into the tile — NOT the full target. Given the
+// tile's drawn `tile_w`×`tile_h`, the four pointer fns normalize the incoming
+// target-space coords into the tile before inverting (the tile OFFSET cancels, so
+// only the size is needed). Pass (0, 0) — or any non-positive — to restore
+// full-target inversion (the dedicated-face path). Set per-frame by the atlas node.
+extern "C" void rive_state_machine_set_pointer_tile(RiveStateMachine* sm,
+                                                    float tile_w, float tile_h)
+{
+    if (sm == nullptr)
+        return;
+    sm->ptrTileW = tile_w;
+    sm->ptrTileH = tile_h;
+}
+
 // ---------------------------------------------------------------------------
 // Pointer input -> state-machine Listeners (eye/head joysticks, buttons, hover).
 // ---------------------------------------------------------------------------
 
 // Map a pointer in TARGET-PIXEL space (0..w, 0..h, top-left origin) into the
-// artboard's local space by INVERTING the same alignment `rive_artboard_draw`
-// uses to draw. Uses the state machine's stored fit/alignment (kept in sync with
-// the artboard's by the RiveFit component) — MUST match the draw transform or
-// hits won't line up with the rendered pixels. `scene->bounds()` is the
-// artboard's {0,0,w,h} for a state machine.
+// artboard's local space by INVERTING the same alignment the draw used. Uses the
+// state machine's stored fit/alignment (kept in sync with the artboard's by the
+// RiveFit component) — MUST match the draw transform or hits won't line up with
+// the rendered pixels. `scene->bounds()` is the artboard's {0,0,w,h}.
+//
+// Two draw paths, one inversion:
+//   * Dedicated (ptrTile == 0): the artboard is fit into the FULL target via
+//     rive_artboard_draw, so invert against frame {0,0,w,h} with the point as-is.
+//   * Atlas (ptrTile > 0): the artboard is fit into a TILE via draw_viewport, so
+//     invert against the tile {0,0,tileW,tileH} and normalize the pointer into it
+//     (the tile offset cancels under computeAlignment, so only the size matters).
+// The dedicated branch keeps the point exactly {x,y} → byte-identical to before.
 static rive::Vec2D pointer_to_artboard(RiveStateMachine* sm,
                                        float x, float y, float w, float h)
 {
-    const rive::AABB frame(0.0f, 0.0f, w, h);
+    const bool tiled = sm->ptrTileW > 0.0f && sm->ptrTileH > 0.0f;
+    const float fw = tiled ? sm->ptrTileW : w;
+    const float fh = tiled ? sm->ptrTileH : h;
+    const rive::AABB frame(0.0f, 0.0f, fw, fh);
     const rive::Mat2D m = rive::computeAlignment(sm->fit,
                                                  sm->alignment,
                                                  frame,
                                                  sm->scene->bounds(),
                                                  sm->scaleFactor);
-    return m.invertOrIdentity() * rive::Vec2D{x, y};
+    // Callers guarantee w,h > 0 (the pointer fns reject non-positive), so the
+    // normalization is divide-safe.
+    const rive::Vec2D pt =
+        tiled ? rive::Vec2D{x / w * fw, y / h * fh} : rive::Vec2D{x, y};
+    return m.invertOrIdentity() * pt;
 }
 
 // The four pointer events. `x,y` are in target-pixel space; `w,h` are the

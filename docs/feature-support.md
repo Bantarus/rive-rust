@@ -75,7 +75,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Feature | Status | Reference | Notes |
 |---------|:------:|-----------|-------|
 | Advance / playback tick | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | `StateMachine::advance`; `RiveAnimation.speed` |
-| Pointer input → Listeners / joysticks | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | move/down/up/exit; `RivePointer` — **both tiers** (floor + zero-copy **dedicated**; the pointer inversion tracks the face's Fit/Alignment). Atlas-tile mapping 🔜 (the tile sub-rect needs tile-aware inversion) |
+| Pointer input → Listeners / joysticks | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | move/down/up/exit; `RivePointer` — **both tiers AND every zero-copy draw path** (floor + zero-copy **dedicated** + zero-copy **atlas** tiles). The inversion tracks the face's Fit/Alignment; atlas faces are tile-aware (target-pixel coords are normalized into the face's tile before inverting, via `set_pointer_tile`) |
 | **View-model data binding** | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list mutation + per-item writes, image/artboard ref props (blocked — see backlog) |
 | State-machine inputs (bool/number/trigger) | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated — not supported.** The classic `Scene::getBool/getNumber/getTrigger` path is superseded by view-model **data binding** (the modern channel, already shipped). See Excluded. |
 | View-model change / trigger observation | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property ✅ (floor). Supersedes the deprecated events read-back below. **Deferred:** zero-copy observe (render→main back-channel, like watch read-back). |
@@ -92,13 +92,13 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Atlas-tile pointer mapping** (zero-copy — tile-aware pointer inversion for atlas faces);
-   **audio bridge** (route decoded audio assets to the host mixer); **animation playback
-   controls** (seek / pause / per-anim speed).
+1. **Audio bridge** (route decoded audio assets to the host mixer); **animation playback
+   controls** (seek / pause / per-anim speed); **bones / constraints / solo runtime control**.
 
-*(Recently shipped: **runtime text get/set** — `TextValueRun` / `RiveText`, both tiers;
-**out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`, both tiers; view-model
-**change/trigger observation** — the modern events replacement.)*
+*(Recently shipped: **atlas-tile pointer mapping** — zero-copy atlas faces now forward
+pointer input with tile-aware inversion; **runtime text get/set** — `TextValueRun` /
+`RiveText`, both tiers; **out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`,
+both tiers; view-model **change/trigger observation** — the modern events replacement.)*
 
 (State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
 both deprecated; view-model data binding is the modern write *and* read channel. See Excluded.)

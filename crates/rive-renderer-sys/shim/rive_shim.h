@@ -182,6 +182,13 @@ void               rive_artboard_set_fit_align(RiveArtboard*, uint32_t fit,
 void               rive_state_machine_set_fit_align(RiveStateMachine*, uint32_t fit,
                                                     float align_x, float align_y,
                                                     float scale_factor);
+/* Atlas pointer mapping: the DRAWN tile size (px) an atlas face renders into via
+ * rive_artboard_draw_viewport. When > 0, the pointer fns normalize target-space
+ * coords into this tile before inverting the fit/alignment (an atlas face is fit
+ * into its tile, not the full target). Pass (0, 0) to restore full-target
+ * inversion (dedicated faces — the default). Set per-frame by the atlas node. */
+void               rive_state_machine_set_pointer_tile(RiveStateMachine*,
+                                                       float tile_w, float tile_h);
 
 /* --- View-model data binding (get/set named view-model properties) ----------
  * Operate on the artboard's bound DEFAULT view-model instance (see

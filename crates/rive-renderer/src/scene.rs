@@ -298,6 +298,18 @@ impl StateMachine {
         unsafe { sys::rive_state_machine_set_fit_align(self.ptr, fit, ax, ay, scale) };
     }
 
+    /// Sets the drawn **tile size** (px) for atlas pointer inversion. An atlas
+    /// face draws into a tile sub-rect (via `Frame::draw_viewport`), so its
+    /// [`FitAlign`] maps the artboard into the tile, not the full target. With
+    /// `tile_w`×`tile_h` set, [`pointer_move`](Self::pointer_move) & co. normalize
+    /// the incoming target-space coords into the tile before inverting. Pass
+    /// `(0.0, 0.0)` — or any non-positive — to restore full-target inversion (the
+    /// dedicated-face default). Pair with a matching [`set_fit_align`](Self::set_fit_align).
+    pub fn set_pointer_tile(&self, tile_w: f32, tile_h: f32) {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        unsafe { sys::rive_state_machine_set_pointer_tile(self.ptr, tile_w, tile_h) };
+    }
+
     /// Forwards a pointer **move** to the state machine's Listeners. `(x, y)` is
     /// in target-pixel space (`0..w`, `0..h`, top-left origin); `w`×`h` is the
     /// render-target size the coords are relative to. The shim inverts the same

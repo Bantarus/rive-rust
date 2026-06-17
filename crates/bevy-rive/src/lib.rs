@@ -153,6 +153,12 @@ pub use assets::RiveAssets;
 mod text;
 pub use text::RiveText;
 
+// Per-feature module. Audio control: the optional `RiveAudio` resource sets the
+// master volume / mute over rive's process-global audio engine (audio plays
+// automatically during advance in both tiers; `--with_rive_audio=system`).
+mod audio;
+pub use audio::RiveAudio;
+
 /// The conventional one-glob import for consumers: `use bevy_rive::prelude::*;`.
 ///
 /// This is the whole public surface a game touches. The floor's three-step flow —
@@ -164,8 +170,8 @@ pub use text::RiveText;
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveFile, RiveFit,
-        RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveText,
+        ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveAudio, RiveFile,
+        RiveFit, RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveText,
         RiveValue, RiveViewModel, StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
@@ -267,6 +273,11 @@ impl Plugin for RivePlugin {
             )
                 .chain(),
         );
+
+        // Audio: apply the optional `RiveAudio` resource (master volume / mute) to
+        // the global engine on change. Tier-agnostic — audio plays automatically
+        // during advance; this only tracks the volume control.
+        app.add_systems(Update, crate::audio::apply_rive_audio);
     }
 }
 

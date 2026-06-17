@@ -277,6 +277,17 @@ uint32_t           rive_artboard_text_run_count(RiveArtboard*);
 RiveStatus         rive_artboard_text_run_name_at(RiveArtboard*, uint32_t index,
                                                   char* buf, size_t cap, size_t* out_len);
 
+/* --- Audio (engine lifecycle + master volume) -------------------------------
+ * With --with_rive_audio=system, rive plays audio events / embedded audio to the
+ * OS output automatically during advance (the lazily-created singleton
+ * AudioEngine::RuntimeEngine). These expose the host BRIDGE controls. Built
+ * without audio, they report unavailable / no-op (stable ABI). Implemented in
+ * rive_shim_audio.cpp. */
+uint8_t            rive_audio_is_available(void); /* 1 if audio compiled in */
+uint8_t            rive_audio_start(void);        /* open/resume device; 1 if engine present */
+void               rive_audio_stop(void);         /* pause + release device (no-op if none) */
+void               rive_audio_set_volume(float volume); /* 0 = mute, 1 = unity */
+
 /* --- Frame: begin -> draw -> flush ----------------------------------------- */
 
 /* Begins a frame against `target`, clearing to the given straight (non-

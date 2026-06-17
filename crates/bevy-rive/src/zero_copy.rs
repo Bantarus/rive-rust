@@ -243,6 +243,9 @@ impl Plugin for RiveZeroCopyPlugin {
         // same frame, before any consumer reads them.
         app.init_resource::<RiveAtlasState>()
             .add_systems(Update, (allocate_display_images, allocate_atlas_slots))
+            // Audio: apply the optional `RiveAudio` resource (master volume / mute)
+            // on change — audio plays automatically during the node's advance.
+            .add_systems(Update, crate::audio::apply_rive_audio)
             // M-DATA / M-TEXT: stage view-model + text-run writes in `Last` (after
             // gameplay, before extract), so the read-only extract can ferry them.
             .add_systems(Last, (stage_vm_writes, stage_text_writes));

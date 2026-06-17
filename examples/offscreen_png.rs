@@ -261,11 +261,43 @@ fn main() -> Result<()> {
     // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
     // forward N 60Hz frames before the snapshot, so two runs at different frame
     // counts can be diffed to prove a scripted animation (e.g. BallBreath) runs.
-    let advance_frames: u32 = std::env::var("RIVE_ADVANCE_FRAMES")
+    let mut advance_frames: u32 = std::env::var("RIVE_ADVANCE_FRAMES")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1)
         .max(1);
+    // RIVE_REALTIME_SECS="N": advance in WALL-CLOCK real time (~60Hz with real
+    // sleeps) for N seconds instead of N instant frames, keeping the process alive
+    // so rive's audio device thread actually plays. Needed to HEAR audio — audio
+    // events route to the OS output via miniaudio (--with_rive_audio=system), which
+    // mixes on a background thread; an instant advance + exit would cut it off.
+    // Overrides RIVE_ADVANCE_FRAMES.
+    let realtime_secs: Option<f32> = std::env::var("RIVE_REALTIME_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .filter(|s: &f32| *s > 0.0);
+    if let Some(secs) = realtime_secs {
+        advance_frames = (secs * 60.0).ceil() as u32;
+        println!("  realtime: {secs}s ({advance_frames} frames @ 60Hz)");
+    }
+    // Audio bridge knobs (--with_rive_audio=system: rive plays audio events to the
+    // OS output during advance). RIVE_AUDIO_START=1 pre-opens the device (proves it
+    // opens even before any audio event). RIVE_AUDIO_VOLUME="v" sets the master
+    // volume (0 = mute, 1 = unity). Pair with RIVE_REALTIME_SECS to actually hear it.
+    if std::env::var("RIVE_AUDIO_START").is_ok() {
+        let ok = rive_renderer::audio::start();
+        println!(
+            "  audio: available={} started={ok}",
+            rive_renderer::audio::is_available()
+        );
+    }
+    if let Some(v) = std::env::var("RIVE_AUDIO_VOLUME")
+        .ok()
+        .and_then(|s| s.trim().parse::<f32>().ok())
+    {
+        rive_renderer::audio::set_volume(v);
+        println!("  audio volume: {v}");
+    }
     // RIVE_POINTER="x,y" (target-pixel space, top-left origin) forwards a pointer
     // move each frame before advancing, so pointer-driven Listeners / joysticks
     // (e.g. an eye that follows the cursor) respond. Two runs at different
@@ -313,6 +345,10 @@ fn main() -> Result<()> {
             if artboard.vm_flush_changed(path).unwrap_or(false) {
                 *observe_fires.entry(path.clone()).or_insert(0) += 1;
             }
+        }
+        // Pace to wall-clock in realtime mode so audio plays audibly (see above).
+        if realtime_secs.is_some() {
+            std::thread::sleep(std::time::Duration::from_secs_f32(FRAME_DT_SECONDS));
         }
     }
     for path in &observe {

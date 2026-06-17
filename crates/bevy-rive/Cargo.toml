@@ -106,6 +106,13 @@ name = "nimai_face"
 path = "../../examples/nimai_face.rs"
 required-features = ["floor"]
 
+# Interactive viewer: a window + cursor/click forwarding + audio (click to spin
+# big-wheel and hear it). Demonstrates pointer input AND the audio bridge.
+[[example]]
+name = "interactive"
+path = "../../examples/interactive.rs"
+required-features = ["floor"]
+
 # The M1b zero-copy example (requires the `zero_copy` feature + native Vulkan).
 [[example]]
 name = "sprite_riv_zerocopy"

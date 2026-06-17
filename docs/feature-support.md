@@ -83,7 +83,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Named artboard / state-machine selection | ✅ | [artboards](https://rive.app/docs/runtimes/artboards) | `ArtboardSelector` / `StateMachineSelector` honor **Default / ByName / ByIndex** in BOTH tiers (`File::artboard_named/_at`, `Artboard::state_machine_named/_at`); discover names via `artboard_names()` / `state_machine_names()` |
 | Runtime text value get/set | ✅ | — | `TextValueRun` get/set by authored name (top-level or a nested artboard via a `/`-path). **`RiveText`** component queues set-writes (both tiers — `floor` inline, `zero_copy` ferried like view-model writes); `Artboard::text_get/text_set/text_set_in/text_run_names` at the safe layer. Setting re-shapes on the next advance. Bevy read-back deferred (safe-layer `text_get` covers it) |
 | Out-of-band asset loading (images/fonts/audio) | ✅ | [loading-assets](https://rive.app/docs/runtimes/loading-assets) | `FileAssetLoader` callback → supply the **Referenced** (not Embedded) images / fonts / audio a `.riv` needs. **`RiveAssets`** component (name → encoded bytes), both tiers; `Context::load_file_with_assets` at the safe layer. Host returns encoded file bytes (PNG/JPEG/WEBP, font, audio); rive decodes via the context factory (libpng/jpeg/webp + harfbuzz). A name not in the map (or decode failure) falls back to in-band content |
-| Audio playback | 🔜 | — | `WITH_RIVE_AUDIO` + an engine audio bridge (route to the host mixer) |
+| Audio playback | ✅ | [audio-events](https://rive.app/docs/runtimes/audio) | `--with_rive_audio=system` — rive owns a miniaudio device that plays a `.riv`'s audio events / embedded audio straight to the OS output **automatically during advance** (both tiers; no per-sound API). Host bridge controls: `rive_renderer::audio::{is_available,start,stop,set_volume}` (process-global engine) + the optional **`RiveAudio`** Bevy resource (master volume / mute). **Deferred:** `=external` mode (pull PCM into a host/Bevy mixer for unified mixing) |
 | Joystick / gamepad / keyboard / focus input | 🔜 | — | `Scene` gamepad/keyboard + `FocusManager`; for game-controlled rigs |
 | Animation playback controls (seek / pause / per-anim speed) | 🔜 | — | direct `LinearAnimationInstance` time control beyond the SM |
 | Bones / constraints / solo runtime control | 🔜 | — | drive bones, toggle solo children, set constraint strength at runtime |
@@ -92,13 +92,16 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Audio bridge** (route decoded audio assets to the host mixer); **animation playback
-   controls** (seek / pause / per-anim speed); **bones / constraints / solo runtime control**.
+1. **Animation playback controls** (seek / pause / per-anim speed); **bones / constraints /
+   solo runtime control**; **audio host-mixer routing** (`--with_rive_audio=external` — pull
+   rive's mixed PCM into the host/Bevy audio graph for unified mixing, instead of rive owning
+   its own device).
 
-*(Recently shipped: **atlas-tile pointer mapping** — zero-copy atlas faces now forward
-pointer input with tile-aware inversion; **runtime text get/set** — `TextValueRun` /
-`RiveText`, both tiers; **out-of-band asset loading** — `FileAssetLoader` / `RiveAssets`,
-both tiers; view-model **change/trigger observation** — the modern events replacement.)*
+*(Recently shipped: **audio playback** — `--with_rive_audio=system`, rive plays audio events
+to the OS output during advance + `RiveAudio` volume/mute; **atlas-tile pointer mapping** —
+zero-copy atlas faces now forward pointer input with tile-aware inversion; **runtime text
+get/set** — `TextValueRun` / `RiveText`, both tiers; **out-of-band asset loading** —
+`FileAssetLoader` / `RiveAssets`, both tiers; view-model **change/trigger observation**.)*
 
 (State-machine **inputs** AND **events read-back** are intentionally **out of scope** —
 both deprecated; view-model data binding is the modern write *and* read channel. See Excluded.)

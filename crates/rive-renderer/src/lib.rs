@@ -98,6 +98,9 @@ pub use assets::{AssetRequest, AssetType};
 // public types; the impl block lives in its own module per the feature convention).
 mod text;
 
+/// Audio engine lifecycle + master volume (process-global, free functions).
+pub mod audio;
+
 /// Errors returned by the safe wrapper.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]

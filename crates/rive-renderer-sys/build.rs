@@ -35,6 +35,11 @@ const RIVE_LIBS: &[&str] = &[
     // (provider-after-consumer). premake always emits this project — a `dummy.cpp`
     // stub when scripting is off — but it is only needed in the link with the flag on.
     "luau_vm",
+    // miniaudio backing `--with_rive_audio=system` (rive-app/miniaudio, cloned by
+    // premake). rive's audio TUs (audio_engine.cpp etc.) reference it, so it links
+    // AFTER `rive` (provider-after-consumer), like `luau_vm`. premake always emits
+    // the `miniaudio` project; it is only needed in the link with the audio flag on.
+    "miniaudio",
     "rive_decoders",
     "libpng",
     "zlib",
@@ -91,6 +96,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shim/rive_shim.cpp");
     println!("cargo:rerun-if-changed=shim/rive_shim_viewmodel.cpp");
     println!("cargo:rerun-if-changed=shim/rive_shim_text.cpp");
+    println!("cargo:rerun-if-changed=shim/rive_shim_audio.cpp");
     for var in [
         "CC",
         "CXX",
@@ -257,6 +263,10 @@ fn build_rive_libs_unix(
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--with_rive_scripting",
+                // System mode: rive owns a miniaudio device that plays audio events
+                // straight to the OS output (WITH_RIVE_AUDIO). `=external` would
+                // instead expose a PCM pull for a host mixer — a later slice.
+                "--with_rive_audio=system",
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),
@@ -311,6 +321,10 @@ fn build_rive_libs_windows(
                 "--with_rive_text",
                 "--with_rive_layout",
                 "--with_rive_scripting",
+                // System mode: rive owns a miniaudio device that plays audio events
+                // straight to the OS output (WITH_RIVE_AUDIO). `=external` would
+                // instead expose a PCM pull for a host mixer — a later slice.
+                "--with_rive_audio=system",
                 "--no-download-progress",
             ])
             .args(build.no_lto.then_some("--no-lto")),
@@ -365,6 +379,10 @@ fn compile_shim(
         .define("VK_NO_PROTOTYPES", None)
         .define("VMA_STATIC_VULKAN_FUNCTIONS", "0")
         .define("VMA_DYNAMIC_VULKAN_FUNCTIONS", "1")
+        // Match librive's audio build (--with_rive_audio=system) so any class whose
+        // layout is #ifdef WITH_RIVE_AUDIO stays ABI-identical across the shim ↔
+        // librive boundary, and the rive audio headers are visible to the shim.
+        .define("WITH_RIVE_AUDIO", None)
         // The pinned Vulkan/VMA headers MUST come first so `<vulkan/vulkan.h>`
         // resolves to the vendored copy, not any system header.
         .include(&vk_headers_inc)
@@ -381,7 +399,8 @@ fn compile_shim(
         .file(shim_dir.join("rive_shim.cpp"))
         // Per-feature shim TUs (see rive_shim_internal.hpp). One .cpp per feature.
         .file(shim_dir.join("rive_shim_viewmodel.cpp"))
-        .file(shim_dir.join("rive_shim_text.cpp"));
+        .file(shim_dir.join("rive_shim_text.cpp"))
+        .file(shim_dir.join("rive_shim_audio.cpp"));
 
     if windows {
         // Match the rive libs (built with clang-cl): compiling the shim with

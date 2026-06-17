@@ -468,6 +468,15 @@ extern "C" {
         out_len: *mut usize,
     ) -> RiveStatus;
 
+    // ===== Audio (engine lifecycle + master volume) =========================
+    // With `--with_rive_audio=system`, rive auto-plays audio to the OS output
+    // during advance via the singleton runtime engine; these are the host bridge
+    // controls. Built without audio: `is_available` returns 0, the rest no-op.
+    pub fn rive_audio_is_available() -> u8;
+    pub fn rive_audio_start() -> u8;
+    pub fn rive_audio_stop();
+    pub fn rive_audio_set_volume(volume: f32);
+
     pub fn rive_frame_begin(
         ctx: *mut RiveRenderContext,
         target: *mut RiveRenderTarget,

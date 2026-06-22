@@ -258,6 +258,14 @@ RiveStatus         rive_vmi_get_string(RiveViewModelInstance*, const char* path,
                                        char* buf, size_t cap, size_t* out_len);
 RiveStatus         rive_vmi_get_enum_index(RiveViewModelInstance*, const char* path, uint32_t* out);
 RiveStatus         rive_vmi_flush_changed(RiveViewModelInstance*, const char* path, uint8_t* out);
+/* Handle writes — drive a nested VM or a LIST ITEM (the flat path can't index lists). */
+RiveStatus         rive_vmi_set_number(RiveViewModelInstance*, const char* path, float value);
+RiveStatus         rive_vmi_set_bool(RiveViewModelInstance*, const char* path, uint8_t value);
+RiveStatus         rive_vmi_set_color(RiveViewModelInstance*, const char* path, uint32_t argb);
+RiveStatus         rive_vmi_set_string(RiveViewModelInstance*, const char* path, const char* value);
+RiveStatus         rive_vmi_set_enum_index(RiveViewModelInstance*, const char* path, uint32_t index);
+RiveStatus         rive_vmi_set_enum_name(RiveViewModelInstance*, const char* path, const char* name);
+RiveStatus         rive_vmi_fire_trigger(RiveViewModelInstance*, const char* path);
 
 /* --- Text runs (get/set a TextValueRun's string) ----------------------------
  * Read / write a named text run's string at runtime. `name` is the run's

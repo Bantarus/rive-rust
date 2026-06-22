@@ -10,8 +10,12 @@
 //!   read-back (Rive deprecated runtime *event* listening; the rig signals gameplay
 //!   by driving a view-model trigger/property instead).
 //!
-//! Property paths use `/` for nested view models, e.g. `"breath/scaleX"`. Mirrors
-//! the C++ contract in the Rive data-binding docs (https://rive.app/docs).
+//! Property paths use `/` to descend nested view models (e.g. `"breath/scaleX"`)
+//! and `name[i]` to index a **list** element (e.g. `"wheels[2]/value"`) — so a
+//! write can reach into a list item, which a flat path can't (rive's resolver
+//! can't index lists). Indexing works for any `set_*`/`fire_trigger` here, in both
+//! tiers; watch/observe stay on flat paths for now. Mirrors the C++ contract in the
+//! Rive data-binding docs (https://rive.app/docs).
 //!
 //! Covers number / bool / trigger / color / string / enum. The component is
 //! tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance
@@ -263,18 +267,55 @@ pub(crate) fn apply_writes_slice(
     writes: &[(String, RiveValue)],
 ) {
     for (path, value) in writes {
-        let res = match value {
-            RiveValue::Number(n) => artboard.vm_set_number(path, *n),
-            RiveValue::Bool(b) => artboard.vm_set_bool(path, *b),
-            RiveValue::Color(c) => artboard.vm_set_color(path, *c),
-            RiveValue::Text(s) => artboard.vm_set_string(path, s),
-            RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(path, *i),
-            RiveValue::EnumName(n) => artboard.vm_set_enum_name(path, n),
-            RiveValue::Trigger => artboard.vm_fire_trigger(path),
+        // A `[` means an indexed (list-item) path the flat resolver can't address;
+        // route it through `vm_resolve`. Plain paths keep the proven flat setters.
+        let res = if path.contains('[') {
+            apply_indexed_write(artboard, path, value)
+        } else {
+            apply_flat_write(artboard, path, value)
         };
         if let Err(e) = res {
             warn!("rive: view-model write {path:?} failed: {e}");
         }
+    }
+}
+
+/// Writes `value` to a flat root-VM path (`/` descends named nested view models).
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+fn apply_flat_write(
+    artboard: &rive_renderer::Artboard,
+    path: &str,
+    value: &RiveValue,
+) -> rive_renderer::Result<()> {
+    match value {
+        RiveValue::Number(n) => artboard.vm_set_number(path, *n),
+        RiveValue::Bool(b) => artboard.vm_set_bool(path, *b),
+        RiveValue::Color(c) => artboard.vm_set_color(path, *c),
+        RiveValue::Text(s) => artboard.vm_set_string(path, s),
+        RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(path, *i),
+        RiveValue::EnumName(n) => artboard.vm_set_enum_name(path, n),
+        RiveValue::Trigger => artboard.vm_fire_trigger(path),
+    }
+}
+
+/// Writes `value` to an indexed path (e.g. `"wheels[2]/value"`): resolves the
+/// owning instance + leaf via [`rive_renderer::Artboard::vm_resolve`], then writes
+/// into that nested view model / list item.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+fn apply_indexed_write(
+    artboard: &rive_renderer::Artboard,
+    path: &str,
+    value: &RiveValue,
+) -> rive_renderer::Result<()> {
+    let (item, leaf) = artboard.vm_resolve(path)?;
+    match value {
+        RiveValue::Number(n) => item.set_number(&leaf, *n),
+        RiveValue::Bool(b) => item.set_bool(&leaf, *b),
+        RiveValue::Color(c) => item.set_color(&leaf, *c),
+        RiveValue::Text(s) => item.set_string(&leaf, s),
+        RiveValue::EnumIndex(i) => item.set_enum_index(&leaf, *i),
+        RiveValue::EnumName(n) => item.set_enum_name(&leaf, n),
+        RiveValue::Trigger => item.fire_trigger(&leaf),
     }
 }
 

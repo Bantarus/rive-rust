@@ -178,6 +178,54 @@ impl Artboard {
         RiveViewModelInstance::from_ptr(p)
     }
 
+    /// Resolves an **indexed view-model path** to the instance that owns its leaf
+    /// property, plus the leaf name — so any typed `set_*` / `get_*` on the returned
+    /// [`RiveViewModelInstance`] reaches a nested view model or a **list item**.
+    ///
+    /// Path grammar: `/`-separated segments descend nested view models, and a
+    /// `name[i]` segment indexes element `i` of the list property `name` (which the
+    /// flat `vm_*` accessors can't do — rive's resolver can't index lists). The final
+    /// segment names the leaf property and must not itself be indexed.
+    ///
+    /// ```no_run
+    /// # fn demo(artboard: &rive_renderer::Artboard) -> rive_renderer::Result<()> {
+    /// // Drive element 2 of the `wheels` list, then any depth of nesting:
+    /// let (item, leaf) = artboard.vm_resolve("wheels[2]/value")?;
+    /// item.set_number(&leaf, 5.0)?;
+    /// let (tint, leaf) = artboard.vm_resolve("groups[1]/wheels[2]/tint")?;
+    /// tint.set_color(&leaf, 0xFF_00_FF_00)?;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// Errors if the artboard has no view model, a segment doesn't resolve, the path
+    /// is malformed (a bad `[index]`, or an interior NUL byte → `Error::InvalidPath`),
+    /// or the leaf segment is itself indexed.
+    pub fn vm_resolve(&self, path: &str) -> Result<(RiveViewModelInstance<'_>, String)> {
+        let mut handle = self
+            .vm_root()
+            .ok_or_else(|| Error::ViewModel("artboard has no view model".to_string()))?;
+        let mut segments: Vec<&str> = path.split('/').collect();
+        // `str::split` always yields ≥1 element, so `pop` gives the leaf.
+        let leaf = segments.pop().expect("split('/') always yields at least one segment");
+        for seg in segments {
+            handle = match parse_index_segment(seg)? {
+                Some((name, index)) => handle
+                    .list_item(name, index)
+                    .ok_or_else(|| Error::ViewModel(format!("list item {seg:?} not found")))?,
+                None => handle
+                    .view_model(seg)
+                    .ok_or_else(|| Error::ViewModel(format!("path segment {seg:?} not found")))?,
+            };
+        }
+        // The leaf must name a scalar/trigger property — a list item is not writable.
+        if parse_index_segment(leaf)?.is_some() {
+            return Err(Error::ViewModel(format!(
+                "path {path:?} ends in a list item, not a writable property"
+            )));
+        }
+        Ok((handle, leaf.to_string()))
+    }
+
     // ---- slice 2: color / string / enum ----
 
     /// Sets a view-model **color** property (ARGB, e.g. `0xFF_33_AA_FF`).
@@ -306,16 +354,36 @@ where
     Some((name, RiveValueKind::from_raw(ty2)))
 }
 
+/// Parses one path segment for [`Artboard::vm_resolve`]: `"wheels[2]"` →
+/// `Some(("wheels", 2))`, a plain `"breath"` → `None`. The `[i]` must close with
+/// `]` as the segment's last char and hold a non-empty base-10 index; malformed
+/// bracket syntax is an `Error::ViewModel` naming the offending segment.
+fn parse_index_segment(seg: &str) -> Result<Option<(&str, usize)>> {
+    let Some(open) = seg.find('[') else {
+        return Ok(None);
+    };
+    let bad = || Error::ViewModel(format!("malformed list index in path segment {seg:?}"));
+    let close = seg.find(']').ok_or_else(bad)?;
+    // `]` must be the last char and the index non-empty (`name[3]`, not `name[]x`).
+    if close != seg.len() - 1 || close <= open + 1 {
+        return Err(bad());
+    }
+    let index = seg[open + 1..close].parse::<usize>().map_err(|_| bad())?;
+    Ok(Some((&seg[..open], index)))
+}
+
 /// A borrowed **view-model instance** handle — the artboard's root view model, a
 /// nested view model, or a list item. Obtained from [`Artboard::vm_root`] and
 /// navigated via [`Self::view_model`] / [`Self::list_item`].
 ///
 /// **Borrowed:** it aliases an instance owned by rive's caches under the root view
-/// model, so the borrow checker ties it to the source [`Artboard`]. This slice is
-/// **read-only** — scalar reads + introspection + navigation. Writes go through
-/// the artboard-rooted `vm_set_*` methods (which already accept `/`-nested paths);
-/// list mutation and image/artboard refs are deferred (see `docs/feature-support.md`).
-/// `!Send`/`!Sync` (rive handles are not thread-safe), as desired.
+/// model, so the borrow checker ties it to the source [`Artboard`]. Supports scalar
+/// reads **and writes** (`set_*` / [`Self::fire_trigger`]) + introspection +
+/// navigation — so a caller can drive a nested view model or a **list item**, which
+/// the flat artboard-rooted `vm_set_*` path can't address (rive's resolver can't
+/// index lists; use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). List
+/// *structural* mutation (add/remove/swap) and image/artboard refs are deferred (see
+/// `docs/feature-support.md`). `!Send`/`!Sync` (rive handles are not thread-safe).
 #[derive(Debug)]
 pub struct RiveViewModelInstance<'a> {
     ptr: *mut sys::RiveViewModelInstance,
@@ -445,5 +513,92 @@ impl<'a> RiveViewModelInstance<'a> {
         // SAFETY: live handle + valid C string; `out` valid.
         let st = unsafe { sys::rive_vmi_flush_changed(self.ptr, c.as_ptr(), &mut out) };
         vm_status(st).map(|()| out != 0)
+    }
+
+    // ---- writes (number / bool / color / string / enum / trigger) ----
+    // Mutate native state through the borrowed instance (interior mutability);
+    // the change is observed on the next advance. These reach into a nested view
+    // model or a **list item** — what the flat `Artboard::vm_set_*` path can't do.
+
+    /// Sets a **number** property at `path` (relative to this instance).
+    pub fn set_number(&self, path: &str, value: f32) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_set_number(self.ptr, c.as_ptr(), value) };
+        vm_status(st)
+    }
+
+    /// Sets a **bool** property at `path`.
+    pub fn set_bool(&self, path: &str, value: bool) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_set_bool(self.ptr, c.as_ptr(), u8::from(value)) };
+        vm_status(st)
+    }
+
+    /// Sets a **color** property at `path` (ARGB).
+    pub fn set_color(&self, path: &str, argb: u32) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_set_color(self.ptr, c.as_ptr(), argb) };
+        vm_status(st)
+    }
+
+    /// Sets a **string** property at `path`.
+    pub fn set_string(&self, path: &str, value: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        let v = CString::new(value).map_err(|_| Error::InvalidPath)?;
+        // SAFETY: live handle + valid C strings.
+        let st = unsafe { sys::rive_vmi_set_string(self.ptr, c.as_ptr(), v.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Sets an **enum** property at `path` by 0-based value index.
+    pub fn set_enum_index(&self, path: &str, index: u32) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_set_enum_index(self.ptr, c.as_ptr(), index) };
+        vm_status(st)
+    }
+
+    /// Sets an **enum** property at `path` by value label (name).
+    pub fn set_enum_name(&self, path: &str, name: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        let n = CString::new(name).map_err(|_| Error::InvalidPath)?;
+        // SAFETY: live handle + valid C strings.
+        let st = unsafe { sys::rive_vmi_set_enum_name(self.ptr, c.as_ptr(), n.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Fires a **trigger** property at `path` (one-shot pulse).
+    pub fn fire_trigger(&self, path: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_fire_trigger(self.ptr, c.as_ptr()) };
+        vm_status(st)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_plain_and_indexed_segments() {
+        assert_eq!(parse_index_segment("breath").unwrap(), None);
+        assert_eq!(parse_index_segment("wheels[2]").unwrap(), Some(("wheels", 2)));
+        assert_eq!(parse_index_segment("a[0]").unwrap(), Some(("a", 0)));
+        assert_eq!(parse_index_segment("list[10]").unwrap(), Some(("list", 10)));
+    }
+
+    #[test]
+    fn rejects_malformed_index_segments() {
+        // Missing close, empty index, trailing chars, non-numeric, negative.
+        for bad in ["wheels[2", "wheels[]", "wheels[2]x", "wheels[a]", "wheels[-1]"] {
+            assert!(
+                matches!(parse_index_segment(bad), Err(Error::ViewModel(_))),
+                "{bad:?} should be a malformed-index error"
+            );
+        }
     }
 }

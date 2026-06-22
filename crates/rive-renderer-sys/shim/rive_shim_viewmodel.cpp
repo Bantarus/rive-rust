@@ -14,11 +14,12 @@
  *     view-model INSTANCE (the root, a nested VM, or a list item). Adds nested-VM
  *     introspection (recurse `propertyViewModel`), list size + item access
  *     (`propertyList`/`instanceAt` — the native path resolver can't index lists),
- *     and reads. Handles are BORROWED: they alias instances owned by rive's caches
- *     under the root `vmRuntime`, so they are valid only while the artboard lives
- *     and the addressed list is not mutated. Reads only this slice (writes go
- *     through the artboard-rooted setters; list mutation + image/artboard refs are
- *     deferred — see docs/feature-support.md).
+ *     and reads + writes. Handles are BORROWED: they alias instances owned by rive's
+ *     caches under the root `vmRuntime`, so they are valid only while the artboard
+ *     lives and the addressed list is not mutated. Reads AND writes (number/bool/
+ *     color/string/enum/trigger) — so a caller can drive a nested VM or a LIST ITEM.
+ *     List structural mutation (add/remove/swap) + image/artboard refs are deferred
+ *     — see docs/feature-support.md.
  */
 #include "rive_shim_internal.hpp"
 
@@ -233,6 +234,44 @@ RiveStatus vmi_get_enum_index(ViewModelInstanceRuntime* vm, const char* path, ui
     *out = p->valueIndex();
     return RIVE_OK;
 }
+RiveStatus vmi_set_enum_index(ViewModelInstanceRuntime* vm, const char* path, uint32_t index)
+{
+    auto* p = vm->propertyEnum(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model enum property not found");
+        return 1;
+    }
+    p->valueIndex(index);
+    return RIVE_OK;
+}
+RiveStatus vmi_set_enum_name(ViewModelInstanceRuntime* vm, const char* path, const char* name)
+{
+    if (name == nullptr)
+    {
+        shim_set_error("view-model enum name is null");
+        return 1;
+    }
+    auto* p = vm->propertyEnum(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model enum property not found");
+        return 1;
+    }
+    p->value(std::string(name));
+    return RIVE_OK;
+}
+RiveStatus vmi_trigger(ViewModelInstanceRuntime* vm, const char* path)
+{
+    auto* p = vm->propertyTrigger(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model trigger property not found");
+        return 1;
+    }
+    p->trigger();
+    return RIVE_OK;
+}
 
 // Schema introspection on a resolved runtime (shared by both surfaces).
 RiveStatus vmi_property_at_core(ViewModelInstanceRuntime* vm, uint32_t index,
@@ -324,16 +363,7 @@ extern "C" RiveStatus rive_artboard_vm_fire_trigger(RiveArtboard* artboard,
                                                     const char* path)
 {
     ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
-    if (vm == nullptr)
-        return 1;
-    auto* p = vm->propertyTrigger(path);
-    if (p == nullptr)
-    {
-        shim_set_error("view-model trigger property not found");
-        return 1;
-    }
-    p->trigger();
-    return RIVE_OK;
+    return vm == nullptr ? 1 : vmi_trigger(vm, path);
 }
 
 extern "C" RiveStatus rive_artboard_vm_set_color(RiveArtboard* artboard,
@@ -369,16 +399,7 @@ extern "C" RiveStatus rive_artboard_vm_set_enum_index(RiveArtboard* artboard,
                                                       const char* path, uint32_t index)
 {
     ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
-    if (vm == nullptr)
-        return 1;
-    auto* p = vm->propertyEnum(path);
-    if (p == nullptr)
-    {
-        shim_set_error("view-model enum property not found");
-        return 1;
-    }
-    p->valueIndex(index);
-    return RIVE_OK;
+    return vm == nullptr ? 1 : vmi_set_enum_index(vm, path, index);
 }
 
 extern "C" RiveStatus rive_artboard_vm_get_enum_index(RiveArtboard* artboard,
@@ -392,21 +413,7 @@ extern "C" RiveStatus rive_artboard_vm_set_enum_name(RiveArtboard* artboard,
                                                      const char* path, const char* name)
 {
     ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
-    if (vm == nullptr)
-        return 1;
-    if (name == nullptr)
-    {
-        shim_set_error("view-model enum name is null");
-        return 1;
-    }
-    auto* p = vm->propertyEnum(path);
-    if (p == nullptr)
-    {
-        shim_set_error("view-model enum property not found");
-        return 1;
-    }
-    p->value(std::string(name));
-    return RIVE_OK;
+    return vm == nullptr ? 1 : vmi_set_enum_name(vm, path, name);
 }
 
 extern "C" RiveStatus rive_artboard_vm_enum_value_count(RiveArtboard* artboard,
@@ -617,4 +624,51 @@ extern "C" RiveStatus rive_vmi_flush_changed(RiveViewModelInstance* handle,
 {
     ViewModelInstanceRuntime* vm = vmi_path(handle, path);
     return vm == nullptr ? 1 : vmi_flush_changed(vm, path, out);
+}
+
+// ---- handle writes (number / bool / color / string / enum / trigger) ----
+// Mirror the handle reads onto the shared set cores, so a caller can write into
+// a nested view model or a LIST ITEM (which the flat artboard-rooted path can't
+// address — the native resolver can't index lists). Same borrowed-handle rules.
+
+extern "C" RiveStatus rive_vmi_set_number(RiveViewModelInstance* handle,
+                                          const char* path, float value)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_number(vm, path, value);
+}
+extern "C" RiveStatus rive_vmi_set_bool(RiveViewModelInstance* handle,
+                                        const char* path, uint8_t value)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_bool(vm, path, value);
+}
+extern "C" RiveStatus rive_vmi_set_color(RiveViewModelInstance* handle,
+                                         const char* path, uint32_t argb)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_color(vm, path, argb);
+}
+extern "C" RiveStatus rive_vmi_set_string(RiveViewModelInstance* handle,
+                                          const char* path, const char* value)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_string(vm, path, value);
+}
+extern "C" RiveStatus rive_vmi_set_enum_index(RiveViewModelInstance* handle,
+                                              const char* path, uint32_t index)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_enum_index(vm, path, index);
+}
+extern "C" RiveStatus rive_vmi_set_enum_name(RiveViewModelInstance* handle,
+                                             const char* path, const char* name)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_enum_name(vm, path, name);
+}
+extern "C" RiveStatus rive_vmi_fire_trigger(RiveViewModelInstance* handle, const char* path)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_trigger(vm, path);
 }

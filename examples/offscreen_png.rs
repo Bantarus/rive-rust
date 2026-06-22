@@ -223,21 +223,41 @@ fn main() -> Result<()> {
 
     // RIVE_VM_SET="path=value" writes a view-model property BEFORE advancing (so
     // the state machine / script observes it this tick). `=true`/`=false` set a
-    // bool; anything else parses as a number.
+    // bool; anything else parses as a number. A `name[i]` segment indexes a list
+    // element (e.g. "wheels[2]/value") via `vm_resolve` — what a flat path can't do.
+    // RIVE_VM_FORCE_RESOLVE=1 routes *every* path through `vm_resolve` (diagnostic:
+    // exercise the resolver's nested-VM walk on a plain `/`-path that has no list).
+    let force_resolve = std::env::var("RIVE_VM_FORCE_RESOLVE").is_ok();
     if let Ok(spec) = std::env::var("RIVE_VM_SET") {
         if let Some((path, val)) = spec.split_once('=') {
             let (path, val) = (path.trim(), val.trim());
-            match val {
-                "true" => artboard.vm_set_bool(path, true),
-                "false" => artboard.vm_set_bool(path, false),
-                _ => {
-                    let n: f32 = val
-                        .parse()
-                        .context("RIVE_VM_SET value must be a number or true/false")?;
-                    artboard.vm_set_number(path, n)
-                }
+            enum SetVal {
+                Bool(bool),
+                Number(f32),
             }
-            .with_context(|| format!("setting view-model property {path:?}"))?;
+            let sv = match val {
+                "true" => SetVal::Bool(true),
+                "false" => SetVal::Bool(false),
+                _ => SetVal::Number(
+                    val.parse()
+                        .context("RIVE_VM_SET value must be a number or true/false")?,
+                ),
+            };
+            let res = if force_resolve || path.contains('[') {
+                let (item, leaf) = artboard
+                    .vm_resolve(path)
+                    .with_context(|| format!("resolving view-model path {path:?}"))?;
+                match sv {
+                    SetVal::Bool(b) => item.set_bool(&leaf, b),
+                    SetVal::Number(n) => item.set_number(&leaf, n),
+                }
+            } else {
+                match sv {
+                    SetVal::Bool(b) => artboard.vm_set_bool(path, b),
+                    SetVal::Number(n) => artboard.vm_set_number(path, n),
+                }
+            };
+            res.with_context(|| format!("setting view-model property {path:?}"))?;
             println!("  set view-model {path:?} = {val}");
         }
     }
@@ -250,9 +270,15 @@ fn main() -> Result<()> {
             let index: u32 = idx
                 .parse()
                 .context("RIVE_VM_SET_ENUM index must be an integer")?;
-            artboard
-                .vm_set_enum_index(path, index)
-                .with_context(|| format!("setting enum {path:?} = index {index}"))?;
+            let res = if force_resolve || path.contains('[') {
+                let (item, leaf) = artboard
+                    .vm_resolve(path)
+                    .with_context(|| format!("resolving view-model path {path:?}"))?;
+                item.set_enum_index(&leaf, index)
+            } else {
+                artboard.vm_set_enum_index(path, index)
+            };
+            res.with_context(|| format!("setting enum {path:?} = index {index}"))?;
             println!("  set view-model enum {path:?} = index {index}");
         }
     }
@@ -415,10 +441,18 @@ fn main() -> Result<()> {
     }
 
     // RIVE_VM_GET="path" reads a view-model number AFTER advancing — read-back of
-    // a value the script / state machine wrote this frame.
+    // a value the script / state machine wrote this frame. A `name[i]` segment
+    // indexes a list element (e.g. "wheels[2]/value"), resolved via `vm_resolve`.
     if let Ok(path) = std::env::var("RIVE_VM_GET") {
         let path = path.trim();
-        match artboard.vm_get_number(path) {
+        let read = if force_resolve || path.contains('[') {
+            artboard
+                .vm_resolve(path)
+                .and_then(|(item, leaf)| item.get_number(&leaf))
+        } else {
+            artboard.vm_get_number(path)
+        };
+        match read {
             Ok(v) => println!("  view-model {path:?} = {v}"),
             Err(e) => println!("  view-model {path:?} read failed: {e}"),
         }

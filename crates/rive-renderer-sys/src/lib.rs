@@ -439,6 +439,41 @@ extern "C" {
         path: *const c_char,
         out: *mut u8,
     ) -> RiveStatus;
+    // Handle writes — drive a nested VM or a list item (the flat path can't index lists).
+    pub fn rive_vmi_set_number(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        value: f32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_set_bool(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        value: u8,
+    ) -> RiveStatus;
+    pub fn rive_vmi_set_color(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        argb: u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_set_string(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        value: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_vmi_set_enum_index(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        index: u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_set_enum_name(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        name: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_vmi_fire_trigger(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+    ) -> RiveStatus;
 
     // ===== Text runs (get/set a TextValueRun's string) ======================
     /// `name` is the run's authored name; `path` selects a nested artboard

@@ -183,6 +183,21 @@ void               rive_state_machine_destroy(RiveStateMachine*);
  * result to its backing artboard. */
 void               rive_state_machine_advance(RiveStateMachine*, float dt_seconds);
 
+/* --- Playback controls (seek / duration / time) ----------------------------
+ * Seek/time work on a LINEAR-ANIMATION scene only (the default-scene fallback
+ * when an artboard has no state machine). State machines have no scalar playhead:
+ * _duration returns -1, _time returns -1, _seek returns false (no-op). Pause and
+ * speed are NOT here — they are dt manipulation the caller already owns (pass 0 /
+ * scaled dt to _advance). */
+/* Animation length in seconds, or -1 for a state machine / null handle. */
+float              rive_state_machine_duration(RiveStateMachine*);
+/* Current playhead in seconds, or -1 for a state machine / null handle. */
+float              rive_state_machine_time(RiveStateMachine*);
+/* Seek to absolute time `t` (seconds, clamped to [0, duration]) and apply
+ * immediately so the pose is visible without a following _advance. Returns true
+ * if seekable (a linear-animation scene), false for a state machine / null. */
+bool               rive_state_machine_seek(RiveStateMachine*, float t);
+
 /* --- Fit / alignment (how the artboard maps into its draw target) -----------
  * Stored on the handle; rive_artboard_draw / _viewport read the artboard's, and
  * pointer inversion reads the state machine's (set BOTH to the same values, via

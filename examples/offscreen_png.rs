@@ -498,6 +498,27 @@ fn main() -> Result<()> {
         }
     }
 
+    // RIVE_SEEK="t": seek the scene to absolute time `t` (seconds) AFTER advancing,
+    // right before the snapshot — so the rendered pose is exactly time `t` (scrubbing).
+    // Only LINEAR-ANIMATION scenes are seekable (an artboard with animations but no
+    // state machine, e.g. a raw animation .riv); on a state machine `seek` returns
+    // false and the frame is unchanged. The duration/time read-back below proves
+    // seekability and the new playhead. Two runs at different `t` diff to a different
+    // PNG (proves the seek moved the playhead); same `t` twice is byte-identical.
+    println!(
+        "  playback: duration={:?} time={:?} (None == state machine, not seekable)",
+        state_machine.duration(),
+        state_machine.time()
+    );
+    if let Ok(spec) = std::env::var("RIVE_SEEK") {
+        let t: f32 = spec.trim().parse().context("RIVE_SEEK must be a float (seconds)")?;
+        let ok = state_machine.seek(t);
+        println!(
+            "  seek to {t}s: applied={ok} (playhead now {:?})",
+            state_machine.time()
+        );
+    }
+
     let frame = ctx
         .begin_frame(&target, CLEAR_RGBA)
         .context("beginning the frame")?;

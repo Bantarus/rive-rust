@@ -237,6 +237,16 @@ extern "C" {
     pub fn rive_state_machine_destroy(sm: *mut RiveStateMachine);
     pub fn rive_state_machine_advance(sm: *mut RiveStateMachine, dt_seconds: f32);
 
+    /// Playback duration in seconds, or `-1` for a state machine / null handle
+    /// (state machines are continuous — no fixed length). Bounds a seek range.
+    pub fn rive_state_machine_duration(sm: *mut RiveStateMachine) -> f32;
+    /// Current playhead in seconds, or `-1` for a state machine / null handle.
+    pub fn rive_state_machine_time(sm: *mut RiveStateMachine) -> f32;
+    /// Seek to absolute `t` (seconds, clamped to `[0, duration]`) and apply
+    /// immediately. Returns `true` if seekable (a linear-animation scene), `false`
+    /// for a state machine / null (the caller no-ops).
+    pub fn rive_state_machine_seek(sm: *mut RiveStateMachine, t: f32) -> bool;
+
     /// Fit / alignment, stored on the handle (draw reads the artboard's; pointer
     /// inversion reads the state machine's — set both to match). `fit`: fill=0,
     /// contain=1, cover=2, fitWidth=3, fitHeight=4, none=5, scaleDown=6, layout=7.

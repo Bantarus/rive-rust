@@ -341,7 +341,7 @@ impl AssetLoader for RivLoader {
 /// selector fields are reserved so named selection is an additive change later.
 ///
 /// `#[non_exhaustive]`: construct via [`RiveAnimation::new`] (then set public
-/// fields), so future fields (e.g. `fit`, `alignment`, `paused`) stay additive.
+/// fields), so future fields (e.g. `fit`, `alignment`) stay additive.
 #[derive(Component, Debug, Clone)]
 #[require(RiveTarget)]
 #[non_exhaustive]
@@ -352,8 +352,26 @@ pub struct RiveAnimation {
     pub artboard: ArtboardSelector,
     /// Which scene/state machine to play (default / by name / by index). Both tiers.
     pub state_machine: StateMachineSelector,
-    /// Playback speed multiplier applied to `Time::delta` (`1.0` == realtime).
+    /// Playback speed multiplier applied to `Time::delta` (`1.0` == realtime, `2.0`
+    /// double speed, `0.5` half). Negative/non-finite values are clamped to a
+    /// non-negative finite step before advancing. Both tiers.
     pub speed: f32,
+    /// When `true`, the scene is advanced by `0` each frame: time is frozen but the
+    /// artboard is still re-applied (pending data-binding writes take effect) and the
+    /// frozen frame is still rendered. Both tiers. Distinct from
+    /// [`RiveActive(false)`](RiveActive), which *culls* the face (skips advance AND
+    /// render). Toggle via [`pause`](Self::pause) / [`resume`](Self::resume).
+    pub paused: bool,
+    /// One-shot seek request (absolute seconds), consumed on the next advance. Set via
+    /// [`seek`](Self::seek). Only linear-animation scenes are seekable; a request on a
+    /// state machine is silently dropped. Floor drains this directly; zero-copy stages
+    /// it (see `staged_seek`).
+    pending_seek: Option<f32>,
+    /// Zero-copy staging snapshot of `pending_seek`: the read-only render-extract can't
+    /// drain the live queue, so `stage_playback` (in `Last`) moves `pending_seek` here
+    /// for the extract to ferry. Absent under `floor` (it drains `pending_seek` inline).
+    #[cfg(feature = "zero_copy")]
+    staged_seek: Option<f32>,
 }
 
 impl RiveAnimation {
@@ -365,7 +383,72 @@ impl RiveAnimation {
             artboard: ArtboardSelector::Default,
             state_machine: StateMachineSelector::Default,
             speed: 1.0,
+            paused: false,
+            pending_seek: None,
+            #[cfg(feature = "zero_copy")]
+            staged_seek: None,
         }
+    }
+
+    /// Freezes playback ([`paused`](Self::paused) = `true`): time stops advancing but
+    /// the frame keeps rendering and data binding keeps applying. Builder-style.
+    pub fn pause(&mut self) -> &mut Self {
+        self.paused = true;
+        self
+    }
+
+    /// Resumes playback ([`paused`](Self::paused) = `false`). Builder-style.
+    pub fn resume(&mut self) -> &mut Self {
+        self.paused = false;
+        self
+    }
+
+    /// Sets the playback [`speed`](Self::speed) multiplier. Builder-style.
+    pub fn set_speed(&mut self, speed: f32) -> &mut Self {
+        self.speed = speed;
+        self
+    }
+
+    /// Requests a one-shot seek to absolute `time_seconds` on the next advance (the
+    /// playhead jumps there and the pose is applied immediately). Only effective on a
+    /// **linear-animation** scene — a request on a state machine is silently dropped
+    /// (state machines have no scalar playhead). Out-of-range times are clamped to
+    /// `[0, duration]`. Pair with [`pause`](Self::pause) for scrubbing. Builder-style.
+    ///
+    /// Reading the live playhead / duration back into Bevy is deferred (same rationale
+    /// as the view-model watch read-back); use the safe layer's
+    /// [`StateMachine::time`](rive_renderer::StateMachine::time) /
+    /// [`duration`](rive_renderer::StateMachine::duration) for that.
+    pub fn seek(&mut self, time_seconds: f32) -> &mut Self {
+        self.pending_seek = Some(time_seconds);
+        self
+    }
+
+    /// Whether there is seek staging work this frame (a pending request to snapshot,
+    /// or a previously-staged value to clear). Lets `stage_playback` skip untouched
+    /// faces. Mirrors `RiveViewModel::has_staging_work`. Zero-copy only.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn has_seek_staging_work(&self) -> bool {
+        self.pending_seek.is_some() || self.staged_seek.is_some()
+    }
+
+    /// Double-buffers `pending_seek` → `staged_seek` so the read-only render-extract
+    /// can ferry it (mirrors `RiveViewModel::stage_writes`). Called by `stage_playback`
+    /// ONLY for an extractable face, so a seek queued before the instance is live stays
+    /// in `pending_seek` rather than being stranded in `staged_seek` and dropped.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn stage_seek(&mut self) {
+        if self.pending_seek.is_none() {
+            self.staged_seek = None;
+        } else {
+            self.staged_seek = self.pending_seek.take();
+        }
+    }
+
+    /// The staged seek snapshot for the extract to ferry. Zero-copy only.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn staged_seek(&self) -> Option<f32> {
+        self.staged_seek
     }
 }
 
@@ -861,7 +944,7 @@ fn instantiate_rive_instances(
 #[cfg(feature = "floor")]
 #[expect(
     clippy::type_complexity,
-    reason = "Bevy query tuple with Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> + Option<&mut RiveText> control inputs"
+    reason = "Bevy query tuple with &mut RiveAnimation (seek drain) + Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> + Option<&mut RiveText> control inputs"
 )]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
@@ -871,7 +954,7 @@ fn advance_and_upload_rive(
     mut vm_changes: MessageWriter<RivePropertyChanged>,
     mut query: Query<(
         Entity,
-        &RiveAnimation,
+        &mut RiveAnimation,
         &RiveTarget,
         Option<&RivePointer>,
         Option<&mut RiveViewModel>,
@@ -883,7 +966,7 @@ fn advance_and_upload_rive(
         return;
     };
     let dt = time.delta_secs();
-    for (entity, anim, target, pointer, mut view_model, fit, mut text) in &mut query {
+    for (entity, mut anim, target, pointer, mut view_model, fit, mut text) in &mut query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
@@ -937,10 +1020,20 @@ fn advance_and_upload_rive(
             crate::text::apply_text_writes(text, &inst.artboard);
         }
 
+        // Apply a one-shot seek BEFORE advancing (the shim applies it immediately, so
+        // a seek while paused is visible this frame). Only deref-mut when a seek is
+        // pending, to avoid tripping `RiveAnimation` change detection every frame.
+        if anim.pending_seek.is_some() {
+            if let Some(t) = anim.pending_seek.take() {
+                inst.state_machine.seek(t);
+            }
+        }
+
         // Guard the native state machine against NaN/negative/non-finite steps
         // (`speed` is user-controlled). Relies on `Time` being virtual-clamped
-        // (~250 ms max) to bound a huge real delta.
-        let step = dt * anim.speed;
+        // (~250 ms max) to bound a huge real delta. `paused` freezes time at 0 but
+        // still advances+applies (data binding takes effect, frozen frame renders).
+        let step = if anim.paused { 0.0 } else { dt * anim.speed };
         if step.is_finite() {
             inst.state_machine.advance(step.max(0.0));
         }

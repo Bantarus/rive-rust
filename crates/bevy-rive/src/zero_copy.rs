@@ -246,9 +246,10 @@ impl Plugin for RiveZeroCopyPlugin {
             // Audio: apply the optional `RiveAudio` resource (master volume / mute)
             // on change — audio plays automatically during the node's advance.
             .add_systems(Update, crate::audio::apply_rive_audio)
-            // M-DATA / M-TEXT: stage view-model + text-run writes in `Last` (after
-            // gameplay, before extract), so the read-only extract can ferry them.
-            .add_systems(Last, (stage_vm_writes, stage_text_writes));
+            // M-DATA / M-TEXT / M-PLAYBACK: stage view-model + text-run writes and the
+            // one-shot seek in `Last` (after gameplay, before extract), so the
+            // read-only extract can ferry them.
+            .add_systems(Last, (stage_vm_writes, stage_text_writes, stage_playback));
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
             error!("rive zero-copy: RenderApp missing (enable bevy_render)");
@@ -1120,8 +1121,14 @@ struct ExtractedRive {
     bytes: std::sync::Arc<[u8]>,
     width: u32,
     height: u32,
-    /// `dt * speed`, sanitized non-negative + finite (0 for a culled face).
+    /// `dt * speed`, sanitized non-negative + finite (0 for a culled OR paused face).
     step: f32,
+    /// M-PLAYBACK: this frame's one-shot seek (absolute seconds), applied to the
+    /// instance in the node BEFORE advance (the zero-copy analogue of the floor
+    /// advance system's inline `seek`). `None` for no seek. Staged main-world by
+    /// `stage_playback` (extract is read-only, so it can't drain the live queue);
+    /// not ferried for culled faces (they skip advance, like writes).
+    seek: Option<f32>,
     /// M-SCALE: `Some` for an atlas-opted face (its resolved tile placement, assigned
     /// main-world); `None` for a dedicated-image face (which uses `display` above) OR a
     /// culled face (no placement this frame).
@@ -1570,6 +1577,36 @@ fn stage_text_writes(
     }
 }
 
+/// M-PLAYBACK analogue of [`stage_vm_writes`]: stages each entity's one-shot seek
+/// (`pending_seek` → `staged_seek`) so the read-only extract can ferry it. Same
+/// readiness gate — a seek queued before the instance is live stays in `pending_seek`
+/// (retained across the async-load / unallocated / culled window) rather than being
+/// stranded in `staged_seek` and silently dropped. (`speed` / `paused` need no
+/// staging — they're stable settings the extract reads directly.)
+fn stage_playback(
+    mut query: Query<(Entity, &mut RiveAnimation, &RiveTarget, Option<&RiveActive>)>,
+    files: Res<Assets<RiveFile>>,
+    atlas: Res<RiveAtlasState>,
+) {
+    for (entity, mut anim, target, active) in &mut query {
+        if !anim.has_seek_staging_work() {
+            continue;
+        }
+        // Mirror extract_rive_instances' readiness gate (asset loaded + not culled +
+        // surface allocated). Keep in sync with stage_vm_writes / stage_text_writes / extract.
+        let ready = files.get(&anim.handle).is_some()
+            && active.is_none_or(|a| a.0)
+            && if target.atlas.is_some() {
+                atlas.locs.contains_key(&entity)
+            } else {
+                target.image != Handle::default()
+            };
+        if ready {
+            anim.stage_seek();
+        }
+    }
+}
+
 /// Ferries per-entity `Send` data from the main world into the [`ExtractedRives`]
 /// render-world resource each frame. Only entities whose `.riv` is loaded *and*
 /// whose display image is allocated are included.
@@ -1626,9 +1663,13 @@ fn extract_rive_instances(
                 width: target.width,
                 height: target.height,
                 step: 0.0,
+                // Culled: skip advance, so a seek (applied at advance) is pointless this
+                // frame — ferry none (the request stays queued in `pending_seek`, since
+                // `stage_playback`'s readiness gate skips culled faces).
+                seek: None,
                 atlas: None,
                 culled: true,
-                // Paused: skip advance, so applying writes (which take effect on
+                // Culled: skip advance, so applying writes (which take effect on
                 // advance) is pointless this frame — ferry none.
                 vm_writes: Vec::new(),
                 text_writes: Vec::new(),
@@ -1665,7 +1706,9 @@ fn extract_rive_instances(
             }
             (target.image.clone(), None)
         };
-        let step = dt * anim.speed;
+        // `paused` freezes time at step 0 (artboard still re-applies + renders); else
+        // scale by speed. Sanitize to a non-negative finite step.
+        let step = if anim.paused { 0.0 } else { dt * anim.speed };
         let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
         out.items.push(ExtractedRive {
             entity,
@@ -1674,6 +1717,9 @@ fn extract_rive_instances(
             width: target.width,
             height: target.height,
             step,
+            // Ferry this frame's staged one-shot seek (`stage_playback` snapshotted
+            // `pending_seek` → `staged_seek` earlier this frame). `None` = no seek.
+            seek: anim.staged_seek(),
             atlas: atlas_data,
             culled: false,
             // Ferry this frame's staged view-model writes (read-only extract → the
@@ -1955,6 +2001,14 @@ impl Node for RiveFillNode {
             // once-per-frame gate; text sets are idempotent so the gate is just an opt).
             if apply_vm_writes && !item.text_writes.is_empty() {
                 crate::text::apply_text_writes_slice(&inst.artboard, &item.text_writes);
+            }
+            // M-PLAYBACK: apply this frame's one-shot seek before advance (same
+            // once-per-visual-frame gate, so a multi-camera frame seeks once). The
+            // shim applies it immediately, so a seek while paused (step 0) is visible.
+            if apply_vm_writes {
+                if let Some(t) = item.seek {
+                    inst.state_machine.seek(t);
+                }
             }
             // M-SCALE: time the per-instance state-machine tick (previously untimed
             // — it runs before the record span, so the collector never saw it).
@@ -2253,6 +2307,12 @@ impl Node for RiveFillNode {
                         }
                     }
 
+                    // M-PLAYBACK: one-shot seek before advance (see dedicated path).
+                    if apply_vm_writes {
+                        if let Some(t) = item.seek {
+                            inst.state_machine.seek(t);
+                        }
+                    }
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;

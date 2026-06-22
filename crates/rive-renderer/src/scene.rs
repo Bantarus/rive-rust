@@ -283,9 +283,42 @@ pub struct StateMachine {
 
 impl StateMachine {
     /// Advances the state machine by `dt_seconds` and applies it to the artboard.
+    ///
+    /// To **pause**, advance by `0.0` (the artboard is re-applied — pending data
+    /// binding still takes effect — but time does not move). For **playback speed**,
+    /// scale the step yourself (`advance(dt * speed)`); rive has no per-instance
+    /// speed setter (an animation's own speed is baked into the asset).
     pub fn advance(&mut self, dt_seconds: f32) {
         // SAFETY: `self.ptr` is a live state-machine handle.
         unsafe { sys::rive_state_machine_advance(self.ptr, dt_seconds) };
+    }
+
+    /// Seeks to absolute `time_seconds` (clamped to `[0, duration]`) and applies it
+    /// immediately, so the seeked pose is visible without a following
+    /// [`advance`](Self::advance) (e.g. scrubbing while paused).
+    ///
+    /// Only **linear-animation** scenes are seekable (the default-scene fallback when
+    /// an artboard has no state machine). Returns `false` for a state machine — it
+    /// has no scalar playhead — leaving it untouched. Use [`duration`](Self::duration)
+    /// to test seekability and bound the range.
+    pub fn seek(&mut self, time_seconds: f32) -> bool {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        unsafe { sys::rive_state_machine_seek(self.ptr, time_seconds) }
+    }
+
+    /// The playback duration in seconds, or `None` for a state machine (which is
+    /// continuous — no fixed length). `Some` exactly when the scene is seekable.
+    pub fn duration(&self) -> Option<f32> {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        let d = unsafe { sys::rive_state_machine_duration(self.ptr) };
+        (d >= 0.0).then_some(d)
+    }
+
+    /// The current playhead position in seconds, or `None` for a state machine.
+    pub fn time(&self) -> Option<f32> {
+        // SAFETY: `self.ptr` is a live state-machine handle.
+        let t = unsafe { sys::rive_state_machine_time(self.ptr) };
+        (t >= 0.0).then_some(t)
     }
 
     /// Sets the [`FitAlign`] used to invert pointer coordinates back into artboard

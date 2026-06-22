@@ -24,6 +24,7 @@
 #include "rive/artboard.hpp"
 #include "rive/scene.hpp"
 #include "rive/animation/state_machine_instance.hpp"
+#include "rive/animation/linear_animation_instance.hpp" // seek/time (LinearAnimationInstance)
 #include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance (data binding)
 #include "rive/factory.hpp"
 // Out-of-band asset loading (rive_file_load_with_assets).
@@ -214,6 +215,13 @@ struct RiveFile
 struct RiveStateMachine
 {
     std::unique_ptr<rive::Scene> scene;
+    // Concrete scene kind, recorded at construction (the runtime is built -fno-rtti,
+    // so we can't dynamic_cast back). True only when `scene` is a
+    // LinearAnimationInstance (the default-scene animation fallback) — the seek/time
+    // playhead API casts on this. A StateMachineInstance (or any non-animation scene)
+    // is false. Set definitively by the selectors, NOT inferred from durationSeconds()
+    // (which a StaticScene would alias to 0, colliding with a real animation).
+    bool isLinear = false;
     // Fit/alignment for INVERTING pointer coords back into artboard space — must
     // mirror the artboard's draw fit/alignment or hits won't line up. Default
     // contain/center == the historical hardcoded inversion. Set via
@@ -771,9 +779,11 @@ extern "C" void rive_artboard_destroy(RiveArtboard* artboard)
 // Wraps a Scene (state machine / animation) into a RiveStateMachine handle,
 // binding the artboard's view-model instance to it. Shared by the default / named
 // / by-index selectors. Takes ownership of `scene`; `scene == nullptr` means the
-// caller's lookup missed (error already set), so this forwards null.
+// caller's lookup missed (error already set), so this forwards null. `isLinear`
+// records the concrete type (the caller knows it statically) for the seek API.
 static RiveStateMachine* make_sm_handle(RiveArtboard* artboard,
-                                        std::unique_ptr<rive::Scene> scene)
+                                        std::unique_ptr<rive::Scene> scene,
+                                        bool isLinear)
 {
     if (scene == nullptr)
         return nullptr;
@@ -784,6 +794,7 @@ static RiveStateMachine* make_sm_handle(RiveArtboard* artboard,
         return nullptr;
     }
     handle->scene = std::move(scene);
+    handle->isLinear = isLinear;
 
     // Bind the SAME view-model instance to the state machine too (per the
     // data-binding contract: the artboard binding drives layout-affecting
@@ -805,23 +816,33 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_default(
         return nullptr;
     }
 
-    // Prefer the designer-flagged default state machine; otherwise fall back to
-    // defaultScene() (first state machine, else first animation, else static).
+    // Replicate rive's defaultScene() chain (defaultStateMachine → stateMachineAt(0)
+    // → animationAt(0)) EXPLICITLY, rather than calling the type-erasing
+    // defaultScene(), so we know the concrete type and can tag `isLinear` definitively
+    // for the seek API. The animation branch is the only LinearAnimationInstance; both
+    // SM branches are not seekable. (defaultScene() never yields a StaticScene in this
+    // runtime — a static-only artboard returns null here, exactly as before.)
     std::unique_ptr<rive::Scene> scene;
+    bool isLinear = false;
     if (auto sm = artboard->artboard->defaultStateMachine())
     {
         scene = std::unique_ptr<rive::Scene>(sm.release());
     }
-    else
+    else if (auto sm = artboard->artboard->stateMachineAt(0))
     {
-        scene = artboard->artboard->defaultScene();
+        scene = std::unique_ptr<rive::Scene>(sm.release());
+    }
+    else if (auto anim = artboard->artboard->animationAt(0))
+    {
+        scene = std::unique_ptr<rive::Scene>(anim.release());
+        isLinear = true;
     }
     if (scene == nullptr)
     {
         set_error("artboard has no playable state machine, animation, or scene");
         return nullptr;
     }
-    return make_sm_handle(artboard, std::move(scene));
+    return make_sm_handle(artboard, std::move(scene), isLinear);
 }
 
 extern "C" RiveStateMachine* rive_artboard_state_machine_named(
@@ -846,7 +867,8 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_named(
         set_error("artboard has no state machine with that name");
         return nullptr;
     }
-    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()));
+    // A named scene is always a StateMachineInstance — not seekable (isLinear=false).
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false);
 }
 
 extern "C" RiveStateMachine* rive_artboard_state_machine_at(
@@ -864,7 +886,8 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_at(
         set_error("state machine index out of range");
         return nullptr;
     }
-    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()));
+    // An indexed scene is always a StateMachineInstance — not seekable (isLinear=false).
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false);
 }
 
 // Selection introspection: discover the state-machine names selectable by name/index.
@@ -905,6 +928,70 @@ extern "C" void rive_state_machine_advance(RiveStateMachine* sm, float dt_second
     if (sm == nullptr || sm->scene == nullptr)
         return;
     sm->scene->advanceAndApply(dt_seconds);
+}
+
+// Playback duration in seconds: the animation length for a LINEAR-ANIMATION scene,
+// or -1 for a STATE MACHINE (rive::StateMachineInstance::durationSeconds() returns
+// -1 — state machines are continuous, no fixed length). The safe layer maps -1 to
+// None. Also -1 on a null handle. Read it to bound a seek (the seekable range).
+extern "C" float rive_state_machine_duration(RiveStateMachine* sm)
+{
+    if (sm == nullptr || sm->scene == nullptr)
+        return -1.0f;
+    return sm->scene->durationSeconds();
+}
+
+// Returns the scene as a LinearAnimationInstance, or nullptr if it is not one (a
+// state machine, etc.). The runtime is built with -fno-rtti, so dynamic_cast is
+// unavailable; instead the selectors recorded the concrete type in `isLinear` at
+// construction (where it is statically known), which makes this static_cast sound.
+// (`Scene` is the first base of LinearAnimationInstance, so the downcast is a
+// zero-offset adjustment.) Caller must have checked sm/scene non-null. Note we do
+// NOT discriminate on durationSeconds(): a StaticScene returns 0, aliasing a real
+// zero-length animation, so the duration sentinel could not tell them apart.
+static rive::LinearAnimationInstance* as_linear(RiveStateMachine* sm)
+{
+    if (!sm->isLinear)
+        return nullptr;
+    return static_cast<rive::LinearAnimationInstance*>(sm->scene.get());
+}
+
+// Current playhead position in seconds for a LINEAR-ANIMATION scene, or -1 if the
+// scene is a state machine (no scalar playhead) or the handle is null.
+extern "C" float rive_state_machine_time(RiveStateMachine* sm)
+{
+    if (sm == nullptr || sm->scene == nullptr)
+        return -1.0f;
+    if (auto* lai = as_linear(sm))
+        return lai->time();
+    return -1.0f;
+}
+
+// Seek a LINEAR-ANIMATION scene to absolute time `t` (seconds), clamped to
+// [0, duration]. Returns true if the scene is seekable (a LinearAnimationInstance)
+// and the seek applied, false otherwise — state machines have no scalar playhead
+// and cannot be sought (return false; the caller no-ops). Applies immediately
+// (advanceAndApply(0)) so the seeked pose is visible WITHOUT a subsequent advance
+// (e.g. seeking while paused). `time(t)` only sets the playhead; the apply pushes
+// it through the animation onto the artboard hierarchy.
+extern "C" bool rive_state_machine_seek(RiveStateMachine* sm, float t)
+{
+    if (sm == nullptr || sm->scene == nullptr)
+        return false;
+    auto* lai = as_linear(sm);
+    if (lai == nullptr)
+        return false;
+    // Clamp into [0, duration]; guard against a non-finite request.
+    if (!(t == t)) // NaN
+        t = 0.0f;
+    const float dur = lai->durationSeconds();
+    if (t < 0.0f)
+        t = 0.0f;
+    else if (dur > 0.0f && t > dur)
+        t = dur;
+    lai->time(t);
+    lai->advanceAndApply(0.0f);
+    return true;
 }
 
 // Sets the fit/alignment used to INVERT pointer coords (must match the artboard's

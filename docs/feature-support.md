@@ -76,7 +76,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 |---------|:------:|-----------|-------|
 | Advance / playback tick | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | `StateMachine::advance`; `RiveAnimation.speed` |
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | move/down/up/exit; `RivePointer` — **both tiers AND every zero-copy draw path** (floor + zero-copy **dedicated** + zero-copy **atlas** tiles). The inversion tracks the face's Fit/Alignment; atlas faces are tile-aware (target-pixel coords are normalized into the face's tile before inverting, via `set_pointer_tile`) |
-| **View-model data binding** | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **per-item / nested writes** ✅ — the handle is now read-**write** (`set_*` / `fire_trigger`), and `Artboard::vm_resolve` walks a `name[i]/leaf` path to drive a **list item** (which the flat resolver can't index); the `RiveViewModel` component accepts the same `[i]` paths in both tiers; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list **structural** mutation (add/remove/swap), image/artboard ref props (blocked — see backlog) |
+| **View-model data binding** | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **per-item / nested writes** ✅ — the handle is now read-**write** (`set_*` / `fire_trigger`), and `Artboard::vm_resolve` walks a `name[i]/leaf` path to drive a **list item** (which the flat resolver can't index); the `RiveViewModel` component accepts the same `[i]` paths in both tiers; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). **Image-reference props** ✅ — decode encoded bytes (PNG/JPEG/WEBP) to a reusable `RiveImage` (`Context::decode_image`), then bind with `Artboard::vm_set_image` (flat + `/`-nested) / `RiveViewModelInstance::set_image` (nested/list-item), or unbind with `vm_clear_image`/`clear_image`; `RiveViewModel::set_image(path, bytes)` ferries + decodes at apply in BOTH tiers (same-context enforced → `ContextMismatch`). `RiveViewModel` component = queued writes + typed `watch` read-back (floor). **Deferred:** zero-copy *watch* read-back (needs a render→main channel; floor reads cover the single-face case), list **structural** mutation (add/remove/swap), artboard ref props (blocked — see backlog) |
 | State-machine inputs (bool/number/trigger) | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated — not supported.** The classic `Scene::getBool/getNumber/getTrigger` path is superseded by view-model **data binding** (the modern channel, already shipped). See Excluded. |
 | View-model change / trigger observation | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property ✅ (floor). Supersedes the deprecated events read-back below. **Deferred:** zero-copy observe (render→main back-channel, like watch read-back). |
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
@@ -95,7 +95,10 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 1. **Animation playback controls** (seek / pause / per-anim speed); **bones / constraints /
    solo runtime control**.
 
-*(Recently shipped: **view-model per-item / list-item writes** — the `RiveViewModelInstance`
+*(Recently shipped: **view-model image-reference data binding** — `Context::decode_image` turns
+encoded bytes (PNG/JPEG/WEBP) into a reusable `RiveImage`, bound to an image property via
+`Artboard::vm_set_image` / `RiveViewModelInstance::set_image` / `RiveViewModel::set_image` (both tiers;
+same-context enforced); **view-model per-item / list-item writes** — the `RiveViewModelInstance`
 handle is now read-write (`set_*` / `fire_trigger`) and `Artboard::vm_resolve` walks a `name[i]/leaf`
 path to drive a list item or nested VM (both tiers); **audio host-mixer routing** — the `audio-external`
 feature (`--with_rive_audio=external`): rive owns no device, the host pulls the mixed PCM, and
@@ -113,12 +116,10 @@ both deprecated; view-model data binding is the modern write *and* read channel.
 - **zero-copy watch read-back** — writes forward in both tiers; *reads* (watch) are floor-only.
   Needs a render→main back-channel (`zero_copy` advances in the render world); deferred because you
   rarely read back N atlas faces and floor reads cover the single-face case.
-- **image / artboard reference props** — `propertyImage`/`propertyArtboard` are **set-only**. Out-of-band
-  **asset loading** now ships (a referenced image can be supplied at load), but *data-binding* an image
-  property at runtime still needs a `RenderImage` handle exposed at the safe layer (decode → bindable
-  value); `propertyArtboard` needs a `BindableArtboard` from **nested-artboard binding**. Wire each WITH
-  its value source, not before (a setter with nothing to pass it is a dead end). *(Likely next slice — the
-  image half is now unblocked by asset loading.)*
+- **artboard reference props** — `propertyImage` now **ships** (decode → `RiveImage` → `vm_set_image`;
+  see the data-binding row). Only `propertyArtboard` remains **set-only / deferred**: it needs a
+  `BindableArtboard` value source from **nested-artboard binding**, so wire it WITH that feature, not
+  before (a setter with nothing to pass it is a dead end).
 - **list STRUCTURAL mutation (add/remove/swap)** — list read / size / item-introspection **and per-item
   writes** now ship (the handle is read-write; `vm_resolve` drives `list[i]/leaf`); only add/remove/swap +
   creating new list-item instances remain (need `ViewModelInstanceListRuntime` mutators + VM-instance

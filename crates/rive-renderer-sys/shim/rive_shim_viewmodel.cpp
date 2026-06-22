@@ -17,9 +17,10 @@
  *     and reads + writes. Handles are BORROWED: they alias instances owned by rive's
  *     caches under the root `vmRuntime`, so they are valid only while the artboard
  *     lives and the addressed list is not mutated. Reads AND writes (number/bool/
- *     color/string/enum/trigger) — so a caller can drive a nested VM or a LIST ITEM.
- *     List structural mutation (add/remove/swap) + image/artboard refs are deferred
- *     — see docs/feature-support.md.
+ *     color/string/enum/trigger + image) — so a caller can drive a nested VM or a LIST ITEM.
+ *     An image (assetImage) property is bound from a decoded RiveImage (rive_image_decode
+ *     lives in rive_shim.cpp — it needs the render context). List structural mutation
+ *     (add/remove/swap) + artboard refs are deferred — see docs/feature-support.md.
  */
 #include "rive_shim_internal.hpp"
 
@@ -33,6 +34,7 @@
 #include "rive/viewmodel/runtime/viewmodel_instance_string_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_enum_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_list_runtime.hpp"
+#include "rive/viewmodel/runtime/viewmodel_instance_asset_image_runtime.hpp" // image binding
 #include "rive/viewmodel/runtime/viewmodel_runtime.hpp" // PropertyData
 
 using rive::ViewModelInstanceRuntime;
@@ -272,6 +274,22 @@ RiveStatus vmi_trigger(ViewModelInstanceRuntime* vm, const char* path)
     p->trigger();
     return RIVE_OK;
 }
+// Binds a decoded image to an image (assetImage) property. `image == nullptr`
+// clears the binding (rive's value(nullptr)). The runtime takes its OWN ref on the
+// RenderImage, so the caller's RiveImage may be freed afterwards. The image must
+// have been decoded by the SAME render context the artboard renders with (the safe
+// layer enforces this); the shim only sees an already-decoded RenderImage.
+RiveStatus vmi_set_image(ViewModelInstanceRuntime* vm, const char* path, RiveImage* image)
+{
+    auto* p = vm->propertyImage(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model image property not found");
+        return 1;
+    }
+    p->value(image != nullptr ? image->image.get() : nullptr);
+    return RIVE_OK;
+}
 
 // Schema introspection on a resolved runtime (shared by both surfaces).
 RiveStatus vmi_property_at_core(ViewModelInstanceRuntime* vm, uint32_t index,
@@ -486,6 +504,15 @@ extern "C" RiveStatus rive_artboard_vm_flush_changed(RiveArtboard* artboard,
     return vm == nullptr ? 1 : vmi_flush_changed(vm, path, out);
 }
 
+// Binds a decoded image to a root-VM image property (`/` reaches nested VMs).
+// `image == nullptr` clears it. See vmi_set_image for the same-context requirement.
+extern "C" RiveStatus rive_artboard_vm_set_image(RiveArtboard* artboard,
+                                                 const char* path, RiveImage* image)
+{
+    ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
+    return vm == nullptr ? 1 : vmi_set_image(vm, path, image);
+}
+
 // ===========================================================================
 // Handle-based ABI — operate on a RiveViewModelInstance* (root, nested VM, or
 // list item). Enables nested-VM introspection + list access the flat path can't
@@ -671,4 +698,12 @@ extern "C" RiveStatus rive_vmi_fire_trigger(RiveViewModelInstance* handle, const
 {
     ViewModelInstanceRuntime* vm = vmi_path(handle, path);
     return vm == nullptr ? 1 : vmi_trigger(vm, path);
+}
+// Bind a decoded image into a nested VM or a LIST ITEM's image property (which the
+// flat artboard-rooted path can't address). `image == nullptr` clears it.
+extern "C" RiveStatus rive_vmi_set_image(RiveViewModelInstance* handle,
+                                         const char* path, RiveImage* image)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_image(vm, path, image);
 }

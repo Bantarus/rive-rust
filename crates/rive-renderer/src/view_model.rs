@@ -14,8 +14,9 @@
 use std::ffi::CString;
 use std::marker::PhantomData;
 use std::os::raw::c_char;
+use std::rc::Rc;
 
-use crate::{last_error, sys, Artboard, Error, Result};
+use crate::{last_error, sys, Artboard, Context, ContextInner, Error, Result};
 
 /// The data type of a view-model property (mirrors rive's `DataType`). Returned
 /// by [`Artboard::vm_property_at`] so a caller can pick the right typed accessor.
@@ -39,7 +40,8 @@ pub enum RiveValueKind {
     /// A **nested view model**. Reach it via [`RiveViewModelInstance::view_model`]
     /// (or address its scalars directly with a `/`-separated path).
     ViewModel,
-    /// An image reference (set-only; not wired yet — needs out-of-band assets).
+    /// An image reference — bind a decoded [`RiveImage`] with
+    /// [`Artboard::vm_set_image`] / [`RiveViewModelInstance::set_image`] (set-only).
     Image,
     /// An artboard reference (set-only; not wired yet — needs `BindableArtboard`).
     Artboard,
@@ -63,6 +65,62 @@ impl RiveValueKind {
             12 => RiveValueKind::Artboard,
             _ => RiveValueKind::Other,
         }
+    }
+}
+
+/// A decoded **render image** — the value source for binding an image to a
+/// view-model image property. Decode encoded bytes (PNG / JPEG / WEBP) with
+/// [`Context::decode_image`], then bind with [`Artboard::vm_set_image`] or
+/// [`RiveViewModelInstance::set_image`]. Binding takes its own reference, so a
+/// `RiveImage` may be dropped afterwards without unbinding it.
+///
+/// It owns GPU resources on the [`Context`]'s device, so it keeps that context
+/// alive and may only be bound into artboards on the **same** context (a mismatch
+/// is [`Error::ContextMismatch`], not undefined behavior). `!Send + !Sync`.
+pub struct RiveImage {
+    ptr: *mut sys::RiveImage,
+    /// Owning context: keeps the device alive *and* identifies which context this
+    /// image belongs to (checked on bind, like [`Artboard`]/`RenderTarget`).
+    ctx: Rc<ContextInner>,
+}
+
+impl Drop for RiveImage {
+    fn drop(&mut self) {
+        // SAFETY: created by the shim, destroyed exactly once; the `ctx` `Rc`
+        // (dropped after this body) keeps the device alive until after this destroy.
+        unsafe { sys::rive_image_destroy(self.ptr) };
+    }
+}
+
+impl std::fmt::Debug for RiveImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RiveImage").finish_non_exhaustive()
+    }
+}
+
+impl Context {
+    /// Decodes encoded image bytes (PNG / JPEG / WEBP) into a [`RiveImage`] using
+    /// this context's factory — the value source for binding an image to a
+    /// view-model image property ([`Artboard::vm_set_image`]).
+    ///
+    /// The bytes are only borrowed for the call. The returned image is tied to this
+    /// context's device; bind it only into artboards built on the same context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Image`] if the bytes can't be decoded (unsupported / corrupt
+    /// format, or no matching decoder compiled in).
+    pub fn decode_image(&self, bytes: &[u8]) -> Result<RiveImage> {
+        // SAFETY: `bytes` is borrowed only for this call (the shim copies what it
+        // needs); a null return signals a decode failure.
+        let ptr = unsafe { sys::rive_image_decode(self.inner.ptr, bytes.as_ptr(), bytes.len()) };
+        if ptr.is_null() {
+            return Err(Error::Image(last_error()));
+        }
+        Ok(RiveImage {
+            ptr,
+            ctx: Rc::clone(&self.inner),
+        })
     }
 }
 
@@ -117,6 +175,44 @@ impl Artboard {
         let c = Self::vm_path(path)?;
         // SAFETY: live handle + valid C string.
         let st = unsafe { sys::rive_artboard_vm_fire_trigger(self.inner.ptr, c.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Binds a decoded `image` to a view-model **image** property (a `/`-path
+    /// reaches a nested view model). Get `image` from [`Context::decode_image`];
+    /// binding takes its own reference, so the [`RiveImage`] may be dropped after.
+    /// The change is observed on the next advance.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `image` was decoded by a different [`Context`]
+    /// than this artboard's (binding it would drive one device's image through
+    /// another's renderer); [`Error::ViewModel`] if `path` is not an image property;
+    /// [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn vm_set_image(&self, path: &str, image: &RiveImage) -> Result<()> {
+        if !Rc::ptr_eq(&self.inner.ctx, &image.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        let c = Self::vm_path(path)?;
+        // SAFETY: live artboard handle + valid C string; `image.ptr` is a live image
+        // decoded by the same context (checked above).
+        let st = unsafe { sys::rive_artboard_vm_set_image(self.inner.ptr, c.as_ptr(), image.ptr) };
+        vm_status(st)
+    }
+
+    /// Clears a view-model **image** property — unbinds any bound image, leaving it
+    /// empty. The counterpart to [`Self::vm_set_image`] (no [`RiveImage`] needed, so
+    /// no context check).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not an image property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn vm_clear_image(&self, path: &str) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        // SAFETY: live artboard handle + valid C string; a null image clears the property.
+        let st =
+            unsafe { sys::rive_artboard_vm_set_image(self.inner.ptr, c.as_ptr(), std::ptr::null_mut()) };
         vm_status(st)
     }
 
@@ -175,7 +271,7 @@ impl Artboard {
     pub fn vm_root(&self) -> Option<RiveViewModelInstance<'_>> {
         // SAFETY: live artboard handle; the shim returns null if there is no VM.
         let p = unsafe { sys::rive_artboard_vm_root(self.inner.ptr) };
-        RiveViewModelInstance::from_ptr(p)
+        RiveViewModelInstance::from_ptr(p, self.inner.ctx.ptr)
     }
 
     /// Resolves an **indexed view-model path** to the instance that owns its leaf
@@ -381,22 +477,33 @@ fn parse_index_segment(seg: &str) -> Result<Option<(&str, usize)>> {
 /// reads **and writes** (`set_*` / [`Self::fire_trigger`]) + introspection +
 /// navigation — so a caller can drive a nested view model or a **list item**, which
 /// the flat artboard-rooted `vm_set_*` path can't address (rive's resolver can't
-/// index lists; use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). List
-/// *structural* mutation (add/remove/swap) and image/artboard refs are deferred (see
+/// index lists; use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). It
+/// can also bind an **image** property ([`Self::set_image`]). List *structural*
+/// mutation (add/remove/swap) and artboard refs are deferred (see
 /// `docs/feature-support.md`). `!Send`/`!Sync` (rive handles are not thread-safe).
 #[derive(Debug)]
 pub struct RiveViewModelInstance<'a> {
     ptr: *mut sys::RiveViewModelInstance,
+    /// The render context the owning artboard belongs to — identity only, used to
+    /// reject binding an image decoded by a different context ([`Self::set_image`]).
+    /// The `'a` borrow keeps the real context alive (via the artboard's `Rc`); this
+    /// raw pointer is never dereferenced, only compared.
+    ctx: *mut sys::RiveRenderContext,
     _marker: PhantomData<&'a Artboard>,
 }
 
 impl<'a> RiveViewModelInstance<'a> {
     /// Wraps a shim handle, returning `None` for a null pointer (no such instance).
-    fn from_ptr(ptr: *mut sys::RiveViewModelInstance) -> Option<Self> {
+    /// `ctx` is the owning artboard's render context, propagated to child handles
+    /// for the image-bind context check.
+    fn from_ptr(
+        ptr: *mut sys::RiveViewModelInstance,
+        ctx: *mut sys::RiveRenderContext,
+    ) -> Option<Self> {
         if ptr.is_null() {
             None
         } else {
-            Some(Self { ptr, _marker: PhantomData })
+            Some(Self { ptr, ctx, _marker: PhantomData })
         }
     }
 
@@ -411,7 +518,7 @@ impl<'a> RiveViewModelInstance<'a> {
         let c = Self::path(path).ok()?;
         // SAFETY: live handle (lifetime 'a) + valid C string; null = not found.
         let p = unsafe { sys::rive_vmi_property_view_model(self.ptr, c.as_ptr()) };
-        RiveViewModelInstance::from_ptr(p)
+        RiveViewModelInstance::from_ptr(p, self.ctx)
     }
 
     /// Number of elements in the **list** property at `path`.
@@ -429,7 +536,7 @@ impl<'a> RiveViewModelInstance<'a> {
         let c = Self::path(path).ok()?;
         // SAFETY: live handle (lifetime 'a) + valid C string; null on miss/oob.
         let p = unsafe { sys::rive_vmi_list_instance_at(self.ptr, c.as_ptr(), index as u32) };
-        RiveViewModelInstance::from_ptr(p)
+        RiveViewModelInstance::from_ptr(p, self.ctx)
     }
 
     /// Number of properties on this instance.
@@ -575,6 +682,41 @@ impl<'a> RiveViewModelInstance<'a> {
         let c = Self::path(path)?;
         // SAFETY: live handle + valid C string.
         let st = unsafe { sys::rive_vmi_fire_trigger(self.ptr, c.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Binds a decoded `image` to an **image** property at `path` — reaching a
+    /// nested view model or a **list item** (what the flat [`Artboard::vm_set_image`]
+    /// can't). Get `image` from [`Context::decode_image`]; binding takes its own
+    /// reference, so the [`RiveImage`] may be dropped after.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `image` came from a different [`Context`] than
+    /// the artboard this handle belongs to; [`Error::ViewModel`] if `path` is not an
+    /// image property; [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn set_image(&self, path: &str, image: &RiveImage) -> Result<()> {
+        if self.ctx != image.ctx.ptr {
+            return Err(Error::ContextMismatch);
+        }
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `image.ptr` is a live image decoded
+        // by the same context (checked above).
+        let st = unsafe { sys::rive_vmi_set_image(self.ptr, c.as_ptr(), image.ptr) };
+        vm_status(st)
+    }
+
+    /// Clears an **image** property — unbinds any bound image. Counterpart to
+    /// [`Self::set_image`] (no [`RiveImage`], so no context check).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not an image property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn clear_image(&self, path: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; a null image clears the property.
+        let st = unsafe { sys::rive_vmi_set_image(self.ptr, c.as_ptr(), std::ptr::null_mut()) };
         vm_status(st)
     }
 }

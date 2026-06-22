@@ -89,7 +89,7 @@ mod scene;
 pub use scene::{Artboard, File, HitResult, StateMachine};
 
 mod view_model;
-pub use view_model::{RiveValueKind, RiveViewModelInstance};
+pub use view_model::{RiveImage, RiveValueKind, RiveViewModelInstance};
 
 mod assets;
 pub use assets::{AssetRequest, AssetType};
@@ -152,6 +152,10 @@ pub enum Error {
     /// path), or a name/path/value contained an interior NUL byte.
     #[error("text run operation failed: {0}")]
     Text(String),
+    /// Decoding image bytes into a [`RiveImage`](crate::RiveImage) failed — an
+    /// unsupported / corrupt format, or no matching decoder compiled in.
+    #[error("image decode failed: {0}")]
+    Image(String),
 }
 
 /// Returns the shim's most recent error string (empty if none).

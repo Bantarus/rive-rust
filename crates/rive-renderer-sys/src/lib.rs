@@ -113,6 +113,14 @@ pub struct RiveViewModelInstance {
     _opaque: [u8; 0],
 }
 
+/// Opaque **owned** decoded render image — the value source for image-property
+/// data binding. Created by [`rive_image_decode`], freed by [`rive_image_destroy`].
+/// Tied to the [`RiveRenderContext`] it was decoded with.
+#[repr(C)]
+pub struct RiveImage {
+    _opaque: [u8; 0],
+}
+
 // ===== out-of-band asset loading =====
 
 /// Asset kind reported in [`RiveAssetRequest::asset_type`] (rive's `FileAsset`
@@ -181,6 +189,16 @@ extern "C" {
         user: *mut std::os::raw::c_void,
     ) -> *mut RiveFile;
     pub fn rive_file_destroy(file: *mut RiveFile);
+
+    /// Decodes encoded image bytes (PNG/JPEG/WEBP) into an owned [`RiveImage`] via
+    /// `ctx`'s factory (the value source for image-property data binding). Null on
+    /// bad arguments or a decode failure. Free with [`rive_image_destroy`].
+    pub fn rive_image_decode(
+        ctx: *mut RiveRenderContext,
+        bytes: *const u8,
+        len: usize,
+    ) -> *mut RiveImage;
+    pub fn rive_image_destroy(image: *mut RiveImage);
 
     pub fn rive_file_artboard_default(file: *mut RiveFile) -> *mut RiveArtboard;
     pub fn rive_file_artboard_named(file: *mut RiveFile, name: *const c_char) -> *mut RiveArtboard;
@@ -379,6 +397,13 @@ extern "C" {
         path: *const c_char,
         out: *mut u8,
     ) -> RiveStatus;
+    /// Binds a decoded image to a root-VM image property (`/` reaches nested VMs);
+    /// a null `image` clears it. The image must be from the artboard's context.
+    pub fn rive_artboard_vm_set_image(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        image: *mut RiveImage,
+    ) -> RiveStatus;
     // Handle API (nested VMs + lists). Navigation returns a borrowed
     // `*mut RiveViewModelInstance` (null on miss/null-input); reads + introspection
     // mirror the artboard-rooted verbs. `out_type` ordinals add list=5,
@@ -473,6 +498,12 @@ extern "C" {
     pub fn rive_vmi_fire_trigger(
         vmi: *mut RiveViewModelInstance,
         path: *const c_char,
+    ) -> RiveStatus;
+    /// Binds a decoded image to a nested-VM or list-item image property; null clears.
+    pub fn rive_vmi_set_image(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        image: *mut RiveImage,
     ) -> RiveStatus;
 
     // ===== Text runs (get/set a TextValueRun's string) ======================

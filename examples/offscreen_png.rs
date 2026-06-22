@@ -283,6 +283,46 @@ fn main() -> Result<()> {
         }
     }
 
+    // RIVE_VM_SET_IMAGE="path=imagefile" decodes an encoded image (PNG/JPEG/WEBP)
+    // and binds it to a view-model image property before advancing — a visible write
+    // to diff (e.g. bind open_source.jpg to image_fit_alignment.riv's "imageProperty").
+    // An EMPTY file ("path=") instead *clears* the property (unbind). A `name[i]`
+    // segment indexes a list element via `vm_resolve` (handle set_image/clear_image).
+    if let Ok(spec) = std::env::var("RIVE_VM_SET_IMAGE") {
+        if let Some((path, file)) = spec.split_once('=') {
+            let (path, file) = (path.trim(), file.trim());
+            // Decode the image up front (None => clear). Keeps it alive across the bind.
+            let image = if file.is_empty() {
+                None
+            } else {
+                let bytes = std::fs::read(file).with_context(|| format!("reading image file {file:?}"))?;
+                Some(
+                    ctx.decode_image(&bytes)
+                        .with_context(|| format!("decoding image {file:?}"))?,
+                )
+            };
+            let res = if force_resolve || path.contains('[') {
+                let (item, leaf) = artboard
+                    .vm_resolve(path)
+                    .with_context(|| format!("resolving view-model path {path:?}"))?;
+                match &image {
+                    Some(img) => item.set_image(&leaf, img),
+                    None => item.clear_image(&leaf),
+                }
+            } else {
+                match &image {
+                    Some(img) => artboard.vm_set_image(path, img),
+                    None => artboard.vm_clear_image(path),
+                }
+            };
+            res.with_context(|| format!("binding image to {path:?}"))?;
+            match &image {
+                Some(_) => println!("  set view-model image {path:?} = {file}"),
+                None => println!("  cleared view-model image {path:?}"),
+            }
+        }
+    }
+
     // Advance the state machine, then render a single offscreen snapshot.
     // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
     // forward N 60Hz frames before the snapshot, so two runs at different frame

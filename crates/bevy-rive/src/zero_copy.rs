@@ -1949,7 +1949,7 @@ impl Node for RiveFillNode {
             // system's inline apply, ferried here for the render-world tier). Gated to
             // once per visual frame (see `apply_vm_writes`) so a `fire_trigger` pulses once.
             if apply_vm_writes && !item.vm_writes.is_empty() {
-                crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
+                crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
             }
             // M-TEXT: apply this frame's text-run set writes before advance too (same
             // once-per-frame gate; text sets are idempotent so the gate is just an opt).
@@ -2209,7 +2209,7 @@ impl Node for RiveFillNode {
                     // M-DATA: apply view-model writes before advance (see the
                     // dedicated-path apply above), gated once per visual frame.
                     if apply_vm_writes && !item.vm_writes.is_empty() {
-                        crate::view_model::apply_writes_slice(&inst.artboard, &item.vm_writes);
+                        crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
                     }
                     // M-TEXT: apply text-run set writes before advance (see dedicated path).
                     if apply_vm_writes && !item.text_writes.is_empty() {

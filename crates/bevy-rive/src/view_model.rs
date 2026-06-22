@@ -17,8 +17,9 @@
 //! tiers; watch/observe stay on flat paths for now. Mirrors the C++ contract in the
 //! Rive data-binding docs (https://rive.app/docs).
 //!
-//! Covers number / bool / trigger / color / string / enum. The component is
-//! tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance
+//! Covers number / bool / trigger / color / string / enum, plus **image** writes
+//! ([`RiveViewModel::set_image`] — encoded bytes decoded + bound before advance).
+//! The component is tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance
 //! system applies them inline; the `zero_copy` tier ferries them to the render
 //! world (where its instances live) via a per-frame staging buffer. **Watch
 //! read-back** AND **observe** (change/trigger fires) are `floor`-only for now —
@@ -27,11 +28,16 @@
 //! under `zero_copy` is a no-op.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::prelude::*;
 
 /// A typed view-model value — produced by writes and stored in read-back.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Debug` is hand-written so [`RiveValue::Image`] prints its byte length rather
+/// than dumping the whole (potentially multi-MB) buffer — the enclosing
+/// [`RiveViewModel`] is a `Debug` component that an inspector may print.
+#[derive(Clone, PartialEq)]
 pub enum RiveValue {
     /// 32-bit number.
     Number(f32),
@@ -47,6 +53,26 @@ pub enum RiveValue {
     EnumName(String),
     /// One-shot trigger (write-only).
     Trigger,
+    /// Encoded image bytes (PNG / JPEG / WEBP) to bind to an image property
+    /// (write-only). Decoded at apply time via the owning context. `Arc` so the
+    /// `zero_copy` ferry to the render world is a cheap refcount bump.
+    Image(Arc<[u8]>),
+}
+
+impl std::fmt::Debug for RiveValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Number(n) => f.debug_tuple("Number").field(n).finish(),
+            Self::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            Self::Color(c) => write!(f, "Color({c:#010X})"),
+            Self::Text(s) => f.debug_tuple("Text").field(s).finish(),
+            Self::EnumIndex(i) => f.debug_tuple("EnumIndex").field(i).finish(),
+            Self::EnumName(n) => f.debug_tuple("EnumName").field(n).finish(),
+            Self::Trigger => f.write_str("Trigger"),
+            // Don't dump the buffer — just its size (see the type doc).
+            Self::Image(bytes) => write!(f, "Image({} bytes)", bytes.len()),
+        }
+    }
 }
 
 /// Which typed getter to use when refreshing a watched path (the property's type
@@ -137,6 +163,15 @@ impl RiveViewModel {
     /// Queues a one-shot **trigger** fire.
     pub fn fire_trigger(&mut self, path: impl Into<String>) {
         self.writes.push((path.into(), RiveValue::Trigger));
+    }
+
+    /// Queues a write to an **image** property: `bytes` are encoded image data
+    /// (PNG / JPEG / WEBP), decoded via the owning context before the next advance
+    /// and bound to the property. Accepts a `Vec<u8>`, `&[u8]`, or `Arc<[u8]>`
+    /// (the bytes are held in an `Arc` for the cheap `zero_copy` ferry). The path
+    /// may descend nested view models (`/`) or index a list item (`name[i]`).
+    pub fn set_image(&mut self, path: impl Into<String>, bytes: impl Into<Arc<[u8]>>) {
+        self.writes.push((path.into(), RiveValue::Image(bytes.into())));
     }
 
     /// Registers a **number** property to read back into [`Self::values`] each
@@ -260,9 +295,12 @@ impl RiveViewModel {
 
 /// Applies a slice of view-model writes to the artboard's bound view model.
 /// Shared by both tiers (`floor` drains inline; `zero_copy` ferries a slice to
-/// the render world). Per-write failures `warn!` and continue.
+/// the render world). `ctx` is the artboard's owning context — needed to decode
+/// image writes (it must be the same context the artboard renders with). Per-write
+/// failures `warn!` and continue.
 #[cfg(any(feature = "floor", feature = "zero_copy"))]
 pub(crate) fn apply_writes_slice(
+    ctx: &rive_renderer::Context,
     artboard: &rive_renderer::Artboard,
     writes: &[(String, RiveValue)],
 ) {
@@ -270,9 +308,9 @@ pub(crate) fn apply_writes_slice(
         // A `[` means an indexed (list-item) path the flat resolver can't address;
         // route it through `vm_resolve`. Plain paths keep the proven flat setters.
         let res = if path.contains('[') {
-            apply_indexed_write(artboard, path, value)
+            apply_indexed_write(ctx, artboard, path, value)
         } else {
-            apply_flat_write(artboard, path, value)
+            apply_flat_write(ctx, artboard, path, value)
         };
         if let Err(e) = res {
             warn!("rive: view-model write {path:?} failed: {e}");
@@ -283,6 +321,7 @@ pub(crate) fn apply_writes_slice(
 /// Writes `value` to a flat root-VM path (`/` descends named nested view models).
 #[cfg(any(feature = "floor", feature = "zero_copy"))]
 fn apply_flat_write(
+    ctx: &rive_renderer::Context,
     artboard: &rive_renderer::Artboard,
     path: &str,
     value: &RiveValue,
@@ -295,6 +334,7 @@ fn apply_flat_write(
         RiveValue::EnumIndex(i) => artboard.vm_set_enum_index(path, *i),
         RiveValue::EnumName(n) => artboard.vm_set_enum_name(path, n),
         RiveValue::Trigger => artboard.vm_fire_trigger(path),
+        RiveValue::Image(bytes) => artboard.vm_set_image(path, &ctx.decode_image(bytes)?),
     }
 }
 
@@ -303,6 +343,7 @@ fn apply_flat_write(
 /// into that nested view model / list item.
 #[cfg(any(feature = "floor", feature = "zero_copy"))]
 fn apply_indexed_write(
+    ctx: &rive_renderer::Context,
     artboard: &rive_renderer::Artboard,
     path: &str,
     value: &RiveValue,
@@ -316,15 +357,21 @@ fn apply_indexed_write(
         RiveValue::EnumIndex(i) => item.set_enum_index(&leaf, *i),
         RiveValue::EnumName(n) => item.set_enum_name(&leaf, n),
         RiveValue::Trigger => item.fire_trigger(&leaf),
+        RiveValue::Image(bytes) => item.set_image(&leaf, &ctx.decode_image(bytes)?),
     }
 }
 
 /// Drains queued writes to the artboard's bound view model. Call **before**
-/// advancing so the state machine / scripts observe them this tick.
+/// advancing so the state machine / scripts observe them this tick. `ctx` is the
+/// artboard's owning context (used to decode image writes).
 #[cfg(feature = "floor")]
-pub(crate) fn apply_writes(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
+pub(crate) fn apply_writes(
+    ctx: &rive_renderer::Context,
+    vm: &mut RiveViewModel,
+    artboard: &rive_renderer::Artboard,
+) {
     let writes = std::mem::take(&mut vm.writes);
-    apply_writes_slice(artboard, &writes);
+    apply_writes_slice(ctx, artboard, &writes);
 }
 
 /// Refreshes watched paths into [`RiveViewModel::values`]. Call **after**

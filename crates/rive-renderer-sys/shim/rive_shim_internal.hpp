@@ -26,6 +26,21 @@
 #include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance
 #include "rive/viewmodel/runtime/viewmodel_instance_runtime.hpp" // ViewModelInstanceRuntime
 
+namespace rive {
+class RenderImage; // full type only needed where a RiveImage is built/destroyed
+}
+
+// An OWNED, decoded render image — the value source for image-property data
+// binding. Created by rive_image_decode (which needs a RiveRenderContext, since
+// decoding goes through the render context's rive::Factory) and released by
+// rive_image_destroy. DEFINED here (not in rive_shim.cpp) so the view-model TU can
+// read `image` to feed propertyImage()->value(). The image setter takes its OWN
+// ref on bind, so a RiveImage may be destroyed after binding without unbinding it.
+struct RiveImage
+{
+    rive::rcp<rive::RenderImage> image;
+};
+
 // One artboard instance + its bound default view model. DEFINED here (not in
 // rive_shim.cpp) so the view-model TU can reach `vmRuntime`. The other opaque
 // handle structs stay in rive_shim.cpp until a second TU needs them.

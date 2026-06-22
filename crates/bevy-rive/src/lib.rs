@@ -927,7 +927,7 @@ fn advance_and_upload_rive(
         // Also prime any newly-observed paths so a change/fire on THIS advance is
         // caught (the shim's change flag only sees changes after subscription).
         if let Some(vm) = view_model.as_deref_mut() {
-            crate::view_model::apply_writes(vm, &inst.artboard);
+            crate::view_model::apply_writes(ctx, vm, &inst.artboard);
             crate::view_model::prime_observed(vm, &inst.artboard);
         }
 

@@ -52,6 +52,12 @@ typedef struct RiveStateMachine  RiveStateMachine;
  * rive_vmi_property_view_model / rive_vmi_list_instance_at; never freed by Rust. */
 typedef struct RiveViewModelInstance RiveViewModelInstance;
 
+/* An OWNED, decoded render image — the value source for image-property data
+ * binding (rive_artboard_vm_set_image / rive_vmi_set_image). Created by
+ * rive_image_decode and freed with rive_image_destroy. Bound to the render
+ * context it was decoded with; bind only into artboards on that same context. */
+typedef struct RiveImage RiveImage;
+
 /* 0 == success; nonzero == failure (see rive_last_error). */
 typedef int32_t RiveStatus;
 #define RIVE_OK 0
@@ -133,6 +139,15 @@ RiveFile*          rive_file_load_with_assets(RiveRenderContext* ctx,
                                               size_t len,
                                               RiveAssetLoadFn load_fn,
                                               void* user);
+
+/* --- Image decode (value source for image-property data binding) ------------ */
+
+/* Decodes ENCODED image bytes (PNG/JPEG/WEBP) into an owned RiveImage via `ctx`'s
+ * factory. The result is tied to `ctx`'s device — bind it only into artboards on
+ * the same context. Returns NULL on bad arguments or a decode failure. */
+RiveImage*         rive_image_decode(RiveRenderContext* ctx,
+                                     const uint8_t* bytes, size_t len);
+void               rive_image_destroy(RiveImage*);
 
 /* Instantiates an artboard. `_default` uses the file's default; `_named` /`_at`
  * select by name / 0-based index. All bind the artboard's default view model
@@ -232,6 +247,9 @@ RiveStatus         rive_artboard_vm_property_at(RiveArtboard*, uint32_t index,
  * again). Type-agnostic (any property type incl. trigger). Subscribe by calling
  * once BEFORE the first advance (prime), then poll each frame AFTER advance. */
 RiveStatus         rive_artboard_vm_flush_changed(RiveArtboard*, const char* path, uint8_t* out);
+/* Bind a decoded image to a root-VM image property (`/` reaches nested VMs); a
+ * NULL image clears it. The image must be from the same context as the artboard. */
+RiveStatus         rive_artboard_vm_set_image(RiveArtboard*, const char* path, RiveImage* image);
 
 /* --- View-model handle API (nested VMs + lists) -----------------------------
  * Operate on a RiveViewModelInstance* (root / nested / list item). The flat path
@@ -266,6 +284,8 @@ RiveStatus         rive_vmi_set_string(RiveViewModelInstance*, const char* path,
 RiveStatus         rive_vmi_set_enum_index(RiveViewModelInstance*, const char* path, uint32_t index);
 RiveStatus         rive_vmi_set_enum_name(RiveViewModelInstance*, const char* path, const char* name);
 RiveStatus         rive_vmi_fire_trigger(RiveViewModelInstance*, const char* path);
+/* Bind a decoded image to a nested-VM or LIST-ITEM image property; NULL clears. */
+RiveStatus         rive_vmi_set_image(RiveViewModelInstance*, const char* path, RiveImage* image);
 
 /* --- Text runs (get/set a TextValueRun's string) ----------------------------
  * Read / write a named text run's string at runtime. `name` is the run's

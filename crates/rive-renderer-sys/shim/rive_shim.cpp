@@ -591,6 +591,48 @@ extern "C" void rive_file_destroy(RiveFile* file)
     delete file;
 }
 
+// Decodes encoded image bytes (PNG/JPEG/WEBP — the same decoders the asset loader
+// uses) into an OWNED RiveImage, the value source for image-property data binding
+// (rive_artboard_vm_set_image / rive_vmi_set_image). Decoding goes through the
+// render context's rive::Factory, so the resulting RenderImage is bound to THIS
+// context's device and must only be bound into artboards on the same context.
+// Returns NULL (+ error) on bad arguments or a decode failure. Free with
+// rive_image_destroy; binding takes its own ref, so it may be freed after binding.
+extern "C" RiveImage* rive_image_decode(RiveRenderContext* ctx,
+                                        const uint8_t* bytes,
+                                        size_t len)
+{
+    if (ctx == nullptr || ctx->renderContext == nullptr || bytes == nullptr ||
+        len == 0)
+    {
+        set_error("rive_image_decode: invalid arguments");
+        return nullptr;
+    }
+    rive::rcp<rive::RenderImage> image =
+        ctx->renderContext->decodeImage(rive::Span<const uint8_t>(bytes, len));
+    if (image == nullptr)
+    {
+        set_error("rive_image_decode: could not decode image bytes");
+        return nullptr;
+    }
+    auto handle = new (std::nothrow) RiveImage();
+    if (handle == nullptr)
+    {
+        set_error("out of memory allocating RiveImage");
+        return nullptr;
+    }
+    handle->image = std::move(image);
+    return handle;
+}
+
+extern "C" void rive_image_destroy(RiveImage* image)
+{
+    if (image == nullptr)
+        return;
+    image->image = nullptr;
+    delete image;
+}
+
 // Wraps a freshly-instanced ArtboardInstance into a RiveArtboard handle, binding
 // its DEFAULT view-model instance. Shared by the default / named / by-index
 // selectors so all three get identical data-binding + scripting setup. Takes

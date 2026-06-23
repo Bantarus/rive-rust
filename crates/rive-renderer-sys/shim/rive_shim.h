@@ -320,6 +320,55 @@ uint32_t           rive_artboard_text_run_count(RiveArtboard*);
 RiveStatus         rive_artboard_text_run_name_at(RiveArtboard*, uint32_t index,
                                                   char* buf, size_t cap, size_t* out_len);
 
+/* --- Rig runtime control (bones / constraints / solo) -----------------------
+ * Drive a rig at runtime by AUTHORED component name (ArtboardInstance::find<T>).
+ * Like text / VM writes, a set is asserted on the artboard and takes effect on
+ * the next advance/draw (advance solves on top — a written value sticks only if
+ * the active animation does not ALSO key that property). Introspection
+ * (`rig_count`/`rig_name_at`) lists components of a kind so a game can discover
+ * the settable names in an opaque .riv. Implemented in rive_shim_rig.cpp. */
+
+/* Bone property selector for rive_artboard_bone_get/_set. ROTATION/SCALE_X/
+ * SCALE_Y/LENGTH apply to ANY bone (find<Bone>); X/Y apply to ROOT bones only
+ * (find<RootBone>) — a get/set of X/Y on a non-root bone is an error. */
+#define RIVE_BONE_ROTATION 0
+#define RIVE_BONE_SCALE_X  1
+#define RIVE_BONE_SCALE_Y  2
+#define RIVE_BONE_LENGTH   3
+#define RIVE_BONE_X        4
+#define RIVE_BONE_Y        5
+RiveStatus         rive_artboard_bone_set(RiveArtboard*, const char* name,
+                                          uint32_t prop, float value);
+RiveStatus         rive_artboard_bone_get(RiveArtboard*, const char* name,
+                                          uint32_t prop, float* out);
+
+/* Constraint strength (typically [0,1]) — every Constraint has it. */
+RiveStatus         rive_artboard_constraint_set_strength(RiveArtboard*, const char* name,
+                                                         float value);
+RiveStatus         rive_artboard_constraint_get_strength(RiveArtboard*, const char* name,
+                                                         float* out);
+
+/* Solo: exclusive visibility among children. Set the active child by name or
+ * 0-based index (nonzero + rive_last_error if that child / index doesn't exist);
+ * read the active child's name (two-call) / index (-1 if none active). */
+RiveStatus         rive_artboard_solo_set_active_name(RiveArtboard*, const char* name,
+                                                      const char* child);
+RiveStatus         rive_artboard_solo_set_active_index(RiveArtboard*, const char* name,
+                                                       uint32_t index);
+RiveStatus         rive_artboard_solo_get_active_name(RiveArtboard*, const char* name,
+                                                      char* buf, size_t cap, size_t* out_len);
+int32_t            rive_artboard_solo_get_active_index(RiveArtboard*, const char* name);
+
+/* Generalized introspection: list rig components of `kind` by authored name (in
+ * artboard object order; two-call protocol on `_name_at`). Bone count includes
+ * root bones; constraint count includes every concrete constraint type. */
+#define RIVE_RIG_BONE       0
+#define RIVE_RIG_CONSTRAINT 1
+#define RIVE_RIG_SOLO       2
+uint32_t           rive_artboard_rig_count(RiveArtboard*, uint32_t kind);
+RiveStatus         rive_artboard_rig_name_at(RiveArtboard*, uint32_t kind, uint32_t index,
+                                             char* buf, size_t cap, size_t* out_len);
+
 /* --- Audio (engine lifecycle + master volume) -------------------------------
  * With --with_rive_audio=system, rive plays audio events / embedded audio to the
  * OS output automatically during advance (the lazily-created singleton

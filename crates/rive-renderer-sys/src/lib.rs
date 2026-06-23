@@ -544,6 +544,65 @@ extern "C" {
         out_len: *mut usize,
     ) -> RiveStatus;
 
+    // ===== Rig runtime control (bones / constraints / solo) =================
+    // Drive a rig by AUTHORED component name (find<T>). A set takes effect on the
+    // next advance/draw (advance solves on top). `bone` prop is RIVE_BONE_*
+    // (rotation=0/scaleX=1/scaleY=2/length=3 on any bone; x=4/y=5 root bones
+    // only). `rig` introspection `kind` is RIVE_RIG_* (bone=0/constraint=1/solo=2);
+    // `_name_at` / solo `_get_active_name` use the two-call buffer protocol.
+    pub fn rive_artboard_bone_set(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        prop: u32,
+        value: f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_bone_get(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        prop: u32,
+        out: *mut f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_constraint_set_strength(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        value: f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_constraint_get_strength(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        out: *mut f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_solo_set_active_name(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        child: *const c_char,
+    ) -> RiveStatus;
+    pub fn rive_artboard_solo_set_active_index(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        index: u32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_solo_get_active_name(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_artboard_solo_get_active_index(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+    ) -> i32;
+    pub fn rive_artboard_rig_count(artboard: *mut RiveArtboard, kind: u32) -> u32;
+    pub fn rive_artboard_rig_name_at(
+        artboard: *mut RiveArtboard,
+        kind: u32,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+
     // ===== Audio (engine lifecycle + master volume) =========================
     // With `--with_rive_audio=system`, rive auto-plays audio to the OS output
     // during advance via the singleton runtime engine; these are the host bridge

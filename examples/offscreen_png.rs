@@ -162,6 +162,75 @@ fn main() -> Result<()> {
         );
     }
 
+    // --- Rig control (bones / constraints / solos) --------------------------
+    // RIVE_RIG_LIST: print the authored bone / constraint / solo names (the
+    // settable handles). RIVE_BONE_SET="name:prop=value" / RIVE_BONE_GET="name:prop"
+    // (prop = rotation|scalex|scaley|length|x|y). RIVE_CONSTRAINT_SET="name=value" /
+    // RIVE_CONSTRAINT_GET="name". RIVE_SOLO_SET="name=child" (or "name#index") /
+    // RIVE_SOLO_GET="name". A set takes effect on the next advance — the change
+    // shows in the rendered PNG.
+    if std::env::var("RIVE_RIG_LIST").is_ok() {
+        println!("  bones: {:?}", artboard.bone_names());
+        println!("  constraints: {:?}", artboard.constraint_names());
+        println!("  solos: {:?}", artboard.solo_names());
+    }
+    if let Ok(spec) = std::env::var("RIVE_BONE_GET") {
+        let (name, prop) = spec.split_once(':').context("RIVE_BONE_GET must be name:prop")?;
+        println!(
+            "  bone get {name:?}.{prop} = {:?}",
+            artboard.bone_get(name, parse_bone_prop(prop)?)?
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_BONE_SET") {
+        let (name, rest) = spec.split_once(':').context("RIVE_BONE_SET must be name:prop=value")?;
+        let (prop, value) = rest.split_once('=').context("RIVE_BONE_SET must be name:prop=value")?;
+        let prop = parse_bone_prop(prop)?;
+        let value: f32 = value.trim().parse().context("RIVE_BONE_SET value must be a float")?;
+        artboard.bone_set(name, prop, value)?;
+        println!(
+            "  bone set {name:?}.{prop:?} -> {value} (read-back: {:?})",
+            artboard.bone_get(name, prop)?
+        );
+    }
+    if let Ok(name) = std::env::var("RIVE_CONSTRAINT_GET") {
+        println!(
+            "  constraint get {name:?}.strength = {:?}",
+            artboard.constraint_get_strength(&name)?
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_CONSTRAINT_SET") {
+        let (name, value) = spec.split_once('=').context("RIVE_CONSTRAINT_SET must be name=value")?;
+        let value: f32 = value.trim().parse().context("RIVE_CONSTRAINT_SET value must be a float")?;
+        artboard.constraint_set_strength(name, value)?;
+        println!(
+            "  constraint set {name:?}.strength -> {value} (read-back: {:?})",
+            artboard.constraint_get_strength(name)?
+        );
+    }
+    if let Ok(name) = std::env::var("RIVE_SOLO_GET") {
+        println!(
+            "  solo get {name:?} active = {:?} (index {:?})",
+            artboard.solo_get_active(&name)?,
+            artboard.solo_get_active_index(&name)
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_SOLO_SET") {
+        // "name=child" selects by name; "name=#index" selects by 0-based index.
+        let (name, child) = spec
+            .split_once('=')
+            .context("RIVE_SOLO_SET must be name=child or name=#index")?;
+        if let Some(idx) = child.strip_prefix('#') {
+            let idx: usize = idx.trim().parse().context("RIVE_SOLO_SET index must be an integer")?;
+            artboard.solo_set_active_index(name, idx)?;
+        } else {
+            artboard.solo_set_active(name, child)?;
+        }
+        println!(
+            "  solo set {name:?} -> {child:?} (read-back: {:?})",
+            artboard.solo_get_active(name)?
+        );
+    }
+
     // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
     // recursing into nested view models and list items via the handle API — use it
     // to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
@@ -556,6 +625,21 @@ fn main() -> Result<()> {
 fn parse_xy(s: &str) -> Option<(f32, f32)> {
     let (a, b) = s.split_once(',')?;
     Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+}
+
+/// Parses a bone property name (case-insensitive) into a [`rive_renderer::BoneProp`]
+/// for the `RIVE_BONE_GET` / `RIVE_BONE_SET` knobs.
+fn parse_bone_prop(s: &str) -> Result<rive_renderer::BoneProp> {
+    use rive_renderer::BoneProp;
+    Ok(match s.trim().to_ascii_lowercase().as_str() {
+        "rotation" | "rot" => BoneProp::Rotation,
+        "scalex" => BoneProp::ScaleX,
+        "scaley" => BoneProp::ScaleY,
+        "length" | "len" => BoneProp::Length,
+        "x" => BoneProp::X,
+        "y" => BoneProp::Y,
+        other => anyhow::bail!("unknown bone prop {other:?} (rotation|scalex|scaley|length|x|y)"),
+    })
 }
 
 /// Parses `"fit[:alignment]"` (case-insensitive) into a [`rive_renderer::FitAlign`],

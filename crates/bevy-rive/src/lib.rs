@@ -153,6 +153,13 @@ pub use assets::RiveAssets;
 mod text;
 pub use text::RiveText;
 
+// Per-feature module. Runtime rig control: the `RiveRig` component queues bone /
+// constraint / solo writes, applied before advance in both tiers (`floor` inline;
+// `zero_copy` ferried to the render world like text writes). Reads are at the safe
+// layer (`Artboard::bone_get` etc.).
+mod rig;
+pub use rig::{BoneProp, RiveRig};
+
 // Per-feature module. Audio control: the optional `RiveAudio` resource sets the
 // master volume / mute over rive's process-global audio engine (audio plays
 // automatically during advance in both tiers; `--with_rive_audio=system`). With the
@@ -175,11 +182,13 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveAudio, RiveFile,
-        RiveFit, RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveText,
-        RiveValue, RiveViewModel, StateMachineSelector,
+        RiveFit, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface, RiveTarget,
+        RiveText, RiveValue, RiveViewModel, StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
+    // The bone-property selector for `RiveRig::set_bone`.
+    pub use crate::BoneProp;
 
     // Floor (default): the CPU-copy plugin entry point.
     #[cfg(feature = "floor")]
@@ -944,7 +953,7 @@ fn instantiate_rive_instances(
 #[cfg(feature = "floor")]
 #[expect(
     clippy::type_complexity,
-    reason = "Bevy query tuple with &mut RiveAnimation (seek drain) + Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> + Option<&mut RiveText> control inputs"
+    reason = "Bevy query tuple with &mut RiveAnimation (seek drain) + Option<&RivePointer> + Option<&mut RiveViewModel> + Option<&RiveFit> + Option<&mut RiveText> + Option<&mut RiveRig> control inputs"
 )]
 fn advance_and_upload_rive(
     rive_ctx: NonSend<RiveContext>,
@@ -960,13 +969,14 @@ fn advance_and_upload_rive(
         Option<&mut RiveViewModel>,
         Option<&RiveFit>,
         Option<&mut RiveText>,
+        Option<&mut RiveRig>,
     )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, mut anim, target, pointer, mut view_model, fit, mut text) in &mut query {
+    for (entity, mut anim, target, pointer, mut view_model, fit, mut text, mut rig) in &mut query {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
@@ -1018,6 +1028,12 @@ fn advance_and_upload_rive(
         // is shaped + visible this tick (same rationale as the view-model writes).
         if let Some(text) = text.as_deref_mut() {
             crate::text::apply_text_writes(text, &inst.artboard);
+        }
+
+        // Apply queued rig writes (bones / constraints / solos) BEFORE advancing
+        // so the change is solved this tick (same rationale as the writes above).
+        if let Some(rig) = rig.as_deref_mut() {
+            crate::rig::apply_rig_writes(rig, &inst.artboard);
         }
 
         // Apply a one-shot seek BEFORE advancing (the shim applies it immediately, so

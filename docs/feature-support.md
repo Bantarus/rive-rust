@@ -61,10 +61,10 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Fills, strokes, caps/joins | ✅ | — | drawn by the PLS renderer |
 | Gradients (linear/radial), dashes, trim path, feather | ✅ | — | paint effects render as authored |
 | Blend modes, clipping, draw order / draw targets | ✅ | — | full PLS path |
-| Meshes / vertex deform, bones / skinning | ✅ | — | rendered; no runtime bone API yet (control 🔜) |
-| Constraints (IK, distance, follow-path, transform, …) | ✅ | — | solved during advance; runtime control 🔜 |
+| Meshes / vertex deform, bones / skinning | ✅ | — | rendered; **runtime bone control** ✅ (rotation/scale/length + root x/y — see Bones / constraints / solo below) |
+| Constraints (IK, distance, follow-path, transform, …) | ✅ | — | solved during advance; **runtime strength control** ✅ (see Bones / constraints / solo below) |
 | Layout engine (Yoga flex), N-slice (9-patch), follow-path | ✅ | — | solved during advance; resize via target size |
-| Solo (exclusive visibility) | ✅ | — | rendered; runtime toggle API 🔜 |
+| Solo (exclusive visibility) | ✅ | — | rendered; **runtime active-child toggle** ✅ (see Bones / constraints / solo below) |
 | Text rendering (runs, modifiers, styles, text-follow-path) | ✅ | — | renders embedded text; **runtime text get/set** 🔜 |
 | Nested artboards / artboard lists | ✅ | [artboards](https://rive.app/docs/runtimes/artboards) | rendered; per-child runtime access 🔜 |
 | Scripting — autonomous nodes (e.g. BallBreath) | ✅ | — | needs `--with_rive_scripting` + a **Publish-signed** `.riv` + the shim VM bind (shipped) |
@@ -86,16 +86,24 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | Audio playback | ✅ | [audio-events](https://rive.app/docs/runtimes/audio) | **system mode (default):** `--with_rive_audio=system` — rive owns a miniaudio device that plays a `.riv`'s audio events / embedded audio straight to the OS output **automatically during advance** (both tiers; no per-sound API). Host bridge controls: `rive_renderer::audio::{is_available,start,stop,set_volume}` (process-global engine) + the optional **`RiveAudio`** Bevy resource (master volume / mute). **host-mixer (external) mode:** the **`audio-external`** feature (`--with_rive_audio=external`) — rive owns NO device; the host pulls the mixed PCM (`rive_renderer::audio::external::{channels,sample_rate,read_frames,sum_frames}`) into its own mixer. `bevy-rive` routes it into **Bevy's own audio graph** via the **`RiveAudioStream`** `Decodable` source + **`RiveExternalAudioPlugin`** (unified mixing under Bevy's `GlobalVolume`; `RiveAudio` still applies as rive's master gain). The two modes are a mutually-exclusive whole-build choice |
 | Joystick / gamepad / keyboard / focus input | 🔜 | — | `Scene` gamepad/keyboard + `FocusManager`; for game-controlled rigs |
 | **Animation playback controls (seek / pause / per-anim speed)** | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **per-instance speed** ✅ (`RiveAnimation.speed` — a `Time::delta` multiplier, both tiers; rive has no native per-animation speed setter, so this is the dt lever) + **pause** ✅ (`RiveAnimation.paused` / `pause()`/`resume()` — advances by 0 so time freezes but the frame still renders and data binding still applies; distinct from `RiveActive(false)`, which *culls*; both tiers) + **seek** ✅ — `StateMachine::seek(t)` / `duration()` / `time()` at the safe layer, and the `RiveAnimation::seek(t)` one-shot in BOTH tiers (`floor` drains inline; `zero_copy` stages → ferries → applies before advance, like view-model writes). Seek applies immediately (visible while paused = scrubbing); times clamp to `[0, duration]`. **Only linear-animation scenes are seekable** (the default-scene animation fallback when an artboard has no state machine) — a seek on a state machine returns `false` / no-ops (no scalar playhead); `duration()`/`time()` return `None` there. **Deferred:** Bevy-side read-back of the live playhead/duration (use the safe layer's `StateMachine::time`/`duration`; same rationale as the view-model watch read-back); state-machine `reset()`; per-animation (not per-instance) speed |
-| Bones / constraints / solo runtime control | 🔜 | — | drive bones, toggle solo children, set constraint strength at runtime |
+| **Bones / constraints / solo runtime control** | ✅ | — | drive a rig by AUTHORED component name (`ArtboardInstance::find<T>`), universal knobs, both tiers. **Bones** — `Artboard::bone_get/bone_set(name, BoneProp, f32)`: rotation/scaleX/scaleY/length on any bone, x/y on **root bones only** (regular-bone x/y are derived → `Error::Rig`). **Constraints** — `Artboard::constraint_get_strength`/`constraint_set_strength(name, f32)` (every constraint has strength; type-specific props deferred). **Solo** — `Artboard::solo_set_active(name, child)` by name / `solo_set_active_index(name, i)`, read via `solo_get_active`/`solo_get_active_index`. **`RiveRig`** component queues writes applied before advance in BOTH tiers (`floor` inline; `zero_copy` staged → ferried → applied before advance, like text/view-model writes). A write takes effect on the next advance and **sticks only if the active animation doesn't also key that property** (advance solves on top — re-queue each frame for procedural control). Introspection: `bone_names`/`constraint_names`/`solo_names`. Bevy read-back deferred (safe-layer getters cover it). **Deferred:** type-specific constraint props (IK invert/parentBoneCount, distance/mode, follow-path orient/offset, transform origin), solo/bone read-back in Bevy, list of bone children |
 
 ---
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Bones / constraints / solo runtime control** — drive bones, toggle solo children, set
-   constraint strength at runtime.
+1. **Joystick / gamepad / keyboard / focus input** — `Scene` gamepad/keyboard + `FocusManager`,
+   for game-controlled rigs (a clean parallel to the pointer-input path that already ships).
+2. **Nested-artboard runtime access + artboard-reference binding** — per-child access to nested
+   artboards, which also unblocks the deferred `propertyArtboard` view-model ref (needs a
+   `BindableArtboard` value source).
 
-*(Recently shipped: **animation playback controls** — per-instance `RiveAnimation.speed` /
+*(Recently shipped: **bones / constraints / solo runtime control** — drive a rig by authored
+component name (`find<T>`), universal knobs, both tiers: `Artboard::bone_get/bone_set`
+(rotation/scale/length any bone, x/y root bones only), `constraint_get_strength`/`constraint_set_strength`,
+`solo_set_active`/`solo_set_active_index`; the `RiveRig` component queues writes applied before advance
+in both tiers (a write sticks only if the animation doesn't also key that property); introspection via
+`bone_names`/`constraint_names`/`solo_names`; **animation playback controls** — per-instance `RiveAnimation.speed` /
 `paused` (advance-by-0 freeze; both tiers) + **seek** via `StateMachine::seek`/`duration`/`time`
 (safe layer) and the `RiveAnimation::seek(t)` one-shot (both tiers); linear-animation scenes only
 (state machines have no scalar playhead); **view-model image-reference data binding** — `Context::decode_image` turns

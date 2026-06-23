@@ -98,6 +98,11 @@ pub use assets::{AssetRequest, AssetType};
 // public types; the impl block lives in its own module per the feature convention).
 mod text;
 
+// Runtime rig control (bones / constraints / solo) — extends `Artboard` with
+// `bone_*` / `constraint_*` / `solo_*` methods + the `BoneProp` selector.
+mod rig;
+pub use rig::BoneProp;
+
 /// Audio engine lifecycle + master volume (process-global, free functions).
 pub mod audio;
 
@@ -156,6 +161,11 @@ pub enum Error {
     /// unsupported / corrupt format, or no matching decoder compiled in.
     #[error("image decode failed: {0}")]
     Image(String),
+    /// A runtime rig operation (bone / constraint / solo) failed: no component
+    /// with that name, an X/Y set on a non-root bone, an out-of-range solo
+    /// child, or a name contained an interior NUL byte.
+    #[error("rig control operation failed: {0}")]
+    Rig(String),
 }
 
 /// Returns the shim's most recent error string (empty if none).

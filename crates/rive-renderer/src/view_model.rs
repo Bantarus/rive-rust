@@ -16,7 +16,7 @@ use std::marker::PhantomData;
 use std::os::raw::c_char;
 use std::rc::Rc;
 
-use crate::{last_error, sys, Artboard, Context, ContextInner, Error, Result};
+use crate::{last_error, sys, Artboard, Context, ContextInner, Error, File, Result};
 
 /// The data type of a view-model property (mirrors rive's `DataType`). Returned
 /// by [`Artboard::vm_property_at`] so a caller can pick the right typed accessor.
@@ -43,7 +43,8 @@ pub enum RiveValueKind {
     /// An image reference — bind a decoded [`RiveImage`] with
     /// [`Artboard::vm_set_image`] / [`RiveViewModelInstance::set_image`] (set-only).
     Image,
-    /// An artboard reference (set-only; not wired yet — needs `BindableArtboard`).
+    /// An artboard reference — bind a [`BindableArtboard`] with
+    /// [`Artboard::vm_set_artboard`] / [`RiveViewModelInstance::set_artboard`] (set-only).
     Artboard,
     /// A type not modeled yet (integer, symbol-list-index, …).
     Other,
@@ -95,6 +96,80 @@ impl Drop for RiveImage {
 impl std::fmt::Debug for RiveImage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RiveImage").finish_non_exhaustive()
+    }
+}
+
+/// A file-sourced **artboard value** — the value source for binding an artboard to
+/// a view-model **artboard-reference** (`propertyArtboard`) property, the artboard
+/// analogue of [`RiveImage`]. Create one with [`File::bindable_artboard_named`] /
+/// [`File::bindable_artboard_default`], then bind with [`Artboard::vm_set_artboard`]
+/// or [`RiveViewModelInstance::set_artboard`]. Binding takes its own reference, so a
+/// `BindableArtboard` may be dropped afterwards without unbinding it.
+///
+/// It keeps its source [`File`]'s data alive natively. Bind it only into artboards
+/// on the **same** [`Context`] it was loaded under (a mismatch is
+/// [`Error::ContextMismatch`], to avoid driving one device's render resources
+/// through another's renderer). `!Send + !Sync`.
+pub struct BindableArtboard {
+    ptr: *mut sys::RiveBindableArtboard,
+    /// Owning context: keeps the device alive *and* identifies which context this
+    /// value belongs to (checked on bind, like [`RiveImage`]).
+    ctx: Rc<ContextInner>,
+}
+
+impl Drop for BindableArtboard {
+    fn drop(&mut self) {
+        // SAFETY: created by the shim, destroyed exactly once; the binding (if any)
+        // took its own ref, so destroying this handle does not unbind it.
+        unsafe { sys::rive_bindable_artboard_destroy(self.ptr) };
+    }
+}
+
+impl std::fmt::Debug for BindableArtboard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BindableArtboard").finish_non_exhaustive()
+    }
+}
+
+impl File {
+    /// Creates a [`BindableArtboard`] from the artboard named `name` — the value
+    /// source for an artboard-reference data binding (bind with
+    /// [`Artboard::vm_set_artboard`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoArtboard`] if the file has no artboard with that name, or
+    /// `name` contained an interior NUL byte.
+    pub fn bindable_artboard_named(&self, name: &str) -> Result<BindableArtboard> {
+        let c = CString::new(name).map_err(|_| {
+            Error::NoArtboard("bindable artboard name contained an interior NUL byte".into())
+        })?;
+        // SAFETY: `self.ptr` is a live file handle; `c` is a valid C string.
+        let ptr = unsafe { sys::rive_file_bindable_artboard_named(self.ptr, c.as_ptr()) };
+        self.wrap_bindable(ptr)
+    }
+
+    /// Creates a [`BindableArtboard`] from the file's default artboard.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoArtboard`] if the file contains no artboards.
+    pub fn bindable_artboard_default(&self) -> Result<BindableArtboard> {
+        // SAFETY: `self.ptr` is a live file handle.
+        let ptr = unsafe { sys::rive_file_bindable_artboard_default(self.ptr) };
+        self.wrap_bindable(ptr)
+    }
+
+    /// Wraps a shim bindable-artboard pointer, tying it to this file's context, or
+    /// maps null to [`Error::NoArtboard`].
+    fn wrap_bindable(&self, ptr: *mut sys::RiveBindableArtboard) -> Result<BindableArtboard> {
+        if ptr.is_null() {
+            return Err(Error::NoArtboard(last_error()));
+        }
+        Ok(BindableArtboard {
+            ptr,
+            ctx: Rc::clone(&self._ctx),
+        })
     }
 }
 
@@ -213,6 +288,47 @@ impl Artboard {
         // SAFETY: live artboard handle + valid C string; a null image clears the property.
         let st =
             unsafe { sys::rive_artboard_vm_set_image(self.inner.ptr, c.as_ptr(), std::ptr::null_mut()) };
+        vm_status(st)
+    }
+
+    /// Binds a file-sourced `artboard` to a view-model **artboard-reference**
+    /// (`propertyArtboard`) property (a `/`-path reaches a nested view model). Get
+    /// `artboard` from [`File::bindable_artboard_named`]; binding takes its own
+    /// reference, so the [`BindableArtboard`] may be dropped after. The change is
+    /// observed on the next advance (a `NestedArtboard` bound to this property then
+    /// instances the referenced artboard).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `artboard` was created from a [`File`] loaded on
+    /// a different [`Context`] than this artboard's; [`Error::ViewModel`] if `path`
+    /// is not an artboard property; [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn vm_set_artboard(&self, path: &str, artboard: &BindableArtboard) -> Result<()> {
+        if !Rc::ptr_eq(&self.inner.ctx, &artboard.ctx) {
+            return Err(Error::ContextMismatch);
+        }
+        let c = Self::vm_path(path)?;
+        // SAFETY: live artboard handle + valid C string; `artboard.ptr` is a live
+        // bindable from the same context (checked above).
+        let st =
+            unsafe { sys::rive_artboard_vm_set_artboard(self.inner.ptr, c.as_ptr(), artboard.ptr) };
+        vm_status(st)
+    }
+
+    /// Clears a view-model **artboard-reference** property — unbinds any bound
+    /// artboard. Counterpart to [`Self::vm_set_artboard`] (no [`BindableArtboard`],
+    /// so no context check).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not an artboard property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn vm_clear_artboard(&self, path: &str) -> Result<()> {
+        let c = Self::vm_path(path)?;
+        // SAFETY: live artboard handle + valid C string; a null bindable clears the property.
+        let st = unsafe {
+            sys::rive_artboard_vm_set_artboard(self.inner.ptr, c.as_ptr(), std::ptr::null_mut())
+        };
         vm_status(st)
     }
 
@@ -478,9 +594,9 @@ fn parse_index_segment(seg: &str) -> Result<Option<(&str, usize)>> {
 /// navigation — so a caller can drive a nested view model or a **list item**, which
 /// the flat artboard-rooted `vm_set_*` path can't address (rive's resolver can't
 /// index lists; use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). It
-/// can also bind an **image** property ([`Self::set_image`]). List *structural*
-/// mutation (add/remove/swap) and artboard refs are deferred (see
-/// `docs/feature-support.md`). `!Send`/`!Sync` (rive handles are not thread-safe).
+/// can also bind an **image** property ([`Self::set_image`]) or an **artboard
+/// reference** ([`Self::set_artboard`]). List *structural* mutation (add/remove/swap)
+/// is deferred (see `docs/feature-support.md`). `!Send`/`!Sync` (rive handles are not thread-safe).
 #[derive(Debug)]
 pub struct RiveViewModelInstance<'a> {
     ptr: *mut sys::RiveViewModelInstance,
@@ -717,6 +833,40 @@ impl<'a> RiveViewModelInstance<'a> {
         let c = Self::path(path)?;
         // SAFETY: live handle + valid C string; a null image clears the property.
         let st = unsafe { sys::rive_vmi_set_image(self.ptr, c.as_ptr(), std::ptr::null_mut()) };
+        vm_status(st)
+    }
+
+    /// Binds a file-sourced `artboard` to an **artboard-reference** property on a
+    /// nested view model or list item (which the flat artboard-rooted path can't
+    /// address). See [`Artboard::vm_set_artboard`] for the binding semantics.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ContextMismatch`] if `artboard` came from a different [`Context`] than
+    /// the artboard this handle belongs to; [`Error::ViewModel`] if `path` is not an
+    /// artboard property; [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn set_artboard(&self, path: &str, artboard: &BindableArtboard) -> Result<()> {
+        if self.ctx != artboard.ctx.ptr {
+            return Err(Error::ContextMismatch);
+        }
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `artboard.ptr` is a live bindable
+        // from the same context (checked above).
+        let st = unsafe { sys::rive_vmi_set_artboard(self.ptr, c.as_ptr(), artboard.ptr) };
+        vm_status(st)
+    }
+
+    /// Clears an **artboard-reference** property — unbinds any bound artboard.
+    /// Counterpart to [`Self::set_artboard`] (no [`BindableArtboard`], so no context check).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not an artboard property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn clear_artboard(&self, path: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; a null bindable clears the property.
+        let st = unsafe { sys::rive_vmi_set_artboard(self.ptr, c.as_ptr(), std::ptr::null_mut()) };
         vm_status(st)
     }
 }

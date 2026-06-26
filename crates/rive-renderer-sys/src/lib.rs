@@ -121,6 +121,15 @@ pub struct RiveImage {
     _opaque: [u8; 0],
 }
 
+/// Opaque **owned** file-sourced artboard value — the value source for artboard-
+/// reference (`propertyArtboard`) data binding, the artboard analogue of
+/// [`RiveImage`]. Created by [`rive_file_bindable_artboard_named`] /
+/// [`rive_file_bindable_artboard_default`], freed by [`rive_bindable_artboard_destroy`].
+#[repr(C)]
+pub struct RiveBindableArtboard {
+    _opaque: [u8; 0],
+}
+
 // ===== out-of-band asset loading =====
 
 /// Asset kind reported in [`RiveAssetRequest::asset_type`] (rive's `FileAsset`
@@ -213,6 +222,43 @@ extern "C" {
         out_len: *mut usize,
     ) -> RiveStatus;
     pub fn rive_artboard_destroy(artboard: *mut RiveArtboard);
+
+    // ===== nested-artboard runtime access =====
+    /// Number of NestedArtboard components on this artboard (top-level or nested).
+    pub fn rive_artboard_nested_count(artboard: *mut RiveArtboard) -> u32;
+    /// Authored name of the i-th NestedArtboard (two-call string protocol).
+    pub fn rive_artboard_nested_name_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    /// Resolve a child by 0-based index in nested order → a **borrowed** artboard
+    /// handle (essential when NestedArtboard components are unnamed).
+    pub fn rive_artboard_nested_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+    ) -> *mut RiveArtboard;
+    /// Resolve a child by NestedArtboard component name → a **borrowed** artboard
+    /// handle (free with [`rive_artboard_destroy`]; valid only while the parent lives).
+    pub fn rive_artboard_nested_named(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+    ) -> *mut RiveArtboard;
+    /// Resolve a child by a `/`-delimited path → a **borrowed** artboard handle.
+    pub fn rive_artboard_nested_at_path(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+    ) -> *mut RiveArtboard;
+
+    // ===== BindableArtboard value source (artboard-reference data binding) =====
+    pub fn rive_file_bindable_artboard_named(
+        file: *mut RiveFile,
+        name: *const c_char,
+    ) -> *mut RiveBindableArtboard;
+    pub fn rive_file_bindable_artboard_default(file: *mut RiveFile) -> *mut RiveBindableArtboard;
+    pub fn rive_bindable_artboard_destroy(bindable: *mut RiveBindableArtboard);
 
     pub fn rive_artboard_state_machine_default(
         artboard: *mut RiveArtboard,
@@ -414,6 +460,13 @@ extern "C" {
         path: *const c_char,
         image: *mut RiveImage,
     ) -> RiveStatus;
+    /// Bind a file-sourced [`RiveBindableArtboard`] to a root-VM artboard property
+    /// (`/` reaches nested VMs); a null `bindable` clears it.
+    pub fn rive_artboard_vm_set_artboard(
+        artboard: *mut RiveArtboard,
+        path: *const c_char,
+        bindable: *mut RiveBindableArtboard,
+    ) -> RiveStatus;
     // Handle API (nested VMs + lists). Navigation returns a borrowed
     // `*mut RiveViewModelInstance` (null on miss/null-input); reads + introspection
     // mirror the artboard-rooted verbs. `out_type` ordinals add list=5,
@@ -514,6 +567,13 @@ extern "C" {
         vmi: *mut RiveViewModelInstance,
         path: *const c_char,
         image: *mut RiveImage,
+    ) -> RiveStatus;
+    /// Bind a file-sourced [`RiveBindableArtboard`] to a nested-VM or list-item
+    /// artboard property; a null `bindable` clears it.
+    pub fn rive_vmi_set_artboard(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        bindable: *mut RiveBindableArtboard,
     ) -> RiveStatus;
 
     // ===== Text runs (get/set a TextValueRun's string) ======================

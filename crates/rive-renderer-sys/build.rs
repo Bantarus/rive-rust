@@ -103,6 +103,7 @@ fn main() {
     println!("cargo:rerun-if-changed=shim/rive_shim_rig.cpp");
     println!("cargo:rerun-if-changed=shim/rive_shim_input.cpp");
     println!("cargo:rerun-if-changed=shim/rive_shim_audio.cpp");
+    println!("cargo:rerun-if-changed=shim/rive_shim_nested.cpp");
     for var in [
         "CC",
         "CXX",
@@ -425,7 +426,8 @@ fn compile_shim(
         .file(shim_dir.join("rive_shim_text.cpp"))
         .file(shim_dir.join("rive_shim_rig.cpp"))
         .file(shim_dir.join("rive_shim_input.cpp"))
-        .file(shim_dir.join("rive_shim_audio.cpp"));
+        .file(shim_dir.join("rive_shim_audio.cpp"))
+        .file(shim_dir.join("rive_shim_nested.cpp"));
 
     // External audio mode (cargo feature `audio-external`) gives `rive::AudioEngine`
     // an extra `#ifdef EXTERNAL_RIVE_AUDIO_ENGINE` member (`m_readFrames`) and exposes

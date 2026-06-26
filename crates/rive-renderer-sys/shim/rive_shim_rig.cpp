@@ -59,9 +59,9 @@ void copy_to_caller(const std::string& s, char* buf, size_t cap, size_t* out_len
 
 rive::ArtboardInstance* artboard_of(RiveArtboard* handle)
 {
-    if (handle == nullptr || handle->artboard == nullptr)
-        return nullptr;
-    return handle->artboard.get();
+    // inst() resolves to the borrowed nested child if this is a nested handle,
+    // else the owned instance — so these find<T> functions drive a child too.
+    return handle != nullptr ? handle->inst() : nullptr;
 }
 
 // True if `obj` is a component of `kind` (Bone includes RootBone; Constraint

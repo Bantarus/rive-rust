@@ -166,6 +166,13 @@ pub use rig::{BoneProp, RiveRig};
 mod input;
 pub use input::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers, RiveInput};
 
+// Per-feature module. Nested-artboard targeting: the optional `RiveNestedTarget`
+// component redirects an entity's rig / text writes to a nested child artboard
+// (both tiers). Artboard-reference data binding (`BindableArtboard`) ships at the
+// safe layer; its Bevy ferry is deferred (see docs/feature-support.md).
+mod nested;
+pub use nested::RiveNestedTarget;
+
 // Per-feature module. Audio control: the optional `RiveAudio` resource sets the
 // master volume / mute over rive's process-global audio engine (audio plays
 // automatically during advance in both tiers; `--with_rive_audio=system`). With the
@@ -188,8 +195,9 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveAudio, RiveFile,
-        RiveFit, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface,
-        RiveTarget, RiveText, RiveValue, RiveViewModel, StateMachineSelector,
+        RiveFit, RiveInput, RiveNestedTarget, RivePointer, RivePropertyChanged, RiveRig,
+        RiveSampling, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
+        StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
@@ -979,14 +987,25 @@ fn advance_and_upload_rive(
         Option<&mut RiveText>,
         Option<&mut RiveRig>,
         Option<&mut RiveInput>,
+        Option<&RiveNestedTarget>,
     )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, mut anim, target, pointer, mut view_model, fit, mut text, mut rig, mut input) in
-        &mut query
+    for (
+        entity,
+        mut anim,
+        target,
+        pointer,
+        mut view_model,
+        fit,
+        mut text,
+        mut rig,
+        mut input,
+        nested_target,
+    ) in &mut query
     {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
@@ -1035,16 +1054,24 @@ fn advance_and_upload_rive(
             crate::view_model::prime_observed(vm, &inst.artboard);
         }
 
+        // Resolve an optional nested-artboard target once: rig + text writes are
+        // redirected to the addressed child (auto-advanced by the root), so the same
+        // setters drive a nested component. A target that doesn't resolve warns and
+        // falls back to the root. Pointer / keyboard / gamepad / focus stay on the
+        // root state machine (a nested child has no separate scene).
+        let nested_ab = nested_target.and_then(|t| t.resolve(&inst.artboard));
+        let rig_text_ab = nested_ab.as_ref().unwrap_or(&inst.artboard);
+
         // Apply queued text-run set writes BEFORE advancing too, so the new text
         // is shaped + visible this tick (same rationale as the view-model writes).
         if let Some(text) = text.as_deref_mut() {
-            crate::text::apply_text_writes(text, &inst.artboard);
+            crate::text::apply_text_writes(text, rig_text_ab);
         }
 
         // Apply queued rig writes (bones / constraints / solos) BEFORE advancing
         // so the change is solved this tick (same rationale as the writes above).
         if let Some(rig) = rig.as_deref_mut() {
-            crate::rig::apply_rig_writes(rig, &inst.artboard);
+            crate::rig::apply_rig_writes(rig, rig_text_ab);
         }
 
         // Apply queued input (joystick → artboard; keyboard / gamepad / focus →

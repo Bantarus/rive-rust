@@ -472,6 +472,84 @@ fn main() -> Result<()> {
         }
     }
 
+    // RIVE_NESTED_LIST: list nested-artboard component names + each child's drivable
+    // handles (the child is itself an Artboard, so the same rig/text/joystick getters
+    // introspect it). Discovery for RIVE_NESTED below.
+    if std::env::var("RIVE_NESTED_LIST").is_ok() {
+        let names = artboard.nested_artboard_names();
+        println!("  nested artboards ({}): {:?}", names.len(), names);
+        for n in &names {
+            if let Ok(child) = artboard.nested_artboard(n) {
+                println!(
+                    "    {n:?}: nested={:?} bones={:?} solos={:?} texts={:?} joysticks={:?}",
+                    child.nested_artboard_names(),
+                    child.bone_names(),
+                    child.solo_names(),
+                    child.text_run_names(),
+                    child.joystick_names(),
+                );
+            }
+        }
+    }
+    // RIVE_NESTED="child/path" (or "#index" for unnamed components) resolves a nested
+    // child; the SAME rig/text setters then drive it (rendered as part of the parent):
+    // RIVE_NESTED_BONE_SET="name:prop=value", RIVE_NESTED_SOLO_SET="name=child",
+    // RIVE_NESTED_TEXT_SET="name=value". Bone/solo names may be "" in some assets.
+    if let Ok(p) = std::env::var("RIVE_NESTED") {
+        let p = p.trim();
+        let child = if let Some(idx) = p.strip_prefix('#') {
+            let idx: usize = idx.trim().parse().context("RIVE_NESTED \"#index\" must be an integer")?;
+            artboard
+                .nested_artboard_at(idx)
+                .with_context(|| format!("resolving nested artboard #{idx}"))?
+        } else {
+            artboard
+                .nested_artboard_at_path(p)
+                .with_context(|| format!("resolving nested artboard {p:?}"))?
+        };
+        println!(
+            "  nested {p:?}: bones={:?} solos={:?} texts={:?}",
+            child.bone_names(),
+            child.solo_names(),
+            child.text_run_names()
+        );
+        if let Ok(spec) = std::env::var("RIVE_NESTED_BONE_SET") {
+            let (name, rest) = spec.split_once(':').context("RIVE_NESTED_BONE_SET must be name:prop=value")?;
+            let (prop, value) = rest.split_once('=').context("RIVE_NESTED_BONE_SET must be name:prop=value")?;
+            let prop = parse_bone_prop(prop)?;
+            let value: f32 = value.trim().parse().context("RIVE_NESTED_BONE_SET value must be a float")?;
+            child.bone_set(name, prop, value)?;
+            println!("  nested bone set {name:?} {prop:?}={value} (read-back {:?})", child.bone_get(name, prop)?);
+        }
+        if let Ok(spec) = std::env::var("RIVE_NESTED_SOLO_SET") {
+            let (name, child_name) = spec.split_once('=').context("RIVE_NESTED_SOLO_SET must be name=child")?;
+            child.solo_set_active(name, child_name)?;
+            println!("  nested solo set {name:?} = {child_name:?}");
+        }
+        if let Ok(spec) = std::env::var("RIVE_NESTED_TEXT_SET") {
+            let (name, value) = spec.split_once('=').context("RIVE_NESTED_TEXT_SET must be name=value")?;
+            child.text_set(name, value)?;
+            println!("  nested text set {name:?} = {value:?}");
+        }
+    }
+    // RIVE_VM_SET_ARTBOARD="path=artboardName" binds a file artboard to a view-model
+    // artboard-reference (propertyArtboard) property; "path=" clears it.
+    if let Ok(spec) = std::env::var("RIVE_VM_SET_ARTBOARD") {
+        if let Some((path, ab_name)) = spec.split_once('=') {
+            let (path, ab_name) = (path.trim(), ab_name.trim());
+            if ab_name.is_empty() {
+                artboard.vm_clear_artboard(path)?;
+                println!("  cleared view-model artboard {path:?}");
+            } else {
+                let ba = file
+                    .bindable_artboard_named(ab_name)
+                    .with_context(|| format!("creating bindable artboard {ab_name:?}"))?;
+                artboard.vm_set_artboard(path, &ba)?;
+                println!("  set view-model artboard {path:?} = {ab_name}");
+            }
+        }
+    }
+
     // Advance the state machine, then render a single offscreen snapshot.
     // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
     // forward N 60Hz frames before the snapshot, so two runs at different frame

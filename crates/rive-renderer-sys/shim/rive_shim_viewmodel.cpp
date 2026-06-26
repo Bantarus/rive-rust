@@ -17,10 +17,11 @@
  *     and reads + writes. Handles are BORROWED: they alias instances owned by rive's
  *     caches under the root `vmRuntime`, so they are valid only while the artboard
  *     lives and the addressed list is not mutated. Reads AND writes (number/bool/
- *     color/string/enum/trigger + image) — so a caller can drive a nested VM or a LIST ITEM.
+ *     color/string/enum/trigger + image + artboard) — so a caller can drive a nested VM or a LIST ITEM.
  *     An image (assetImage) property is bound from a decoded RiveImage (rive_image_decode
- *     lives in rive_shim.cpp — it needs the render context). List structural mutation
- *     (add/remove/swap) + artboard refs are deferred — see docs/feature-support.md.
+ *     lives in rive_shim.cpp); an artboard property is bound from a RiveBindableArtboard
+ *     (rive_file_bindable_artboard_* — also in rive_shim.cpp). List structural mutation
+ *     (add/remove/swap) is deferred — see docs/feature-support.md.
  */
 #include "rive_shim_internal.hpp"
 
@@ -35,7 +36,9 @@
 #include "rive/viewmodel/runtime/viewmodel_instance_enum_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_list_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_asset_image_runtime.hpp" // image binding
+#include "rive/viewmodel/runtime/viewmodel_instance_artboard_runtime.hpp" // artboard-ref binding
 #include "rive/viewmodel/runtime/viewmodel_runtime.hpp" // PropertyData
+#include "rive/bindable_artboard.hpp" // BindableArtboard (RiveBindableArtboard::bindable)
 
 using rive::ViewModelInstanceRuntime;
 
@@ -291,6 +294,23 @@ RiveStatus vmi_set_image(ViewModelInstanceRuntime* vm, const char* path, RiveIma
     return RIVE_OK;
 }
 
+// Binds a file-sourced BindableArtboard to an artboard (propertyArtboard) property.
+// `bindable == nullptr` clears the binding (rive's value(nullptr)). The runtime
+// takes its OWN ref on the BindableArtboard, so the caller's RiveBindableArtboard
+// may be freed afterwards. Mirrors vmi_set_image for the artboard value type.
+RiveStatus vmi_set_artboard(ViewModelInstanceRuntime* vm, const char* path,
+                            RiveBindableArtboard* bindable)
+{
+    auto* p = vm->propertyArtboard(path);
+    if (p == nullptr)
+    {
+        shim_set_error("view-model artboard property not found");
+        return 1;
+    }
+    p->value(bindable != nullptr ? bindable->bindable : nullptr);
+    return RIVE_OK;
+}
+
 // Schema introspection on a resolved runtime (shared by both surfaces).
 RiveStatus vmi_property_at_core(ViewModelInstanceRuntime* vm, uint32_t index,
                                 char* name_buf, size_t cap, size_t* out_len,
@@ -513,6 +533,17 @@ extern "C" RiveStatus rive_artboard_vm_set_image(RiveArtboard* artboard,
     return vm == nullptr ? 1 : vmi_set_image(vm, path, image);
 }
 
+// Binds a file-sourced BindableArtboard to a root-VM artboard property (`/` reaches
+// nested VMs). `bindable == nullptr` clears it. See rive_file_bindable_artboard_*
+// for creating the value source. Mirrors rive_artboard_vm_set_image.
+extern "C" RiveStatus rive_artboard_vm_set_artboard(RiveArtboard* artboard,
+                                                    const char* path,
+                                                    RiveBindableArtboard* bindable)
+{
+    ViewModelInstanceRuntime* vm = root_vm_path(artboard, path);
+    return vm == nullptr ? 1 : vmi_set_artboard(vm, path, bindable);
+}
+
 // ===========================================================================
 // Handle-based ABI — operate on a RiveViewModelInstance* (root, nested VM, or
 // list item). Enables nested-VM introspection + list access the flat path can't
@@ -706,4 +737,13 @@ extern "C" RiveStatus rive_vmi_set_image(RiveViewModelInstance* handle,
 {
     ViewModelInstanceRuntime* vm = vmi_path(handle, path);
     return vm == nullptr ? 1 : vmi_set_image(vm, path, image);
+}
+// Bind a file-sourced BindableArtboard into a nested VM or a LIST ITEM's artboard
+// property (which the flat artboard-rooted path can't address). `bindable == nullptr`
+// clears it.
+extern "C" RiveStatus rive_vmi_set_artboard(RiveViewModelInstance* handle,
+                                            const char* path, RiveBindableArtboard* bindable)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    return vm == nullptr ? 1 : vmi_set_artboard(vm, path, bindable);
 }

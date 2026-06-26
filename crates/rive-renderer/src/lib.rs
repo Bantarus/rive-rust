@@ -89,7 +89,7 @@ mod scene;
 pub use scene::{Artboard, File, HitResult, StateMachine};
 
 mod view_model;
-pub use view_model::{RiveImage, RiveValueKind, RiveViewModelInstance};
+pub use view_model::{BindableArtboard, RiveImage, RiveValueKind, RiveViewModelInstance};
 
 mod assets;
 pub use assets::{AssetRequest, AssetType};
@@ -108,6 +108,12 @@ pub use rig::BoneProp;
 // focus-routed event feed), plus the input value types.
 mod input;
 pub use input::{FocusDir, FocusState, GamepadAxis, GamepadButton, Key, KeyModifiers};
+
+// Runtime nested-artboard access — extends `Artboard` with `nested_artboard_*`
+// (resolve a child by name/path → a child `Artboard` the rig/text/input setters
+// drive). The artboard-reference data binding (`BindableArtboard` /
+// `vm_set_artboard`) lives in `view_model` beside its image-binding sibling.
+mod nested;
 
 /// Audio engine lifecycle + master volume (process-global, free functions).
 pub mod audio;

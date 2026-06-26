@@ -58,6 +58,12 @@ typedef struct RiveViewModelInstance RiveViewModelInstance;
  * context it was decoded with; bind only into artboards on that same context. */
 typedef struct RiveImage RiveImage;
 
+/* An OWNED, file-sourced artboard value — the value source for artboard-reference
+ * (propertyArtboard) data binding (rive_artboard_vm_set_artboard / rive_vmi_set_artboard),
+ * the artboard analogue of RiveImage. Created by rive_file_bindable_artboard_named /
+ * _default and freed with rive_bindable_artboard_destroy. */
+typedef struct RiveBindableArtboard RiveBindableArtboard;
+
 /* 0 == success; nonzero == failure (see rive_last_error). */
 typedef int32_t RiveStatus;
 #define RIVE_OK 0
@@ -164,6 +170,32 @@ RiveStatus         rive_file_artboard_name_at(RiveFile*, uint32_t index,
                                               char* buf, size_t cap, size_t* out_len);
 void               rive_artboard_destroy(RiveArtboard*);
 
+/* --- Nested-artboard runtime access -------------------------------------------
+ * Reach into a child artboard mounted by a NestedArtboard component. `nested_count`
+ * /`nested_name_at` list the NestedArtboard component names (two-call buffer
+ * protocol; not NUL-terminated). `nested_named` resolves a child by that name;
+ * `nested_at_path` resolves a '/'-delimited path ("child/grandchild"). Both return
+ * a BORROWED RiveArtboard handle — the SAME bone/text/joystick/solo/constraint
+ * functions then drive the child. Free it with rive_artboard_destroy; it is valid
+ * only while the parent artboard lives. NULL (+ rive_last_error) if not found or the
+ * nested artboard has no mounted instance. All accept a top-level OR a nested handle. */
+uint32_t           rive_artboard_nested_count(RiveArtboard*);
+RiveStatus         rive_artboard_nested_name_at(RiveArtboard*, uint32_t index,
+                                                char* buf, size_t cap, size_t* out_len);
+RiveArtboard*      rive_artboard_nested_at(RiveArtboard*, uint32_t index);
+RiveArtboard*      rive_artboard_nested_named(RiveArtboard*, const char* name);
+RiveArtboard*      rive_artboard_nested_at_path(RiveArtboard*, const char* path);
+
+/* --- BindableArtboard value source (artboard-reference data binding) -----------
+ * Create a bindable artboard value from this file by name / default (holding the
+ * File alive); bind it to a propertyArtboard with rive_artboard_vm_set_artboard /
+ * rive_vmi_set_artboard. Return NULL (+ rive_last_error) if the file is invalid or
+ * the artboard isn't found. Free with rive_bindable_artboard_destroy (binding takes
+ * its own ref, so it may be freed after binding). */
+RiveBindableArtboard* rive_file_bindable_artboard_named(RiveFile*, const char* name);
+RiveBindableArtboard* rive_file_bindable_artboard_default(RiveFile*);
+void                  rive_bindable_artboard_destroy(RiveBindableArtboard*);
+
 /* Instantiates a scene/state machine to play. `_default` prefers the designer
  * default state machine, then falls back to the default Scene (first state
  * machine, else first animation, else static). `_named` /`_at` select a state
@@ -265,6 +297,10 @@ RiveStatus         rive_artboard_vm_flush_changed(RiveArtboard*, const char* pat
 /* Bind a decoded image to a root-VM image property (`/` reaches nested VMs); a
  * NULL image clears it. The image must be from the same context as the artboard. */
 RiveStatus         rive_artboard_vm_set_image(RiveArtboard*, const char* path, RiveImage* image);
+/* Bind a file-sourced BindableArtboard to a root-VM artboard property (`/` reaches
+ * nested VMs); a NULL bindable clears it. See rive_file_bindable_artboard_*. */
+RiveStatus         rive_artboard_vm_set_artboard(RiveArtboard*, const char* path,
+                                                 RiveBindableArtboard* bindable);
 
 /* --- View-model handle API (nested VMs + lists) -----------------------------
  * Operate on a RiveViewModelInstance* (root / nested / list item). The flat path
@@ -301,6 +337,9 @@ RiveStatus         rive_vmi_set_enum_name(RiveViewModelInstance*, const char* pa
 RiveStatus         rive_vmi_fire_trigger(RiveViewModelInstance*, const char* path);
 /* Bind a decoded image to a nested-VM or LIST-ITEM image property; NULL clears. */
 RiveStatus         rive_vmi_set_image(RiveViewModelInstance*, const char* path, RiveImage* image);
+/* Bind a file-sourced BindableArtboard to a nested-VM or LIST-ITEM artboard property; NULL clears. */
+RiveStatus         rive_vmi_set_artboard(RiveViewModelInstance*, const char* path,
+                                         RiveBindableArtboard* bindable);
 
 /* --- Text runs (get/set a TextValueRun's string) ----------------------------
  * Read / write a named text run's string at runtime. `name` is the run's

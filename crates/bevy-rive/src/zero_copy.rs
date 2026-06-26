@@ -90,7 +90,7 @@ use rive_renderer::{
 
 use crate::{
     RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RiveInput, RivePlugin, RivePointer,
-    RiveRig, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
+    RiveNestedTarget, RiveRig, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -1170,6 +1170,11 @@ struct ExtractedRive {
     /// Empty for faces with no `RiveInput` or no queued commands. Staged main-world
     /// by `stage_input_writes`.
     input_cmds: Vec<crate::input::InputCmd>,
+    /// M-NESTED: redirect this frame's rig + text writes to a nested child artboard
+    /// (the `RiveNestedTarget` component; `None` = root). Resolved in the node
+    /// per-frame against the instance's root artboard; a miss warns + falls back to
+    /// root. Cheap clone (a `String` or index). Input/pointer stay on the root scene.
+    nested_target: Option<RiveNestedTarget>,
     /// Artboard / state-machine selectors (default / by name / by index), honored
     /// once when the node first builds this entity's instance. Ferried each frame
     /// but read only at build time; cheap for the common `Default` (a bare enum —
@@ -1727,6 +1732,7 @@ fn extract_rive_instances(
             Option<&RiveText>,
             Option<&RiveRig>,
             Option<&RiveInput>,
+            Option<&RiveNestedTarget>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1736,7 +1742,9 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm, fit, pointer, assets, text, rig, input) in &query {
+    for (entity, anim, target, active, vm, fit, pointer, assets, text, rig, input, nested_target) in
+        &query
+    {
         let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
@@ -1767,6 +1775,9 @@ fn extract_rive_instances(
                 text_writes: Vec::new(),
                 rig_writes: Vec::new(),
                 input_cmds: Vec::new(),
+                // Culled: rig/text writes are ferried as none, so the redirect target
+                // is moot — ferry none.
+                nested_target: None,
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
                 assets: assets.cloned(),
@@ -1823,6 +1834,9 @@ fn extract_rive_instances(
             text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             rig_writes: rig.map(|r| r.staged().to_vec()).unwrap_or_default(),
             input_cmds: input.map(|i| i.staged().to_vec()).unwrap_or_default(),
+            // Redirect rig + text writes to a nested child if this entity targets one
+            // (resolved in the node, where the instance lives). Cheap clone.
+            nested_target: nested_target.cloned(),
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
             assets: assets.cloned(),
@@ -2093,15 +2107,20 @@ impl Node for RiveFillNode {
             if apply_vm_writes && !item.vm_writes.is_empty() {
                 crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
             }
+            // M-NESTED: redirect rig + text writes to a nested child if this face
+            // targets one (resolved per-frame; a miss warns + falls back to root).
+            // Input/pointer stay on the root scene (they keep using inst.artboard).
+            let nested_ab = item.nested_target.as_ref().and_then(|t| t.resolve(&inst.artboard));
+            let rig_text_ab = nested_ab.as_ref().unwrap_or(&inst.artboard);
             // M-TEXT: apply this frame's text-run set writes before advance too (same
             // once-per-frame gate; text sets are idempotent so the gate is just an opt).
             if apply_vm_writes && !item.text_writes.is_empty() {
-                crate::text::apply_text_writes_slice(&inst.artboard, &item.text_writes);
+                crate::text::apply_text_writes_slice(rig_text_ab, &item.text_writes);
             }
             // M-RIG: apply this frame's bone / constraint / solo writes before
             // advance too (same once-per-frame gate as the writes above).
             if apply_vm_writes && !item.rig_writes.is_empty() {
-                crate::rig::apply_rig_writes_slice(&inst.artboard, &item.rig_writes);
+                crate::rig::apply_rig_writes_slice(rig_text_ab, &item.rig_writes);
             }
             // M-INPUT: apply this frame's joystick (artboard) + keyboard / gamepad /
             // focus (state machine) commands before advance too (same gate).
@@ -2375,13 +2394,18 @@ impl Node for RiveFillNode {
                     if apply_vm_writes && !item.vm_writes.is_empty() {
                         crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
                     }
+                    // M-NESTED: redirect rig + text writes to a nested child if this
+                    // face targets one (see dedicated path); a miss warns + uses root.
+                    let nested_ab =
+                        item.nested_target.as_ref().and_then(|t| t.resolve(&inst.artboard));
+                    let rig_text_ab = nested_ab.as_ref().unwrap_or(&inst.artboard);
                     // M-TEXT: apply text-run set writes before advance (see dedicated path).
                     if apply_vm_writes && !item.text_writes.is_empty() {
-                        crate::text::apply_text_writes_slice(&inst.artboard, &item.text_writes);
+                        crate::text::apply_text_writes_slice(rig_text_ab, &item.text_writes);
                     }
                     // M-RIG: apply bone / constraint / solo writes before advance (see dedicated path).
                     if apply_vm_writes && !item.rig_writes.is_empty() {
-                        crate::rig::apply_rig_writes_slice(&inst.artboard, &item.rig_writes);
+                        crate::rig::apply_rig_writes_slice(rig_text_ab, &item.rig_writes);
                     }
                     // M-INPUT: apply joystick / keyboard / gamepad / focus before advance (see dedicated path).
                     if apply_vm_writes && !item.input_cmds.is_empty() {

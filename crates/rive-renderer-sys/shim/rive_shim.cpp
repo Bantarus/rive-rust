@@ -22,6 +22,7 @@
 // Core scene graph.
 #include "rive/file.hpp"
 #include "rive/artboard.hpp"
+#include "rive/bindable_artboard.hpp" // BindableArtboard (artboard-reference data binding value source)
 #include "rive/scene.hpp"
 #include "rive/animation/state_machine_instance.hpp"
 #include "rive/animation/linear_animation_instance.hpp" // seek/time (LinearAnimationInstance)
@@ -747,6 +748,62 @@ extern "C" void rive_artboard_destroy(RiveArtboard* artboard)
         return;
     artboard->artboard.reset();
     delete artboard;
+}
+
+// --- Artboard-reference data binding: BindableArtboard value source ----------
+// A BindableArtboard wraps an ArtboardInstance pulled from this File (holding the
+// File alive) so it can be bound to a propertyArtboard view-model property (see
+// rive_artboard_vm_set_artboard / rive_vmi_set_artboard in the view-model TU). The
+// owned RiveBindableArtboard handle is the artboard analogue of RiveImage; free it
+// with rive_bindable_artboard_destroy (binding takes its own ref, so it may be
+// freed after binding).
+static RiveBindableArtboard* wrap_bindable(rive::rcp<rive::BindableArtboard> ba)
+{
+    if (ba == nullptr)
+        return nullptr; // caller set the not-found error
+    auto* h = new (std::nothrow) RiveBindableArtboard();
+    if (h == nullptr)
+    {
+        set_error("out of memory allocating RiveBindableArtboard");
+        return nullptr;
+    }
+    h->bindable = std::move(ba);
+    return h;
+}
+
+extern "C" RiveBindableArtboard* rive_file_bindable_artboard_named(RiveFile* file,
+                                                                   const char* name)
+{
+    if (file == nullptr || file->file == nullptr || name == nullptr)
+    {
+        set_error("rive_file_bindable_artboard_named: invalid file or name");
+        return nullptr;
+    }
+    rive::rcp<rive::BindableArtboard> ba = file->file->bindableArtboardNamed(name);
+    if (ba == nullptr)
+        set_error("rive::File::bindableArtboardNamed found no artboard with that name");
+    return wrap_bindable(std::move(ba));
+}
+
+extern "C" RiveBindableArtboard* rive_file_bindable_artboard_default(RiveFile* file)
+{
+    if (file == nullptr || file->file == nullptr)
+    {
+        set_error("rive_file_bindable_artboard_default: invalid file");
+        return nullptr;
+    }
+    rive::rcp<rive::BindableArtboard> ba = file->file->bindableArtboardDefault();
+    if (ba == nullptr)
+        set_error("rive::File::bindableArtboardDefault returned null (no artboards)");
+    return wrap_bindable(std::move(ba));
+}
+
+extern "C" void rive_bindable_artboard_destroy(RiveBindableArtboard* bindable)
+{
+    if (bindable == nullptr)
+        return;
+    bindable->bindable = nullptr;
+    delete bindable;
 }
 
 // Wraps a Scene (state machine / animation) into a RiveStateMachine handle,

@@ -30,6 +30,7 @@
 
 namespace rive {
 class RenderImage; // full type only needed where a RiveImage is built/destroyed
+class BindableArtboard; // full type only where a RiveBindableArtboard is built/destroyed
 // Typed alias of RiveStateMachine.scene used by the input TU (keyboard/gamepad/
 // focus live on StateMachineInstance, not the base Scene). The runtime is built
 // -fno-rtti, so we can't downcast `scene` back — instead the selectors capture
@@ -48,12 +49,40 @@ struct RiveImage
     rive::rcp<rive::RenderImage> image;
 };
 
+// An OWNED, file-sourced artboard value — the value source for artboard-reference
+// (propertyArtboard) data binding, mirroring RiveImage for propertyImage. Created
+// by rive_file_bindable_artboard_named/_default (which wrap File::bindableArtboard*,
+// holding the source File alive) and released by rive_bindable_artboard_destroy.
+// DEFINED here (BindableArtboard only forward-declared above) so the view-model TU
+// can read `bindable` to feed propertyArtboard()->value(). The setter takes its OWN
+// ref on bind, so a RiveBindableArtboard may be destroyed after binding.
+struct RiveBindableArtboard
+{
+    rive::rcp<rive::BindableArtboard> bindable;
+};
+
 // One artboard instance + its bound default view model. DEFINED here (not in
 // rive_shim.cpp) so the view-model TU can reach `vmRuntime`. The other opaque
 // handle structs stay in rive_shim.cpp until a second TU needs them.
 struct RiveArtboard
 {
+    // The OWNED instance — set for a top-level artboard handle (the file selectors
+    // move it in here). Null for a BORROWED nested-child handle (see `borrowed`).
     std::unique_ptr<rive::ArtboardInstance> artboard;
+    // A BORROWED child instance, owned by a parent's NestedArtboard component. Set
+    // (with `artboard` null) by the nested-access TU's resolvers so the SAME
+    // find<T>-by-name functions (bones / text / joysticks / solo / constraints)
+    // drive a nested child. The handle wrapper is heap-allocated and freed by
+    // rive_artboard_destroy (which .reset()s the null `artboard` — a no-op — and
+    // deletes the wrapper, leaving the borrowed instance to its parent). Only valid
+    // while the parent artboard lives (the safe layer ties this with a lifetime).
+    rive::ArtboardInstance* borrowed = nullptr;
+    // The instance these feature functions operate on: the borrowed child if set,
+    // else the owned instance. Null only for an empty/invalid handle.
+    rive::ArtboardInstance* inst() const
+    {
+        return borrowed != nullptr ? borrowed : artboard.get();
+    }
     // The artboard's default view-model instance, bound so editor-authored data
     // bindings (incl. scripted view-model inputs) resolve at runtime. Held here
     // so the SAME instance is also bound to the state machine. Null for artboards

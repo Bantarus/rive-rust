@@ -82,6 +82,7 @@ impl File {
             inner: Rc::new(ArtboardInner {
                 ptr,
                 ctx: Rc::clone(&self._ctx),
+                _parent: None,
             }),
         })
     }
@@ -129,6 +130,13 @@ pub(crate) struct ArtboardInner {
     /// The owning context. Keeps the device alive *and* identifies which context
     /// this artboard belongs to (checked in `Frame::draw`).
     pub(crate) ctx: Rc<ContextInner>,
+    /// For a **borrowed nested-child** handle (see `nested.rs`): keeps the parent
+    /// artboard alive, because the child's native instance is owned by the parent's
+    /// `NestedArtboard` component. `None` for a top-level artboard. The `Rc` enforces
+    /// parent-outlives-child at runtime, so a nested [`Artboard`] needs no lifetime
+    /// parameter — `ptr` is a heap wrapper freed by `rive_artboard_destroy` (whose
+    /// owned instance is null → a no-op `reset`, leaving the borrowed child to its parent).
+    pub(crate) _parent: Option<Rc<ArtboardInner>>,
 }
 
 impl Drop for ArtboardInner {

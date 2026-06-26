@@ -38,9 +38,11 @@ void copy_to_caller(const std::string& s, char* buf, size_t cap, size_t* out_len
 // the not-found error.
 rive::TextValueRun* resolve_run(RiveArtboard* handle, const char* name, const char* path)
 {
-    if (handle == nullptr || handle->artboard == nullptr || name == nullptr)
+    if (handle == nullptr || name == nullptr)
         return nullptr;
-    rive::ArtboardInstance* ab = handle->artboard.get();
+    rive::ArtboardInstance* ab = handle->inst(); // borrowed nested child or owned
+    if (ab == nullptr)
+        return nullptr;
     if (path == nullptr || path[0] == '\0')
         return ab->find<rive::TextValueRun>(std::string(name));
     return ab->getTextRun(std::string(name), std::string(path));
@@ -88,9 +90,10 @@ extern "C" RiveStatus rive_artboard_text_get(RiveArtboard* artboard, const char*
 // discovering names settable via rive_artboard_text_set with an empty path).
 extern "C" uint32_t rive_artboard_text_run_count(RiveArtboard* artboard)
 {
-    if (artboard == nullptr || artboard->artboard == nullptr)
+    rive::ArtboardInstance* ab = artboard != nullptr ? artboard->inst() : nullptr;
+    if (ab == nullptr)
         return 0;
-    return static_cast<uint32_t>(artboard->artboard->count<rive::TextValueRun>());
+    return static_cast<uint32_t>(ab->count<rive::TextValueRun>());
 }
 
 // Introspection: authored name of the i-th top-level TextValueRun (in artboard
@@ -98,13 +101,14 @@ extern "C" uint32_t rive_artboard_text_run_count(RiveArtboard* artboard)
 extern "C" RiveStatus rive_artboard_text_run_name_at(RiveArtboard* artboard, uint32_t index,
                                                      char* buf, size_t cap, size_t* out_len)
 {
-    if (artboard == nullptr || artboard->artboard == nullptr)
+    rive::ArtboardInstance* ab = artboard != nullptr ? artboard->inst() : nullptr;
+    if (ab == nullptr)
     {
         shim_set_error("invalid artboard handle");
         return 1;
     }
     uint32_t i = 0;
-    for (rive::Core* obj : artboard->artboard->objects())
+    for (rive::Core* obj : ab->objects())
     {
         if (obj != nullptr && obj->is<rive::TextValueRun>())
         {

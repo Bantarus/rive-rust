@@ -231,6 +231,86 @@ fn main() -> Result<()> {
         );
     }
 
+    // --- Runtime input (joystick / keyboard / gamepad / focus) --------------
+    // RIVE_JOYSTICK_LIST prints authored joystick names; RIVE_JOYSTICK_SET="name=x,y"
+    // sets one (drives linked anims — shows in the rendered PNG); RIVE_JOYSTICK_GET="name"
+    // reads it. RIVE_KEY="key[:up][:repeat]" feeds a key (key = a letter/digit or a name
+    // like space/enter/left); RIVE_TEXT="..." feeds text. RIVE_GAMEPAD_BTN="idx[=value]"
+    // (W3C button 0..=16) / RIVE_GAMEPAD_AXIS="idx=value" (axis 0..=5) feed a pad.
+    // RIVE_FOCUS="next|prev|left|right|up|down|clear" drives focus; RIVE_FOCUS_STATE prints
+    // it. Keyboard/gamepad/focus only DO something when the .riv authors focus + listeners
+    // (they print whether a listener consumed — false on a plain asset).
+    if std::env::var("RIVE_JOYSTICK_LIST").is_ok() {
+        println!("  joysticks: {:?}", artboard.joystick_names());
+    }
+    if let Ok(name) = std::env::var("RIVE_JOYSTICK_GET") {
+        let (x, y) = artboard.joystick_get(&name)?;
+        println!("  joystick get {name:?} = ({x}, {y})");
+    }
+    if let Ok(spec) = std::env::var("RIVE_JOYSTICK_SET") {
+        let (name, xy) = spec.split_once('=').context("RIVE_JOYSTICK_SET must be name=x,y")?;
+        let (x, y) = parse_xy(xy).context("RIVE_JOYSTICK_SET must be name=x,y")?;
+        artboard.joystick_set(name, x, y)?;
+        println!(
+            "  joystick set {name:?} -> ({x}, {y}) (read-back: {:?})",
+            artboard.joystick_get(name)?
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_KEY") {
+        // "key", "key:up", "key:down:repeat" — pressed unless ":up".
+        let mut parts = spec.split(':');
+        let key = parse_key(parts.next().unwrap_or(""))?;
+        let (mut pressed, mut repeat) = (true, false);
+        for p in parts {
+            match p.trim().to_ascii_lowercase().as_str() {
+                "up" => pressed = false,
+                "down" => pressed = true,
+                "repeat" => repeat = true,
+                other => anyhow::bail!("unknown RIVE_KEY flag {other:?} (up|down|repeat)"),
+            }
+        }
+        let consumed =
+            state_machine.key_input(key, rive_renderer::KeyModifiers::NONE, pressed, repeat);
+        println!("  key {key:?} pressed={pressed} repeat={repeat} -> consumed={consumed}");
+    }
+    if let Ok(text) = std::env::var("RIVE_TEXT") {
+        println!("  text {text:?} -> consumed={}", state_machine.text_input(&text));
+    }
+    if let Ok(spec) = std::env::var("RIVE_GAMEPAD_BTN") {
+        let (idx, value) = match spec.split_once('=') {
+            Some((i, v)) => (i, v.trim().parse().context("gamepad button value must be a float")?),
+            None => (spec.as_str(), 1.0_f32),
+        };
+        let button = parse_gamepad_button(idx)?;
+        let consumed = state_machine.gamepad_button(button, value);
+        println!("  gamepad button {button:?} value={value} -> consumed={consumed}");
+    }
+    if let Ok(spec) = std::env::var("RIVE_GAMEPAD_AXIS") {
+        let (idx, value) = spec.split_once('=').context("RIVE_GAMEPAD_AXIS must be idx=value")?;
+        let value: f32 = value.trim().parse().context("gamepad axis value must be a float")?;
+        let axis = parse_gamepad_axis(idx)?;
+        println!(
+            "  gamepad axis {axis:?} value={value} -> consumed={}",
+            state_machine.gamepad_axis(axis, value)
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_FOCUS") {
+        if spec.trim().eq_ignore_ascii_case("clear") {
+            state_machine.clear_focus();
+            println!("  focus cleared");
+        } else {
+            let dir = parse_focus_dir(&spec)?;
+            println!("  focus {dir:?} -> moved={}", state_machine.focus_advance(dir));
+        }
+    }
+    if std::env::var("RIVE_FOCUS_STATE").is_ok() {
+        let st = state_machine.focus_state();
+        println!(
+            "  focus state: has_focus={} expects_keyboard={}",
+            st.has_focus, st.expects_keyboard
+        );
+    }
+
     // RIVE_VM_DUMP: print the artboard's view-model property schema (name + kind),
     // recursing into nested view models and list items via the handle API — use it
     // to discover real property names for RIVE_VM_SET / RIVE_VM_GET.
@@ -639,6 +719,80 @@ fn parse_bone_prop(s: &str) -> Result<rive_renderer::BoneProp> {
         "x" => BoneProp::X,
         "y" => BoneProp::Y,
         other => anyhow::bail!("unknown bone prop {other:?} (rotation|scalex|scaley|length|x|y)"),
+    })
+}
+
+/// Parses a key for the `RIVE_KEY` knob: a single letter (`a`..`z`) / digit
+/// (`0`..`9`), or a named key (`space`, `enter`, arrows, …).
+fn parse_key(s: &str) -> Result<rive_renderer::Key> {
+    use rive_renderer::Key;
+    #[rustfmt::skip]
+    const LETTERS: [Key; 26] = [
+        Key::A, Key::B, Key::C, Key::D, Key::E, Key::F, Key::G, Key::H, Key::I, Key::J, Key::K,
+        Key::L, Key::M, Key::N, Key::O, Key::P, Key::Q, Key::R, Key::S, Key::T, Key::U, Key::V,
+        Key::W, Key::X, Key::Y, Key::Z,
+    ];
+    #[rustfmt::skip]
+    const DIGITS: [Key; 10] = [
+        Key::Key0, Key::Key1, Key::Key2, Key::Key3, Key::Key4,
+        Key::Key5, Key::Key6, Key::Key7, Key::Key8, Key::Key9,
+    ];
+    let t = s.trim();
+    if let [c] = t.as_bytes() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_lowercase() {
+            return Ok(LETTERS[(c - b'a') as usize]);
+        }
+        if c.is_ascii_digit() {
+            return Ok(DIGITS[(c - b'0') as usize]);
+        }
+    }
+    Ok(match t.to_ascii_lowercase().as_str() {
+        "space" => Key::Space,
+        "enter" | "return" => Key::Enter,
+        "tab" => Key::Tab,
+        "escape" | "esc" => Key::Escape,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        "left" => Key::Left,
+        "right" => Key::Right,
+        "up" => Key::Up,
+        "down" => Key::Down,
+        other => anyhow::bail!("unknown key {other:?} (a-z, 0-9, space|enter|tab|escape|arrows|…)"),
+    })
+}
+
+/// Parses a W3C button index (`0`..=`16`) for `RIVE_GAMEPAD_BTN`.
+fn parse_gamepad_button(s: &str) -> Result<rive_renderer::GamepadButton> {
+    use rive_renderer::GamepadButton::*;
+    #[rustfmt::skip]
+    const B: [rive_renderer::GamepadButton; 17] = [
+        South, East, West, North, LeftShoulder, RightShoulder, LeftTrigger, RightTrigger, Back,
+        Forward, LeftStick, RightStick, DpadUp, DpadDown, DpadLeft, DpadRight, Start,
+    ];
+    let i: usize = s.trim().parse().context("gamepad button must be a 0..=16 index")?;
+    B.get(i).copied().context("gamepad button index out of range (0..=16)")
+}
+
+/// Parses a W3C axis index (`0`..=`5`) for `RIVE_GAMEPAD_AXIS`.
+fn parse_gamepad_axis(s: &str) -> Result<rive_renderer::GamepadAxis> {
+    use rive_renderer::GamepadAxis::*;
+    const A: [rive_renderer::GamepadAxis; 6] = [LeftX, LeftY, RightX, RightY, LeftTrigger, RightTrigger];
+    let i: usize = s.trim().parse().context("gamepad axis must be a 0..=5 index")?;
+    A.get(i).copied().context("gamepad axis index out of range (0..=5)")
+}
+
+/// Parses a focus direction for `RIVE_FOCUS` (`clear` is handled by the caller).
+fn parse_focus_dir(s: &str) -> Result<rive_renderer::FocusDir> {
+    use rive_renderer::FocusDir;
+    Ok(match s.trim().to_ascii_lowercase().as_str() {
+        "next" => FocusDir::Next,
+        "prev" | "previous" => FocusDir::Prev,
+        "left" => FocusDir::Left,
+        "right" => FocusDir::Right,
+        "up" => FocusDir::Up,
+        "down" => FocusDir::Down,
+        other => anyhow::bail!("unknown focus dir {other:?} (next|prev|left|right|up|down|clear)"),
     })
 }
 

@@ -21,13 +21,20 @@
 #include <memory>
 
 #include "rive/artboard.hpp"                     // ArtboardInstance
+#include "rive/scene.hpp"                         // Scene (RiveStateMachine.scene)
 #include "rive/layout.hpp"                        // Fit, Alignment
 #include "rive/refcnt.hpp"                        // rcp, make_rcp
+#include "rive/input/gamepad_snapshot.hpp"        // GamepadSnapshot (RiveStateMachine cumulative pad state)
 #include "rive/viewmodel/viewmodel_instance.hpp" // ViewModelInstance
 #include "rive/viewmodel/runtime/viewmodel_instance_runtime.hpp" // ViewModelInstanceRuntime
 
 namespace rive {
 class RenderImage; // full type only needed where a RiveImage is built/destroyed
+// Typed alias of RiveStateMachine.scene used by the input TU (keyboard/gamepad/
+// focus live on StateMachineInstance, not the base Scene). The runtime is built
+// -fno-rtti, so we can't downcast `scene` back — instead the selectors capture
+// the concrete pointer at construction (null for a LinearAnimationInstance scene).
+class StateMachineInstance;
 }
 
 // An OWNED, decoded render image — the value source for image-property data
@@ -64,6 +71,46 @@ struct RiveArtboard
     rive::Fit fit = rive::Fit::contain;
     rive::Alignment alignment = rive::Alignment::center;
     float scaleFactor = 1.0f; // only used by Fit::layout
+};
+
+// One playable scene (state machine / animation) + the pointer & input state that
+// rides on it. DEFINED here (not in rive_shim.cpp) so the input TU
+// (rive_shim_input.cpp) can reach `smInstance` for keyboard / gamepad / focus,
+// which live on StateMachineInstance — the base `scene` virtuals (pointer*,
+// advanceAndApply) cover the rest. The pointer/fit/seek functions stay in
+// rive_shim.cpp; only the struct is shared.
+struct RiveStateMachine
+{
+    std::unique_ptr<rive::Scene> scene;
+    // Concrete-type capture (the runtime is built -fno-rtti, so we can't downcast).
+    // `smInstance` aliases `scene` when it is a StateMachineInstance (the keyboard /
+    // gamepad / focus entry points need it); null for the LinearAnimationInstance
+    // fallback. `isLinear` is the complementary flag the seek/time playhead API casts
+    // on (true ONLY for that animation fallback). Both set definitively by the
+    // selectors, NOT inferred from durationSeconds() (a StaticScene would alias 0).
+    rive::StateMachineInstance* smInstance = nullptr;
+    bool isLinear = false;
+    // Cumulative W3C-standard gamepad state (deviceId 0). rive_state_machine_gamepad_*
+    // mutate this then dispatch a GamepadEventInvocation built from it, so a held
+    // button / settled axis stays reflected in buttonMask / axes across calls (a
+    // script reading fullState sees the real state, not just the last delta).
+    rive::GamepadSnapshot gamepad;
+    // Fit/alignment for INVERTING pointer coords back into artboard space — must
+    // mirror the artboard's draw fit/alignment or hits won't line up. Default
+    // contain/center == the historical hardcoded inversion. Set via
+    // rive_state_machine_set_fit_align (kept in sync with the artboard's by the
+    // RiveFit component).
+    rive::Fit fit = rive::Fit::contain;
+    rive::Alignment alignment = rive::Alignment::center;
+    float scaleFactor = 1.0f;
+    // Atlas pointer mapping: the DRAWN tile size (px) an atlas face renders into via
+    // rive_artboard_draw_viewport. When both are > 0, pointer coords (in the face's
+    // logical target space) are normalized into this tile before the fit/alignment is
+    // inverted — because an atlas face is fit into its tile, not the full target. 0
+    // (the default) = full-target inversion, i.e. the historical dedicated-face path.
+    // Set per-frame by the atlas node via rive_state_machine_set_pointer_tile.
+    float ptrTileW = 0.0f;
+    float ptrTileH = 0.0f;
 };
 
 // Cross-TU error reporter. The canonical setter has internal linkage in

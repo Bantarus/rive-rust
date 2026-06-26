@@ -160,6 +160,12 @@ pub use text::RiveText;
 mod rig;
 pub use rig::{BoneProp, RiveRig};
 
+// Per-feature module. Runtime input: the `RiveInput` component queues joystick /
+// keyboard / gamepad / focus commands, applied before advance in both tiers
+// (`floor` inline; `zero_copy` ferried to the render world like the rig writes).
+mod input;
+pub use input::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers, RiveInput};
+
 // Per-feature module. Audio control: the optional `RiveAudio` resource sets the
 // master volume / mute over rive's process-global audio engine (audio plays
 // automatically during advance in both tiers; `--with_rive_audio=system`). With the
@@ -182,13 +188,15 @@ pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
         ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveAudio, RiveFile,
-        RiveFit, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface, RiveTarget,
-        RiveText, RiveValue, RiveViewModel, StateMachineSelector,
+        RiveFit, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface,
+        RiveTarget, RiveText, RiveValue, RiveViewModel, StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
     // The bone-property selector for `RiveRig::set_bone`.
     pub use crate::BoneProp;
+    // The input value types for `RiveInput` (keyboard / gamepad / focus).
+    pub use crate::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers};
 
     // Floor (default): the CPU-copy plugin entry point.
     #[cfg(feature = "floor")]
@@ -970,13 +978,16 @@ fn advance_and_upload_rive(
         Option<&RiveFit>,
         Option<&mut RiveText>,
         Option<&mut RiveRig>,
+        Option<&mut RiveInput>,
     )>,
 ) {
     let Some(ctx) = rive_ctx.get() else {
         return;
     };
     let dt = time.delta_secs();
-    for (entity, mut anim, target, pointer, mut view_model, fit, mut text, mut rig) in &mut query {
+    for (entity, mut anim, target, pointer, mut view_model, fit, mut text, mut rig, mut input) in
+        &mut query
+    {
         let Some(inst) = instances.map.get_mut(&entity) else {
             continue;
         };
@@ -1034,6 +1045,13 @@ fn advance_and_upload_rive(
         // so the change is solved this tick (same rationale as the writes above).
         if let Some(rig) = rig.as_deref_mut() {
             crate::rig::apply_rig_writes(rig, &inst.artboard);
+        }
+
+        // Apply queued input (joystick → artboard; keyboard / gamepad / focus →
+        // state machine) BEFORE advancing so listeners + linked animations react
+        // this tick (same rationale as the writes above).
+        if let Some(input) = input.as_deref_mut() {
+            crate::input::apply_input_cmds(input, &inst.artboard, &mut inst.state_machine);
         }
 
         // Apply a one-shot seek BEFORE advancing (the shim applies it immediately, so

@@ -89,8 +89,8 @@ use rive_renderer::{
 };
 
 use crate::{
-    RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RivePlugin, RivePointer, RiveSurface,
-    RiveRig, RiveTarget, RiveText, RiveValue, RiveViewModel,
+    RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RiveInput, RivePlugin, RivePointer,
+    RiveRig, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -251,7 +251,13 @@ impl Plugin for RiveZeroCopyPlugin {
             // read-only extract can ferry them.
             .add_systems(
                 Last,
-                (stage_vm_writes, stage_text_writes, stage_rig_writes, stage_playback),
+                (
+                    stage_vm_writes,
+                    stage_text_writes,
+                    stage_rig_writes,
+                    stage_input_writes,
+                    stage_playback,
+                ),
             );
 
         let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
@@ -1158,6 +1164,12 @@ struct ExtractedRive {
     /// Empty for faces with no `RiveRig` or no queued writes. Staged main-world by
     /// `stage_rig_writes`.
     rig_writes: Vec<crate::rig::RigWrite>,
+    /// M-INPUT: this frame's input commands (joystick / keyboard / gamepad / focus,
+    /// from a `RiveInput`), applied to the instance in the node before advance — the
+    /// zero-copy analogue of the floor advance system's inline `apply_input_cmds`.
+    /// Empty for faces with no `RiveInput` or no queued commands. Staged main-world
+    /// by `stage_input_writes`.
+    input_cmds: Vec<crate::input::InputCmd>,
     /// Artboard / state-machine selectors (default / by name / by index), honored
     /// once when the node first builds this entity's instance. Ferried each frame
     /// but read only at build time; cheap for the common `Default` (a bare enum —
@@ -1621,6 +1633,40 @@ fn stage_rig_writes(
     }
 }
 
+/// M-INPUT analogue of [`stage_rig_writes`]: stages each entity's queued
+/// [`RiveInput`] commands (`cmds` → `staged`) so the read-only extract can ferry
+/// them. Same readiness gate — a command for a not-yet-extractable face stays
+/// queued in `cmds` rather than being stranded in `staged` and silently dropped.
+fn stage_input_writes(
+    mut query: Query<(
+        Entity,
+        &RiveAnimation,
+        &RiveTarget,
+        Option<&RiveActive>,
+        &mut RiveInput,
+    )>,
+    files: Res<Assets<RiveFile>>,
+    atlas: Res<RiveAtlasState>,
+) {
+    for (entity, anim, target, active, mut input) in &mut query {
+        if !input.has_staging_work() {
+            continue;
+        }
+        // Mirror extract_rive_instances' readiness gate (asset loaded + not culled +
+        // surface allocated). Keep in sync with stage_rig_writes / stage_vm_writes / extract.
+        let ready = files.get(&anim.handle).is_some()
+            && active.is_none_or(|a| a.0)
+            && if target.atlas.is_some() {
+                atlas.locs.contains_key(&entity)
+            } else {
+                target.image != Handle::default()
+            };
+        if ready {
+            input.stage_writes();
+        }
+    }
+}
+
 /// M-PLAYBACK analogue of [`stage_vm_writes`]: stages each entity's one-shot seek
 /// (`pending_seek` → `staged_seek`) so the read-only extract can ferry it. Same
 /// readiness gate — a seek queued before the instance is live stays in `pending_seek`
@@ -1680,6 +1726,7 @@ fn extract_rive_instances(
             Option<&RiveAssets>,
             Option<&RiveText>,
             Option<&RiveRig>,
+            Option<&RiveInput>,
         )>,
     >,
     files: Extract<Res<Assets<RiveFile>>>,
@@ -1689,7 +1736,7 @@ fn extract_rive_instances(
     out.items.clear();
     out.generation = out.generation.wrapping_add(1);
     let dt = time.delta_secs();
-    for (entity, anim, target, active, vm, fit, pointer, assets, text, rig) in &query {
+    for (entity, anim, target, active, vm, fit, pointer, assets, text, rig, input) in &query {
         let fit_align = fit.copied().unwrap_or_default().fit_align();
         let Some(file) = files.get(&anim.handle) else {
             continue; // not loaded yet — no rive state to keep
@@ -1719,6 +1766,7 @@ fn extract_rive_instances(
                 vm_writes: Vec::new(),
                 text_writes: Vec::new(),
                 rig_writes: Vec::new(),
+                input_cmds: Vec::new(),
                 artboard_sel: anim.artboard.clone(),
                 state_machine_sel: anim.state_machine.clone(),
                 assets: assets.cloned(),
@@ -1774,6 +1822,7 @@ fn extract_rive_instances(
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
             text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             rig_writes: rig.map(|r| r.staged().to_vec()).unwrap_or_default(),
+            input_cmds: input.map(|i| i.staged().to_vec()).unwrap_or_default(),
             artboard_sel: anim.artboard.clone(),
             state_machine_sel: anim.state_machine.clone(),
             assets: assets.cloned(),
@@ -2054,6 +2103,15 @@ impl Node for RiveFillNode {
             if apply_vm_writes && !item.rig_writes.is_empty() {
                 crate::rig::apply_rig_writes_slice(&inst.artboard, &item.rig_writes);
             }
+            // M-INPUT: apply this frame's joystick (artboard) + keyboard / gamepad /
+            // focus (state machine) commands before advance too (same gate).
+            if apply_vm_writes && !item.input_cmds.is_empty() {
+                crate::input::apply_input_cmds_slice(
+                    &inst.artboard,
+                    &mut inst.state_machine,
+                    &item.input_cmds,
+                );
+            }
             // M-PLAYBACK: apply this frame's one-shot seek before advance (same
             // once-per-visual-frame gate, so a multi-camera frame seeks once). The
             // shim applies it immediately, so a seek while paused (step 0) is visible.
@@ -2324,6 +2382,14 @@ impl Node for RiveFillNode {
                     // M-RIG: apply bone / constraint / solo writes before advance (see dedicated path).
                     if apply_vm_writes && !item.rig_writes.is_empty() {
                         crate::rig::apply_rig_writes_slice(&inst.artboard, &item.rig_writes);
+                    }
+                    // M-INPUT: apply joystick / keyboard / gamepad / focus before advance (see dedicated path).
+                    if apply_vm_writes && !item.input_cmds.is_empty() {
+                        crate::input::apply_input_cmds_slice(
+                            &inst.artboard,
+                            &mut inst.state_machine,
+                            &item.input_cmds,
+                        );
                     }
                     // Fit/alignment within the tile (draw_viewport reads it). Absent
                     // `RiveFit` == contain/center — the historical per-tile fit.

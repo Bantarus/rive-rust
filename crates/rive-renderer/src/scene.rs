@@ -277,7 +277,9 @@ impl HitResult {
 /// Holds a shared reference to its [`Artboard`] so the native scene never
 /// outlives the artboard instance it points at. `!Send + !Sync`.
 pub struct StateMachine {
-    ptr: *mut sys::RiveStateMachine,
+    // pub(crate) so the per-feature input module (`input.rs`) can drive keyboard /
+    // gamepad / focus on the SM handle, mirroring how `rig.rs` reaches Artboard.
+    pub(crate) ptr: *mut sys::RiveStateMachine,
     _artboard: Rc<ArtboardInner>,
 }
 

@@ -209,36 +209,9 @@ struct RiveFile
     rive::rcp<rive::File> file;
 };
 
-// RiveArtboard is defined in rive_shim_internal.hpp (shared with the view-model
-// TU). The remaining handle structs stay file-local until a second TU needs them.
-
-struct RiveStateMachine
-{
-    std::unique_ptr<rive::Scene> scene;
-    // Concrete scene kind, recorded at construction (the runtime is built -fno-rtti,
-    // so we can't dynamic_cast back). True only when `scene` is a
-    // LinearAnimationInstance (the default-scene animation fallback) — the seek/time
-    // playhead API casts on this. A StateMachineInstance (or any non-animation scene)
-    // is false. Set definitively by the selectors, NOT inferred from durationSeconds()
-    // (which a StaticScene would alias to 0, colliding with a real animation).
-    bool isLinear = false;
-    // Fit/alignment for INVERTING pointer coords back into artboard space — must
-    // mirror the artboard's draw fit/alignment or hits won't line up. Default
-    // contain/center == the historical hardcoded inversion. Set via
-    // rive_state_machine_set_fit_align (kept in sync with the artboard's by the
-    // RiveFit component).
-    rive::Fit fit = rive::Fit::contain;
-    rive::Alignment alignment = rive::Alignment::center;
-    float scaleFactor = 1.0f;
-    // Atlas pointer mapping: the DRAWN tile size (px) an atlas face renders into via
-    // rive_artboard_draw_viewport. When both are > 0, pointer coords (in the face's
-    // logical target space) are normalized into this tile before the fit/alignment is
-    // inverted — because an atlas face is fit into its tile, not the full target. 0
-    // (the default) = full-target inversion, i.e. the historical dedicated-face path.
-    // Set per-frame by the atlas node via rive_state_machine_set_pointer_tile.
-    float ptrTileW = 0.0f;
-    float ptrTileH = 0.0f;
-};
+// RiveArtboard AND RiveStateMachine are defined in rive_shim_internal.hpp (shared
+// with the view-model / input TUs). The remaining handle structs stay file-local
+// until a second TU needs them.
 
 // ---------------------------------------------------------------------------
 // Error string.
@@ -780,10 +753,14 @@ extern "C" void rive_artboard_destroy(RiveArtboard* artboard)
 // binding the artboard's view-model instance to it. Shared by the default / named
 // / by-index selectors. Takes ownership of `scene`; `scene == nullptr` means the
 // caller's lookup missed (error already set), so this forwards null. `isLinear`
-// records the concrete type (the caller knows it statically) for the seek API.
+// records the concrete type (the caller knows it statically) for the seek API;
+// `smInstance` is the SAME object as `scene` typed as a StateMachineInstance (null
+// for the animation fallback) so the input TU can reach focus / keyboard / gamepad
+// without an RTTI downcast.
 static RiveStateMachine* make_sm_handle(RiveArtboard* artboard,
                                         std::unique_ptr<rive::Scene> scene,
-                                        bool isLinear)
+                                        bool isLinear,
+                                        rive::StateMachineInstance* smInstance)
 {
     if (scene == nullptr)
         return nullptr;
@@ -795,6 +772,7 @@ static RiveStateMachine* make_sm_handle(RiveArtboard* artboard,
     }
     handle->scene = std::move(scene);
     handle->isLinear = isLinear;
+    handle->smInstance = smInstance;
 
     // Bind the SAME view-model instance to the state machine too (per the
     // data-binding contract: the artboard binding drives layout-affecting
@@ -824,12 +802,15 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_default(
     // runtime — a static-only artboard returns null here, exactly as before.)
     std::unique_ptr<rive::Scene> scene;
     bool isLinear = false;
+    rive::StateMachineInstance* smInstance = nullptr;
     if (auto sm = artboard->artboard->defaultStateMachine())
     {
+        smInstance = sm.get(); // alias survives the release() into `scene`
         scene = std::unique_ptr<rive::Scene>(sm.release());
     }
     else if (auto sm = artboard->artboard->stateMachineAt(0))
     {
+        smInstance = sm.get();
         scene = std::unique_ptr<rive::Scene>(sm.release());
     }
     else if (auto anim = artboard->artboard->animationAt(0))
@@ -842,7 +823,7 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_default(
         set_error("artboard has no playable state machine, animation, or scene");
         return nullptr;
     }
-    return make_sm_handle(artboard, std::move(scene), isLinear);
+    return make_sm_handle(artboard, std::move(scene), isLinear, smInstance);
 }
 
 extern "C" RiveStateMachine* rive_artboard_state_machine_named(
@@ -868,7 +849,8 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_named(
         return nullptr;
     }
     // A named scene is always a StateMachineInstance — not seekable (isLinear=false).
-    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false);
+    rive::StateMachineInstance* smInstance = sm.get();
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false, smInstance);
 }
 
 extern "C" RiveStateMachine* rive_artboard_state_machine_at(
@@ -887,7 +869,8 @@ extern "C" RiveStateMachine* rive_artboard_state_machine_at(
         return nullptr;
     }
     // An indexed scene is always a StateMachineInstance — not seekable (isLinear=false).
-    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false);
+    rive::StateMachineInstance* smInstance = sm.get();
+    return make_sm_handle(artboard, std::unique_ptr<rive::Scene>(sm.release()), false, smInstance);
 }
 
 // Selection introspection: discover the state-machine names selectable by name/index.

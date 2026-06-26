@@ -603,6 +603,57 @@ extern "C" {
         out_len: *mut usize,
     ) -> RiveStatus;
 
+    // ===== Runtime input (joystick / keyboard / gamepad / focus) ============
+    // Two shapes: JOYSTICK is an authored component set by name on the artboard
+    // (applied during advance, like a bone); KEYBOARD / GAMEPAD / FOCUS are a
+    // state-machine event feed routed via the SM's FocusManager (focus tree
+    // auto-built at SM creation). The latter return 0 / no-op on the animation
+    // fallback scene or when the .riv authors no FocusData. `key` is a rive::Key
+    // (GLFW codes); `modifiers` a bitmask (shift=1/ctrl=2/alt=4/meta=8); gamepad
+    // `button`/`axis` are W3C standard indices; `dir` is RIVE_FOCUS_*.
+    pub fn rive_artboard_joystick_set(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        x: f32,
+        y: f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_joystick_get(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        out_x: *mut f32,
+        out_y: *mut f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_joystick_count(artboard: *mut RiveArtboard) -> u32;
+    pub fn rive_artboard_joystick_name_at(
+        artboard: *mut RiveArtboard,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_state_machine_key_input(
+        sm: *mut RiveStateMachine,
+        key: u16,
+        modifiers: u8,
+        is_pressed: u8,
+        is_repeat: u8,
+    ) -> u8;
+    pub fn rive_state_machine_text_input(
+        sm: *mut RiveStateMachine,
+        utf8: *const c_char,
+        len: usize,
+    ) -> u8;
+    pub fn rive_state_machine_gamepad_button(sm: *mut RiveStateMachine, button: u8, value: f32)
+        -> u8;
+    pub fn rive_state_machine_gamepad_axis(sm: *mut RiveStateMachine, axis: u8, value: f32) -> u8;
+    pub fn rive_state_machine_focus_advance(sm: *mut RiveStateMachine, dir: u32) -> u8;
+    pub fn rive_state_machine_clear_focus(sm: *mut RiveStateMachine);
+    pub fn rive_state_machine_focus_state(
+        sm: *mut RiveStateMachine,
+        out_has_focus: *mut u8,
+        out_expects_keyboard: *mut u8,
+    );
+
     // ===== Audio (engine lifecycle + master volume) =========================
     // With `--with_rive_audio=system`, rive auto-plays audio to the OS output
     // during advance via the singleton runtime engine; these are the host bridge

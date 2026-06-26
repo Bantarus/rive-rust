@@ -369,6 +369,57 @@ uint32_t           rive_artboard_rig_count(RiveArtboard*, uint32_t kind);
 RiveStatus         rive_artboard_rig_name_at(RiveArtboard*, uint32_t kind, uint32_t index,
                                              char* buf, size_t cap, size_t* out_len);
 
+/* --- Runtime input (joystick / keyboard / gamepad / focus) ------------------
+ * Two shapes of host-driven input (see rive_shim_input.cpp):
+ *  - JOYSTICK is an AUTHORED component (like a bone), set by name on a RiveArtboard
+ *    and APPLIED during advance (drives linked animations/constraints) — a set
+ *    sticks unless an animation also keys it.
+ *  - KEYBOARD / GAMEPAD / FOCUS are a state-machine EVENT feed on a RiveStateMachine,
+ *    routed via the SM's FocusManager (focus tree auto-built at SM creation) to the
+ *    focused FocusData's listeners. They no-op (return 0 / consumed=false) on a
+ *    handle whose scene is the animation fallback, or when the .riv authors no
+ *    FocusData. */
+
+/* Joystick: normalized x/y in [-1,1]. `_count`/`_name_at` (two-call protocol) list
+ * the authored joysticks so a game can discover the settable names. */
+RiveStatus         rive_artboard_joystick_set(RiveArtboard*, const char* name, float x, float y);
+RiveStatus         rive_artboard_joystick_get(RiveArtboard*, const char* name,
+                                              float* out_x, float* out_y);
+uint32_t           rive_artboard_joystick_count(RiveArtboard*);
+RiveStatus         rive_artboard_joystick_name_at(RiveArtboard*, uint32_t index,
+                                                  char* buf, size_t cap, size_t* out_len);
+
+/* Keyboard: `key` is a rive::Key code (GLFW layout, e.g. 'A'=65, space=32, arrows
+ * 262-265); `modifiers` is a rive::KeyModifiers bitmask (shift=1/ctrl=2/alt=4/meta=8).
+ * `text` is committed/IME UTF-8. Both return 1 if a listener consumed the event. */
+uint8_t            rive_state_machine_key_input(RiveStateMachine*, uint16_t key,
+                                                uint8_t modifiers, uint8_t is_pressed,
+                                                uint8_t is_repeat);
+uint8_t            rive_state_machine_text_input(RiveStateMachine*, const char* utf8, size_t len);
+
+/* Gamepad: `button`/`axis` are W3C Standard Gamepad indices (button: south=0,east=1,
+ * …,start=16; axis: leftX=0,leftY=1,rightX=2,rightY=3,leftTrigger=4,rightTrigger=5).
+ * `value` folds into a cumulative per-SM snapshot then dispatches; a button reads as
+ * pressed at `value >= 0.5` (rive's listener threshold — pass 1.0 to press, 0.0 to
+ * release). Return 1 if consumed by the focus tree. */
+uint8_t            rive_state_machine_gamepad_button(RiveStateMachine*, uint8_t button,
+                                                     float value);
+uint8_t            rive_state_machine_gamepad_axis(RiveStateMachine*, uint8_t axis, float value);
+
+/* Focus: advance the primary focus in a direction (tab order or spatial), clear it,
+ * or poll the state (for showing a soft keyboard). `_advance` returns 1 if focus
+ * moved. */
+#define RIVE_FOCUS_NEXT  0
+#define RIVE_FOCUS_PREV  1
+#define RIVE_FOCUS_LEFT  2
+#define RIVE_FOCUS_RIGHT 3
+#define RIVE_FOCUS_UP    4
+#define RIVE_FOCUS_DOWN  5
+uint8_t            rive_state_machine_focus_advance(RiveStateMachine*, uint32_t dir);
+void               rive_state_machine_clear_focus(RiveStateMachine*);
+void               rive_state_machine_focus_state(RiveStateMachine*, uint8_t* out_has_focus,
+                                                  uint8_t* out_expects_keyboard);
+
 /* --- Audio (engine lifecycle + master volume) -------------------------------
  * With --with_rive_audio=system, rive plays audio events / embedded audio to the
  * OS output automatically during advance (the lazily-created singleton

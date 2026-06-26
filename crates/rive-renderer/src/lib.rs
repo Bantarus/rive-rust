@@ -103,6 +103,12 @@ mod text;
 mod rig;
 pub use rig::BoneProp;
 
+// Runtime input — extends `Artboard` with `joystick_*` (authored component) and
+// `StateMachine` with `key_input` / `text_input` / `gamepad_*` / `focus_*` (the
+// focus-routed event feed), plus the input value types.
+mod input;
+pub use input::{FocusDir, FocusState, GamepadAxis, GamepadButton, Key, KeyModifiers};
+
 /// Audio engine lifecycle + master volume (process-global, free functions).
 pub mod audio;
 
@@ -166,6 +172,11 @@ pub enum Error {
     /// child, or a name contained an interior NUL byte.
     #[error("rig control operation failed: {0}")]
     Rig(String),
+    /// A runtime input operation failed: no joystick with that name, or a name
+    /// contained an interior NUL byte. (Keyboard / gamepad / focus events report
+    /// "not consumed" via their `bool` return rather than erroring.)
+    #[error("input operation failed: {0}")]
+    Input(String),
 }
 
 /// Returns the shim's most recent error string (empty if none).

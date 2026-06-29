@@ -23,6 +23,9 @@
 #include "rive/bones/root_bone.hpp"          // RootBone (x/y setters)
 #include "rive/component.hpp"                 // Component::name()
 #include "rive/constraints/constraint.hpp"   // Constraint (strength via ConstraintBase)
+#include "rive/constraints/distance_constraint.hpp"    // DistanceConstraint (distance/modeValue)
+#include "rive/constraints/follow_path_constraint.hpp" // FollowPathConstraint (distance/orient/offset)
+#include "rive/constraints/ik_constraint.hpp"          // IKConstraint (invertDirection/parentBoneCount)
 #include "rive/solo.hpp"                      // Solo
 
 // Bone property selector — mirrors RIVE_BONE_* in rive_shim.h.
@@ -42,6 +45,34 @@ enum RigKind {
     RIG_CONSTRAINT = 1,
     RIG_SOLO = 2,
 };
+
+// Type-specific constraint property selector — mirrors RIVE_CONSTRAINT_* in
+// rive_shim.h. The prop picks BOTH the concrete constraint type to find<T> AND
+// the field; values ride a single float channel (bool as 0/1, the distance
+// "mode" enum as its 0-based index).
+enum ConstraintProp {
+    CONSTRAINT_IK_INVERT = 0,            // IKConstraint.invertDirection (bool)
+    CONSTRAINT_IK_PARENT_BONE_COUNT = 1, // IKConstraint.parentBoneCount (uint32)
+    CONSTRAINT_DIST_DISTANCE = 2,        // DistanceConstraint.distance (float)
+    CONSTRAINT_DIST_MODE = 3,            // DistanceConstraint.modeValue (enum index)
+    CONSTRAINT_FOLLOW_DISTANCE = 4,      // FollowPathConstraint.distance (float)
+    CONSTRAINT_FOLLOW_ORIENT = 5,        // FollowPathConstraint.orient (bool)
+    CONSTRAINT_FOLLOW_OFFSET = 6,        // FollowPathConstraint.offset (bool)
+};
+
+// Rounds a float value channel to a non-negative uint32 (for the parentBoneCount
+// / modeValue integer props). Clamps the full range so a pathological caller
+// value can't trigger UB: the `!(value > 0)` test also rejects NaN (→ 0), and
+// values at/above the largest float below 2^32 saturate (a direct float→unsigned
+// cast of NaN or an out-of-range float is undefined behavior).
+uint32_t value_to_u32(float value)
+{
+    if (!(value > 0.0f))
+        return 0u; // negatives, zero, and NaN
+    if (value >= 4294967040.0f)
+        return 0xFFFFFFFFu; // largest float < 2^32 → saturate
+    return static_cast<uint32_t>(value + 0.5f);
+}
 
 // Two-call string copy (mirrors the text/view-model TUs): always set *out_len to
 // the full length (call with cap=0 to size), copy min(cap,len) bytes, no NUL —
@@ -223,6 +254,141 @@ extern "C" RiveStatus rive_artboard_constraint_get_strength(RiveArtboard* artboa
     }
     *out = c->strength();
     return RIVE_OK;
+}
+
+// Sets a TYPE-SPECIFIC constraint property `prop` (RIVE_CONSTRAINT_*) on the
+// constraint named `name`. The prop selects the concrete type to find<T>; if no
+// constraint of that type has the name (or the named constraint is a different
+// type), it's an error. Bools are set from `value != 0`; the integer props
+// (parentBoneCount / mode) round the float channel to a non-negative uint32.
+extern "C" RiveStatus rive_artboard_constraint_set_prop(RiveArtboard* artboard, const char* name,
+                                                        uint32_t prop, float value)
+{
+    rive::ArtboardInstance* ab = artboard_of(artboard);
+    if (ab == nullptr || name == nullptr)
+    {
+        shim_set_error("invalid artboard handle");
+        return 1;
+    }
+    std::string n(name);
+    switch (prop)
+    {
+        case CONSTRAINT_IK_INVERT:
+        case CONSTRAINT_IK_PARENT_BONE_COUNT:
+        {
+            rive::IKConstraint* c = ab->find<rive::IKConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("IK constraint not found");
+                return 1;
+            }
+            if (prop == CONSTRAINT_IK_INVERT)
+                c->invertDirection(value != 0.0f);
+            else
+                c->parentBoneCount(value_to_u32(value));
+            return RIVE_OK;
+        }
+        case CONSTRAINT_DIST_DISTANCE:
+        case CONSTRAINT_DIST_MODE:
+        {
+            rive::DistanceConstraint* c = ab->find<rive::DistanceConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("distance constraint not found");
+                return 1;
+            }
+            if (prop == CONSTRAINT_DIST_DISTANCE)
+                c->distance(value);
+            else
+                c->modeValue(value_to_u32(value));
+            return RIVE_OK;
+        }
+        case CONSTRAINT_FOLLOW_DISTANCE:
+        case CONSTRAINT_FOLLOW_ORIENT:
+        case CONSTRAINT_FOLLOW_OFFSET:
+        {
+            rive::FollowPathConstraint* c = ab->find<rive::FollowPathConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("follow-path constraint not found");
+                return 1;
+            }
+            if (prop == CONSTRAINT_FOLLOW_DISTANCE)
+                c->distance(value);
+            else if (prop == CONSTRAINT_FOLLOW_ORIENT)
+                c->orient(value != 0.0f);
+            else
+                c->offset(value != 0.0f);
+            return RIVE_OK;
+        }
+        default:
+            shim_set_error("unknown constraint property");
+            return 1;
+    }
+}
+
+// Reads a TYPE-SPECIFIC constraint property `prop` (RIVE_CONSTRAINT_*) of the
+// constraint named `name` into *out (bools as 0/1, integer props as their value).
+extern "C" RiveStatus rive_artboard_constraint_get_prop(RiveArtboard* artboard, const char* name,
+                                                        uint32_t prop, float* out)
+{
+    rive::ArtboardInstance* ab = artboard_of(artboard);
+    if (ab == nullptr || name == nullptr || out == nullptr)
+    {
+        shim_set_error("invalid artboard handle");
+        return 1;
+    }
+    std::string n(name);
+    switch (prop)
+    {
+        case CONSTRAINT_IK_INVERT:
+        case CONSTRAINT_IK_PARENT_BONE_COUNT:
+        {
+            rive::IKConstraint* c = ab->find<rive::IKConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("IK constraint not found");
+                return 1;
+            }
+            *out = (prop == CONSTRAINT_IK_INVERT) ? (c->invertDirection() ? 1.0f : 0.0f)
+                                                  : static_cast<float>(c->parentBoneCount());
+            return RIVE_OK;
+        }
+        case CONSTRAINT_DIST_DISTANCE:
+        case CONSTRAINT_DIST_MODE:
+        {
+            rive::DistanceConstraint* c = ab->find<rive::DistanceConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("distance constraint not found");
+                return 1;
+            }
+            *out = (prop == CONSTRAINT_DIST_DISTANCE) ? c->distance()
+                                                      : static_cast<float>(c->modeValue());
+            return RIVE_OK;
+        }
+        case CONSTRAINT_FOLLOW_DISTANCE:
+        case CONSTRAINT_FOLLOW_ORIENT:
+        case CONSTRAINT_FOLLOW_OFFSET:
+        {
+            rive::FollowPathConstraint* c = ab->find<rive::FollowPathConstraint>(n);
+            if (c == nullptr)
+            {
+                shim_set_error("follow-path constraint not found");
+                return 1;
+            }
+            if (prop == CONSTRAINT_FOLLOW_DISTANCE)
+                *out = c->distance();
+            else if (prop == CONSTRAINT_FOLLOW_ORIENT)
+                *out = c->orient() ? 1.0f : 0.0f;
+            else
+                *out = c->offset() ? 1.0f : 0.0f;
+            return RIVE_OK;
+        }
+        default:
+            shim_set_error("unknown constraint property");
+            return 1;
+    }
 }
 
 // --- Solo -------------------------------------------------------------------

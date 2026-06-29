@@ -632,6 +632,21 @@ extern "C" {
         name: *const c_char,
         out: *mut f32,
     ) -> RiveStatus;
+    // Type-specific constraint props: `prop` is RIVE_CONSTRAINT_* (selects the
+    // concrete type to find<T> + the field); value rides the f32 channel (bool
+    // 0/1, mode/parentBoneCount as the integer value). Wrong-type/missing → error.
+    pub fn rive_artboard_constraint_set_prop(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        prop: u32,
+        value: f32,
+    ) -> RiveStatus;
+    pub fn rive_artboard_constraint_get_prop(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+        prop: u32,
+        out: *mut f32,
+    ) -> RiveStatus;
     pub fn rive_artboard_solo_set_active_name(
         artboard: *mut RiveArtboard,
         name: *const c_char,

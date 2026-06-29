@@ -158,7 +158,7 @@ pub use text::RiveText;
 // `zero_copy` ferried to the render world like text writes). Reads are at the safe
 // layer (`Artboard::bone_get` etc.).
 mod rig;
-pub use rig::{BoneProp, RiveRig};
+pub use rig::{BoneProp, ConstraintProp, RiveRig};
 
 // Per-feature module. Runtime input: the `RiveInput` component queues joystick /
 // keyboard / gamepad / focus commands, applied before advance in both tiers
@@ -201,8 +201,8 @@ pub mod prelude {
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
     pub use rive_renderer::{Alignment, Fit};
-    // The bone-property selector for `RiveRig::set_bone`.
-    pub use crate::BoneProp;
+    // The property selectors for `RiveRig::set_bone` / `set_constraint_prop`.
+    pub use crate::{BoneProp, ConstraintProp};
     // The input value types for `RiveInput` (keyboard / gamepad / focus).
     pub use crate::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers};
 

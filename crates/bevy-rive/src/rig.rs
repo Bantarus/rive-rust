@@ -13,7 +13,7 @@
 
 use bevy::prelude::*;
 
-pub use rive_renderer::BoneProp;
+pub use rive_renderer::{BoneProp, ConstraintProp};
 
 /// One queued rig write, applied to the artboard before the next advance.
 #[derive(Clone, Debug)]
@@ -26,6 +26,12 @@ pub(crate) enum RigWrite {
     },
     /// Set a constraint's strength.
     ConstraintStrength { name: String, value: f32 },
+    /// Set a type-specific constraint property (IK / distance / follow-path).
+    ConstraintProp {
+        name: String,
+        prop: ConstraintProp,
+        value: f32,
+    },
     /// Select a solo's active child by authored name.
     SoloByName { name: String, child: String },
     /// Select a solo's active child by 0-based index.
@@ -68,6 +74,23 @@ impl RiveRig {
     pub fn set_constraint_strength(&mut self, name: impl Into<String>, value: f32) {
         self.writes.push(RigWrite::ConstraintStrength {
             name: name.into(),
+            value,
+        });
+    }
+
+    /// Queues a set of a **type-specific** constraint property (e.g. an IK
+    /// constraint's invert flag, a distance constraint's mode) on the constraint
+    /// named `name`. Booleans pass `0.0`/`1.0`; see [`ConstraintProp`] for the
+    /// per-field encoding.
+    pub fn set_constraint_prop(
+        &mut self,
+        name: impl Into<String>,
+        prop: ConstraintProp,
+        value: f32,
+    ) {
+        self.writes.push(RigWrite::ConstraintProp {
+            name: name.into(),
+            prop,
             value,
         });
     }
@@ -124,6 +147,9 @@ pub(crate) fn apply_rig_writes_slice(artboard: &rive_renderer::Artboard, writes:
             RigWrite::Bone { name, prop, value } => artboard.bone_set(name, *prop, *value),
             RigWrite::ConstraintStrength { name, value } => {
                 artboard.constraint_set_strength(name, *value)
+            }
+            RigWrite::ConstraintProp { name, prop, value } => {
+                artboard.constraint_set_prop(name, *prop, *value)
             }
             RigWrite::SoloByName { name, child } => artboard.solo_set_active(name, child),
             RigWrite::SoloByIndex { name, index } => artboard.solo_set_active_index(name, *index),

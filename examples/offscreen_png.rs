@@ -207,6 +207,36 @@ fn main() -> Result<()> {
             artboard.constraint_get_strength(name)?
         );
     }
+    // Type-specific constraint props: RIVE_CONSTRAINT_PROP_GET="name:prop" /
+    // RIVE_CONSTRAINT_PROP_SET="name:prop=value" (prop = ik_invert|ik_parents|
+    // dist_distance|dist_mode|follow_distance|follow_orient|follow_offset).
+    if let Ok(spec) = std::env::var("RIVE_CONSTRAINT_PROP_GET") {
+        let (name, prop) =
+            spec.split_once(':').context("RIVE_CONSTRAINT_PROP_GET must be name:prop")?;
+        let prop = parse_constraint_prop(prop)?;
+        println!(
+            "  constraint get {name:?}.{prop:?} = {:?}",
+            artboard.constraint_get_prop(name, prop)?
+        );
+    }
+    if let Ok(spec) = std::env::var("RIVE_CONSTRAINT_PROP_SET") {
+        let (name, rest) = spec
+            .split_once(':')
+            .context("RIVE_CONSTRAINT_PROP_SET must be name:prop=value")?;
+        let (prop, value) = rest
+            .split_once('=')
+            .context("RIVE_CONSTRAINT_PROP_SET must be name:prop=value")?;
+        let prop = parse_constraint_prop(prop)?;
+        let value: f32 = value
+            .trim()
+            .parse()
+            .context("RIVE_CONSTRAINT_PROP_SET value must be a float")?;
+        artboard.constraint_set_prop(name, prop, value)?;
+        println!(
+            "  constraint set {name:?}.{prop:?} -> {value} (read-back: {:?})",
+            artboard.constraint_get_prop(name, prop)?
+        );
+    }
     if let Ok(name) = std::env::var("RIVE_SOLO_GET") {
         println!(
             "  solo get {name:?} active = {:?} (index {:?})",
@@ -797,6 +827,25 @@ fn parse_bone_prop(s: &str) -> Result<rive_renderer::BoneProp> {
         "x" => BoneProp::X,
         "y" => BoneProp::Y,
         other => anyhow::bail!("unknown bone prop {other:?} (rotation|scalex|scaley|length|x|y)"),
+    })
+}
+
+/// Maps a knob string to a [`rive_renderer::ConstraintProp`] (type-specific
+/// constraint property) for the `RIVE_CONSTRAINT_PROP_*` knobs.
+fn parse_constraint_prop(s: &str) -> Result<rive_renderer::ConstraintProp> {
+    use rive_renderer::ConstraintProp;
+    Ok(match s.trim().to_ascii_lowercase().as_str() {
+        "ik_invert" => ConstraintProp::IkInvert,
+        "ik_parents" => ConstraintProp::IkParentBoneCount,
+        "dist_distance" => ConstraintProp::DistanceDistance,
+        "dist_mode" => ConstraintProp::DistanceMode,
+        "follow_distance" => ConstraintProp::FollowPathDistance,
+        "follow_orient" => ConstraintProp::FollowPathOrient,
+        "follow_offset" => ConstraintProp::FollowPathOffset,
+        other => anyhow::bail!(
+            "unknown constraint prop {other:?} (ik_invert|ik_parents|dist_distance|\
+             dist_mode|follow_distance|follow_orient|follow_offset)"
+        ),
     })
 }
 

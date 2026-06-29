@@ -99,9 +99,10 @@ pub use assets::{AssetRequest, AssetType};
 mod text;
 
 // Runtime rig control (bones / constraints / solo) — extends `Artboard` with
-// `bone_*` / `constraint_*` / `solo_*` methods + the `BoneProp` selector.
+// `bone_*` / `constraint_*` / `solo_*` methods + the `BoneProp` /
+// `ConstraintProp` selectors.
 mod rig;
-pub use rig::BoneProp;
+pub use rig::{BoneProp, ConstraintProp};
 
 // Runtime input — extends `Artboard` with `joystick_*` (authored component) and
 // `StateMachine` with `key_input` / `text_input` / `gamepad_*` / `focus_*` (the

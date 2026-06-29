@@ -387,6 +387,23 @@ RiveStatus         rive_artboard_constraint_set_strength(RiveArtboard*, const ch
 RiveStatus         rive_artboard_constraint_get_strength(RiveArtboard*, const char* name,
                                                          float* out);
 
+/* Type-specific constraint properties (concrete constraint subtypes). The prop
+ * selects BOTH the constraint type to find<T> AND the field; the value rides one
+ * float channel (bool encoded 0/1, the distance "mode" enum as its 0-based index
+ * Closer=0/Further=1/Exact=2, the integer parentBoneCount rounded). A get/set of
+ * a prop on a missing name — or a constraint of a different type — is an error. */
+#define RIVE_CONSTRAINT_IK_INVERT            0  /* IKConstraint.invertDirection (bool) */
+#define RIVE_CONSTRAINT_IK_PARENT_BONE_COUNT 1  /* IKConstraint.parentBoneCount (uint32) */
+#define RIVE_CONSTRAINT_DIST_DISTANCE        2  /* DistanceConstraint.distance (float) */
+#define RIVE_CONSTRAINT_DIST_MODE            3  /* DistanceConstraint.modeValue (enum index) */
+#define RIVE_CONSTRAINT_FOLLOW_DISTANCE      4  /* FollowPathConstraint.distance (float) */
+#define RIVE_CONSTRAINT_FOLLOW_ORIENT        5  /* FollowPathConstraint.orient (bool) */
+#define RIVE_CONSTRAINT_FOLLOW_OFFSET        6  /* FollowPathConstraint.offset (bool) */
+RiveStatus         rive_artboard_constraint_set_prop(RiveArtboard*, const char* name,
+                                                     uint32_t prop, float value);
+RiveStatus         rive_artboard_constraint_get_prop(RiveArtboard*, const char* name,
+                                                     uint32_t prop, float* out);
+
 /* Solo: exclusive visibility among children. Set the active child by name or
  * 0-based index (nonzero + rive_last_error if that child / index doesn't exist);
  * read the active child's name (two-call) / index (-1 if none active). */

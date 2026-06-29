@@ -36,6 +36,33 @@ pub enum BoneProp {
     Y = 5,
 }
 
+/// A **type-specific** constraint property — the field is only valid on the
+/// matching concrete constraint type, so addressing it on a constraint of a
+/// different type (or a missing name) is an [`Error::Rig`]. The universal
+/// `strength` knob is separate ([`constraint_set_strength`](Artboard::constraint_set_strength)).
+///
+/// Values ride a single `f32` channel: booleans are `0.0`/`1.0` and the distance
+/// [`DistanceMode`](Self::DistanceMode) is its 0-based index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u32)]
+pub enum ConstraintProp {
+    /// `IKConstraint::invertDirection` — bool (`0.0`/`1.0`).
+    IkInvert = 0,
+    /// `IKConstraint::parentBoneCount` — how many parent bones the IK solves over
+    /// (rounded to a non-negative integer).
+    IkParentBoneCount = 1,
+    /// `DistanceConstraint::distance` — the target distance (f32).
+    DistanceDistance = 2,
+    /// `DistanceConstraint::mode` — `0` = Closer (≤), `1` = Further (≥), `2` = Exact.
+    DistanceMode = 3,
+    /// `FollowPathConstraint::distance` — position along the path (`0.0`..=`1.0`).
+    FollowPathDistance = 4,
+    /// `FollowPathConstraint::orient` — orient toward the path direction; bool.
+    FollowPathOrient = 5,
+    /// `FollowPathConstraint::offset` — apply the component's local offset; bool.
+    FollowPathOffset = 6,
+}
+
 /// Component kind for the generalized introspection ABI (mirrors `RIVE_RIG_*`).
 #[repr(u32)]
 enum RigKind {
@@ -133,6 +160,51 @@ impl Artboard {
         // SAFETY: live artboard handle; `name_c` valid; `out` is a live f32.
         let st = unsafe {
             sys::rive_artboard_constraint_get_strength(self.inner.ptr, name_c.as_ptr(), &mut out)
+        };
+        rig_status(st).map(|()| out)
+    }
+
+    /// Sets a **type-specific** constraint property `prop` on the constraint named
+    /// `name` (e.g. an IK constraint's invert flag, a distance constraint's mode).
+    /// Booleans pass `0.0`/`1.0`; the distance mode passes its 0-based index. See
+    /// [`ConstraintProp`] for the per-field encoding.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rig`] if no constraint of the matching type has that `name`, or
+    /// `name` contained an interior NUL byte.
+    pub fn constraint_set_prop(&self, name: &str, prop: ConstraintProp, value: f32) -> Result<()> {
+        let name_c = rig_cstring(name, "constraint name")?;
+        // SAFETY: live artboard handle; `name_c` is a valid C string.
+        let st = unsafe {
+            sys::rive_artboard_constraint_set_prop(
+                self.inner.ptr,
+                name_c.as_ptr(),
+                prop as u32,
+                value,
+            )
+        };
+        rig_status(st)
+    }
+
+    /// Reads a **type-specific** constraint property `prop` of the constraint named
+    /// `name`. Booleans read back as `0.0`/`1.0`; the distance mode as its index.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Rig`] if no constraint of the matching type has that `name`, or
+    /// `name` contained an interior NUL byte.
+    pub fn constraint_get_prop(&self, name: &str, prop: ConstraintProp) -> Result<f32> {
+        let name_c = rig_cstring(name, "constraint name")?;
+        let mut out = 0.0_f32;
+        // SAFETY: live artboard handle; `name_c` valid; `out` is a live f32.
+        let st = unsafe {
+            sys::rive_artboard_constraint_get_prop(
+                self.inner.ptr,
+                name_c.as_ptr(),
+                prop as u32,
+                &mut out,
+            )
         };
         rig_status(st).map(|()| out)
     }

@@ -6,9 +6,9 @@
 //! view-model writes).
 //!
 //! Reads (a run's current string) are available at the safe layer
-//! ([`Artboard::text_get`](rive_renderer::Artboard::text_get)); a Bevy read-back
-//! channel is deferred (see `docs/feature-support.md`), mirroring the view-model
-//! watch read-back.
+//! ([`Artboard::text_get`](rive_renderer::Artboard::text_get)); Bevy-side text
+//! read-back is deferred — a candidate for the now-existing render→main channel
+//! (`RiveVmReadbackChannel`; see `docs/feature-support.md` backlog #1).
 
 use bevy::prelude::*;
 

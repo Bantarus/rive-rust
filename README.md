@@ -68,14 +68,19 @@ renders:
 
 - **Pointer input** → Listeners / joysticks (both tiers, dedicated path)
 - **View-model data binding** — get/set number, bool, trigger, color, string, enum; nested paths;
-  introspection; write-forwarding in both tiers _(partial — read-back is floor-only and some bits are
-  still in progress; see the [feature matrix](docs/feature-support.md))_
+  introspection; write-forwarding AND watch/observe read-back in both tiers _(partial — list
+  structural mutation and the `set_artboard` ferry remain; see the
+  [feature matrix](docs/feature-support.md))_
 - **Change / trigger observation** — the modern replacement for the deprecated events read-back
 - **Named / indexed artboard + state-machine selection**
 
-Planned: out-of-band asset loading, runtime text get/set, audio bridge, gamepad/keyboard/focus input,
-playback seek/pause controls, runtime bone/constraint/solo control. State-machine inputs and events
-read-back are **out of scope** (deprecated by Rive, superseded by data binding).
+Also shipped since: out-of-band asset loading, runtime text get/set, the audio bridge,
+gamepad/keyboard/focus input, playback seek/pause/speed controls, runtime bone/constraint/solo
+control, nested-artboard access, and the first render→main read-back channel (view-model
+watch/observe in both tiers). Planned next: rig/focus/playhead read-back over that channel,
+view-model list structural mutation — see the [feature matrix](docs/feature-support.md).
+State-machine inputs and events read-back are **out of scope** (deprecated by Rive, superseded
+by data binding).
 
 See **[docs/feature-support.md](docs/feature-support.md)** for the full living feature matrix and
 roadmap detail.

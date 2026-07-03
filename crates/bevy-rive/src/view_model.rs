@@ -19,13 +19,17 @@
 //!
 //! Covers number / bool / trigger / color / string / enum, plus **image** writes
 //! ([`RiveViewModel::set_image`] — encoded bytes decoded + bound before advance).
-//! The component is tier-agnostic. **Writes** are forwarded in both tiers: the `floor` advance
-//! system applies them inline; the `zero_copy` tier ferries them to the render
-//! world (where its instances live) via a per-frame staging buffer. **Watch
-//! read-back** AND **observe** (change/trigger fires) are `floor`-only for now —
-//! `zero_copy` advances in the render world and a render→main back-channel for
-//! reads is deferred (see `docs/feature-support.md`); registering a watch/observe
-//! under `zero_copy` is a no-op.
+//! The component is tier-agnostic and works in **both tiers**:
+//! - **Writes**: the `floor` advance system applies them inline; the `zero_copy`
+//!   tier ferries them to the render world (where its instances live) via a
+//!   per-frame staging buffer.
+//! - **Watch read-back** AND **observe** (change/trigger fires): `floor` reads
+//!   inline after advance (same frame); `zero_copy` reads after the render-node
+//!   advance and ships the results back over the **render→main back-channel**
+//!   (`RiveVmReadbackChannel` in `zero_copy.rs`), drained into
+//!   [`RiveViewModel::values`] / [`RivePropertyChanged`] in `PreUpdate` — so
+//!   under `zero_copy` a read-back lands one frame after the advance it observed
+//!   (the node runs after the main schedule).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -77,9 +81,10 @@ impl std::fmt::Debug for RiveValue {
 
 /// Which typed getter to use when refreshing a watched path (the property's type
 /// isn't introspected for nested paths, so the caller declares it via the
-/// `watch_*` methods).
+/// `watch_*` methods). `pub(crate)`: the `zero_copy` extract ferries the watch
+/// list to the render world, where [`read_watch_slice`] uses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WatchKind {
+pub(crate) enum WatchKind {
     Number,
     Bool,
     Color,
@@ -94,7 +99,9 @@ enum WatchKind {
 /// *event* listening, so the rig signals gameplay by driving a view-model
 /// trigger/property and the game reacts to it here. Register paths with
 /// [`RiveViewModel::observe`], then consume with `MessageReader<RivePropertyChanged>`.
-/// (Bevy 0.18 calls buffered events "messages".) `floor`-only for now (see the
+/// (Bevy 0.18 calls buffered events "messages".) Both tiers: `floor` emits during
+/// its advance system (same frame); `zero_copy` emits from the `PreUpdate` drain of
+/// the render→main back-channel (one frame after the advance that fired — see the
 /// module docs).
 #[derive(Message, Debug, Clone, PartialEq, Eq)]
 pub struct RivePropertyChanged {
@@ -117,15 +124,19 @@ pub struct RiveViewModel {
     /// Paths refreshed into `values` after each advance, with how to read each.
     watch: Vec<(String, WatchKind)>,
     /// Paths observed for change/fire — each emits a [`RivePropertyChanged`] on the
-    /// frame its value changes or its trigger fires (`floor`-only; see module docs).
+    /// frame its value changes or its trigger fires (both tiers; see module docs).
     observe: Vec<String>,
     /// Observed paths already subscribed (primed before an advance). The change
     /// flag only catches changes *after* subscription, so each path is primed once
     /// before it can fire. Internal bookkeeping; only the `floor` advance loop
-    /// primes/drains, so this is `floor`-gated (dead under `zero_copy`).
+    /// primes/drains THIS set, so it is `floor`-gated — the `zero_copy` tier keeps
+    /// its primed set on the render-world instance instead (the instance owns the
+    /// artboard the subscription lives on, so an instance rebuild re-primes).
     #[cfg(feature = "floor")]
     primed: std::collections::HashSet<String>,
-    /// Latest read-back of each watched path (refreshed every frame).
+    /// Latest read-back of each watched path (refreshed after each advance; under
+    /// `zero_copy` it lands one frame later and a culled face keeps its last
+    /// read-back — see the module docs).
     pub values: HashMap<String, RiveValue>,
 }
 
@@ -215,9 +226,9 @@ impl RiveViewModel {
     /// trigger to get a discrete signal, or a number/bool/etc. to be told when it
     /// changes (then read the new value via a matching `watch_*`). Idempotent.
     ///
-    /// `floor`-only for now: under `zero_copy` the advance runs in the render world
-    /// and emitting main-world events needs a back-channel (deferred, like watch
-    /// read-back), so an observe there is a no-op.
+    /// Works in both tiers. Under `zero_copy` the advance runs in the render world,
+    /// so fires travel back over the render→main back-channel and the message is
+    /// emitted one frame after the advance that fired (see the module docs).
     pub fn observe(&mut self, path: impl Into<String>) {
         let path = path.into();
         if !self.observe.contains(&path) {
@@ -288,6 +299,20 @@ impl RiveViewModel {
     #[cfg(feature = "zero_copy")]
     pub(crate) fn staged(&self) -> &[(String, RiveValue)] {
         &self.staged
+    }
+
+    /// `zero_copy`: the registered watch list (path + declared type), ferried by
+    /// extract to the render world where the node reads it after advance.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn watch_list(&self) -> &[(String, WatchKind)] {
+        &self.watch
+    }
+
+    /// `zero_copy`: the registered observe list, ferried by extract to the render
+    /// world where the node primes (before advance) + flushes (after advance) it.
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn observe_list(&self) -> &[String] {
+        &self.observe
     }
 }
 
@@ -374,16 +399,18 @@ pub(crate) fn apply_writes(
     apply_writes_slice(ctx, artboard, &writes);
 }
 
-/// Refreshes watched paths into [`RiveViewModel::values`]. Call **after**
-/// advancing so reads reflect this tick's script / state-machine output.
-#[cfg(feature = "floor")]
-pub(crate) fn refresh_watch(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
-    if vm.watch.is_empty() {
-        return;
-    }
-    // Take the watch list out to avoid borrowing `vm` while writing `vm.values`.
-    let watch = std::mem::take(&mut vm.watch);
-    for (path, kind) in &watch {
+/// Reads each watched path with its declared typed getter, returning the
+/// successful `(path, value)` pairs. Shared by both tiers (`floor` writes them
+/// into [`RiveViewModel::values`] inline; `zero_copy` ships them back over the
+/// render→main channel). Call **after** advancing so reads reflect this tick's
+/// script / state-machine output. Per-path failures `warn!` and continue.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn read_watch_slice(
+    artboard: &rive_renderer::Artboard,
+    watch: &[(String, WatchKind)],
+) -> Vec<(String, RiveValue)> {
+    let mut values = Vec::new();
+    for (path, kind) in watch {
         let read = match kind {
             WatchKind::Number => artboard.vm_get_number(path).map(RiveValue::Number),
             WatchKind::Bool => artboard.vm_get_bool(path).map(RiveValue::Bool),
@@ -392,41 +419,52 @@ pub(crate) fn refresh_watch(vm: &mut RiveViewModel, artboard: &rive_renderer::Ar
             WatchKind::EnumIndex => artboard.vm_get_enum_index(path).map(RiveValue::EnumIndex),
         };
         match read {
-            Ok(v) => {
-                vm.values.insert(path.clone(), v);
-            }
+            Ok(v) => values.push((path.clone(), v)),
             Err(e) => warn!("rive: view-model read {path:?} failed: {e}"),
         }
     }
-    vm.watch = watch;
+    values
 }
 
-/// Primes (subscribes) any newly-[observed](RiveViewModel::observe) paths so a
-/// change/fire during the *next* advance is caught. Call **before** advancing.
-/// The shim's change flag only catches changes after subscription, and the first
-/// `flush` reads (and discards) the initial state — so each path is primed exactly
-/// once. Cheap after the first frame (only un-primed paths touch the shim).
-#[cfg(feature = "floor")]
-pub(crate) fn prime_observed(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
-    // Take `observe` out so `vm.primed` can be mutated without aliasing it.
-    let observe = std::mem::take(&mut vm.observe);
-    for path in &observe {
-        if !vm.primed.contains(path) {
+/// Primes (subscribes) any not-yet-primed observed path so a change/fire during
+/// the *next* advance is caught. Call **before** advancing. The shim's change
+/// flag only catches changes after subscription, and the first `flush` reads
+/// (and discards) the initial state — so each path is primed exactly once per
+/// `primed` set. Shared by both tiers (`floor` keeps `primed` on the component;
+/// `zero_copy` on the render-world instance, whose artboard owns the
+/// subscription). Cheap after the first frame (only un-primed paths touch the shim).
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn prime_observed_slice(
+    artboard: &rive_renderer::Artboard,
+    observe: &[String],
+    primed: &mut std::collections::HashSet<String>,
+) {
+    // Drop primed paths no longer observed, so a later RE-observe re-primes (and
+    // its priming flush discards state accumulated while unobserved) instead of
+    // delivering a stale fire. Matters for `zero_copy`, whose primed set lives on
+    // the render-world instance and so survives a component remove + re-insert
+    // (floor's dies with the component; there `primed ⊆ observe` always holds and
+    // this retain is a no-op).
+    primed.retain(|p| observe.contains(p));
+    for path in observe {
+        if !primed.contains(path) {
             // Subscribe + discard the initial flag (priming is not a real change).
             let _ = artboard.vm_flush_changed(path);
-            vm.primed.insert(path.clone());
+            primed.insert(path.clone());
         }
     }
-    vm.observe = observe;
 }
 
-/// Flushes [observed](RiveViewModel::observe) paths after an advance, returning
-/// those that changed (or whose trigger fired) this frame — the caller emits a
-/// [`RivePropertyChanged`] per returned path. Call **after** advancing.
-#[cfg(feature = "floor")]
-pub(crate) fn drain_observed(vm: &RiveViewModel, artboard: &rive_renderer::Artboard) -> Vec<String> {
+/// Flushes each observed path after an advance, returning those that changed (or
+/// whose trigger fired) this frame — the caller emits a [`RivePropertyChanged`]
+/// per returned path. Call **after** advancing. Shared by both tiers.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn drain_observed_slice(
+    artboard: &rive_renderer::Artboard,
+    observe: &[String],
+) -> Vec<String> {
     let mut fired = Vec::new();
-    for path in &vm.observe {
+    for path in observe {
         match artboard.vm_flush_changed(path) {
             Ok(true) => fired.push(path.clone()),
             Ok(false) => {}
@@ -434,4 +472,37 @@ pub(crate) fn drain_observed(vm: &RiveViewModel, artboard: &rive_renderer::Artbo
         }
     }
     fired
+}
+
+/// Refreshes watched paths into [`RiveViewModel::values`]. Call **after**
+/// advancing so reads reflect this tick's script / state-machine output.
+#[cfg(feature = "floor")]
+pub(crate) fn refresh_watch(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
+    if vm.watch.is_empty() {
+        return;
+    }
+    for (path, value) in read_watch_slice(artboard, &vm.watch) {
+        vm.values.insert(path, value);
+    }
+}
+
+/// Primes (subscribes) any newly-[observed](RiveViewModel::observe) paths so a
+/// change/fire during the *next* advance is caught. Call **before** advancing.
+/// (The `floor` wrapper over [`prime_observed_slice`], using the component's
+/// `primed` set.)
+#[cfg(feature = "floor")]
+pub(crate) fn prime_observed(vm: &mut RiveViewModel, artboard: &rive_renderer::Artboard) {
+    // Take `observe` out so `vm.primed` can be mutated without aliasing it.
+    let observe = std::mem::take(&mut vm.observe);
+    prime_observed_slice(artboard, &observe, &mut vm.primed);
+    vm.observe = observe;
+}
+
+/// Flushes [observed](RiveViewModel::observe) paths after an advance, returning
+/// those that changed (or whose trigger fired) this frame — the caller emits a
+/// [`RivePropertyChanged`] per returned path. Call **after** advancing. (The
+/// `floor` wrapper over [`drain_observed_slice`].)
+#[cfg(feature = "floor")]
+pub(crate) fn drain_observed(vm: &RiveViewModel, artboard: &rive_renderer::Artboard) -> Vec<String> {
+    drain_observed_slice(artboard, &vm.observe)
 }

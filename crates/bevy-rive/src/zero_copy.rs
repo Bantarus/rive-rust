@@ -57,8 +57,9 @@
 //! directly (NOT `AlphaMode::Premultiplied` — the image is straight, not premultiplied).
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::{c_void, CStr};
+use std::sync::{Arc, Mutex};
 
 use ash::vk;
 use ash::vk::Handle as _; // brings `as_raw()` on Vulkan handle types into scope
@@ -90,7 +91,8 @@ use rive_renderer::{
 
 use crate::{
     RiveActive, RiveAnimation, RiveAssets, RiveFile, RiveFit, RiveInput, RivePlugin, RivePointer,
-    RiveNestedTarget, RiveRig, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
+    RiveNestedTarget, RivePropertyChanged, RiveRig, RiveSurface, RiveTarget, RiveText, RiveValue,
+    RiveViewModel,
 };
 
 type Vk = wgpu_hal::vulkan::Api;
@@ -237,6 +239,15 @@ impl Plugin for RiveZeroCopyPlugin {
         // the `.riv` AssetLoader is registered exactly once and identically).
         RivePlugin::register_asset(app);
 
+        // M-READBACK: the render→main back-channel for view-model watch/observe.
+        // One buffer, two clones of the same Arc — the node (render world) pushes,
+        // the PreUpdate drain (main world) consumes. `add_message` is idempotent,
+        // so composing with the floor RivePlugin (which also registers it) is fine.
+        app.add_message::<RivePropertyChanged>();
+        let vm_readback = RiveVmReadbackChannel::default();
+        app.insert_resource(vm_readback.clone())
+            .add_systems(PreUpdate, drain_vm_readback);
+
         // Main world: allocate the per-face display Image (the frozen seam) once the
         // .riv has loaded, AND assign atlas slots + write `RiveSurface` for opt-in
         // atlas faces (M-SCALE) — so a face's `image` + `uv_rect` land together, the
@@ -266,6 +277,8 @@ impl Plugin for RiveZeroCopyPlugin {
         };
         render_app
             .init_resource::<ExtractedRives>()
+            // M-READBACK: the render-world clone of the back-channel (same Arc).
+            .insert_resource(vm_readback)
             .add_systems(ExtractSchedule, extract_rive_instances)
             .add_systems(
                 bevy::render::Render,
@@ -515,6 +528,12 @@ struct RiveInstance {
     /// copy on [`AtlasInstance`] with tile-aware inversion (see the atlas loop).
     last_pointer_down: bool,
     last_pointer_present: bool,
+    /// M-READBACK: observed paths already subscribed on THIS artboard (the
+    /// zero_copy analogue of the component's floor-gated `primed` set — it lives
+    /// on the instance because the subscription lives on the instance's artboard,
+    /// so an instance rebuild starts empty and re-primes). Primed before advance,
+    /// flushed after (see the node's read-back block).
+    vm_primed: HashSet<String>,
 }
 
 /// One atlas PAGE (M-SCALE): a shared `Rgba8Unorm` wgpu texture (`page_px`²) that rive
@@ -547,6 +566,9 @@ struct AtlasInstance {
     /// the cursor leaves. The inversion is tile-aware (see the atlas advance loop).
     last_pointer_down: bool,
     last_pointer_present: bool,
+    /// M-READBACK: observed paths already subscribed on THIS artboard (mirrors the
+    /// dedicated [`RiveInstance`]'s field — see there).
+    vm_primed: HashSet<String>,
 }
 
 /// Identifies one atlas PAGE: the consumer's [`RiveAtlasKey`] `key` (distinct keys never
@@ -1151,8 +1173,17 @@ struct ExtractedRive {
     /// M-DATA: this frame's view-model writes (from a `RiveViewModel`), applied to
     /// the instance in the node before advance — the zero-copy analogue of the
     /// floor advance system's inline `apply_writes`. Empty for faces with no
-    /// `RiveViewModel` or no queued writes. Reads/watch are not ferried (floor-only).
+    /// `RiveViewModel` or no queued writes.
     vm_writes: Vec<(String, RiveValue)>,
+    /// M-READBACK: the registered watch list (path + declared read type), read in
+    /// the node after advance; results ship back over the [`RiveVmReadbackChannel`].
+    /// Empty for faces with no `RiveViewModel` / no watches, and for culled faces
+    /// (no advance ⇒ nothing new to read; `values` keeps its last read-back).
+    vm_watch: Vec<(String, crate::view_model::WatchKind)>,
+    /// M-READBACK: the registered observe list — primed before advance, flushed
+    /// after; fired paths ship back as [`RivePropertyChanged`] messages. Empty
+    /// like `vm_watch` above.
+    vm_observe: Vec<String>,
     /// M-TEXT: this frame's text-run set writes (from a `RiveText`), applied to
     /// the instance in the node before advance — the zero-copy analogue of the
     /// floor advance system's inline `apply_text_writes`. Empty for faces with no
@@ -1212,6 +1243,89 @@ struct ExtractedRives {
     /// multiple cameras on one anchored graph); it uses this generation to apply
     /// non-idempotent VM writes (notably `fire_trigger`) exactly once per visual frame.
     generation: u64,
+}
+
+// ===========================================================================
+// M-READBACK: the render→main back-channel (view-model watch + observe).
+// ===========================================================================
+
+/// One instance's post-advance view-model read-back, produced by the render node
+/// and consumed by the main-world `PreUpdate` drain ([`drain_vm_readback`]).
+struct VmReadback {
+    /// The MAIN-world entity the read-back belongs to (the extract's stable key).
+    entity: Entity,
+    /// This frame's watched-path reads (typed by the registered `watch_*` kind).
+    values: Vec<(String, RiveValue)>,
+    /// Observed paths that changed / fired on this frame's advance — each becomes
+    /// a [`RivePropertyChanged`] message.
+    fired: Vec<String>,
+}
+
+/// The **render→main back-channel** (the first one in this tier): a shared buffer
+/// the render node pushes [`VmReadback`]s into after each advance, drained by a
+/// main-world `PreUpdate` system into [`RiveViewModel::values`] +
+/// [`RivePropertyChanged`] messages. Inserted into BOTH worlds by
+/// [`RiveZeroCopyPlugin::build`] (two clones of one `Arc`).
+///
+/// A plain `Arc<Mutex<Vec>>` (not a channel type) because this tier runs the
+/// render world on the main thread (pipelined rendering disabled), so main-world
+/// systems and the node are strictly interleaved — the lock is never contended;
+/// it exists to make the resource `Send + Sync` for Bevy. Timing: the node runs
+/// AFTER the frame's main schedule, so a read-back is drained at the NEXT frame's
+/// `PreUpdate` — reads under `zero_copy` trail the advance they observed by one
+/// frame (the documented latency; `floor` reads land the same frame).
+///
+/// Inherited limitation: under `RIVE_BLOCKING=1` the ATLAS advance loop is
+/// skipped entirely (the atlas render path is non-blocking-only, from before this
+/// slice), so an atlas face's watches/observes are inert there — dedicated faces
+/// are unaffected.
+#[derive(Resource, Clone, Default)]
+struct RiveVmReadbackChannel(Arc<Mutex<Vec<VmReadback>>>);
+
+/// Main-world `PreUpdate` drain of the [`RiveVmReadbackChannel`]: writes watched
+/// values into each entity's [`RiveViewModel::values`] and emits one
+/// [`RivePropertyChanged`] per observed path that changed/fired — the same
+/// consumer-facing API the `floor` tier serves inline. An entity that despawned
+/// (or dropped its `RiveViewModel`) between the node's read and this drain is
+/// skipped — its fires are dropped too, matching floor (no messages for dead
+/// entities).
+fn drain_vm_readback(
+    channel: Res<RiveVmReadbackChannel>,
+    mut query: Query<&mut RiveViewModel>,
+    mut vm_changes: MessageWriter<RivePropertyChanged>,
+) {
+    // `mem::take` under one short lock; the node only appends (never holds the
+    // lock across other work), and with pipelining off there is no contention.
+    let batch = std::mem::take(&mut *channel.0.lock().unwrap());
+    for rb in batch {
+        let Ok(mut vm) = query.get_mut(rb.entity) else {
+            continue; // despawned / component removed since the node read it
+        };
+        // Deliver only what the entity's CURRENT component registered: the
+        // read-back was produced from LAST frame's registrations, and the
+        // component may have been replaced in between — a new component must not
+        // receive values/fires for paths it never watched/observed (floor can't
+        // produce that either; it reads inline from the live component). In the
+        // normal (unreplaced) case every path passes.
+        // Only deref-mut when there are values, so a fires-only read-back doesn't
+        // trip `RiveViewModel` change detection.
+        if !rb.values.is_empty() {
+            let vm = &mut *vm;
+            for (path, value) in rb.values {
+                if vm.watch_list().iter().any(|(p, _)| *p == path) {
+                    vm.values.insert(path, value);
+                }
+            }
+        }
+        for path in rb.fired {
+            if vm.observe_list().contains(&path) {
+                vm_changes.write(RivePropertyChanged {
+                    entity: rb.entity,
+                    path,
+                });
+            }
+        }
+    }
 }
 
 // ===========================================================================
@@ -1770,8 +1884,11 @@ fn extract_rive_instances(
                 atlas: None,
                 culled: true,
                 // Culled: skip advance, so applying writes (which take effect on
-                // advance) is pointless this frame — ferry none.
+                // advance) is pointless this frame — ferry none. Same for the
+                // watch/observe lists (no advance ⇒ nothing new to read/flush).
                 vm_writes: Vec::new(),
+                vm_watch: Vec::new(),
+                vm_observe: Vec::new(),
                 text_writes: Vec::new(),
                 rig_writes: Vec::new(),
                 input_cmds: Vec::new(),
@@ -1831,6 +1948,12 @@ fn extract_rive_instances(
             // render world, where this tier's instances live). `stage_vm_writes`
             // populated `staged` from `writes` earlier this frame.
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
+            // M-READBACK: ferry the registered watch/observe lists (persistent
+            // registrations, not drained — cloned each frame like the writes; the
+            // node reads/flushes them after advance and ships results back over
+            // the channel).
+            vm_watch: vm.map(|v| v.watch_list().to_vec()).unwrap_or_default(),
+            vm_observe: vm.map(|v| v.observe_list().to_vec()).unwrap_or_default(),
             text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             rig_writes: rig.map(|r| r.staged().to_vec()).unwrap_or_default(),
             input_cmds: input.map(|i| i.staged().to_vec()).unwrap_or_default(),
@@ -1995,6 +2118,11 @@ impl Node for RiveFillNode {
         // the frame's GPU total is not reported (avoids undercounting).
         let mut frame_gpu_ok = true;
 
+        // M-READBACK: this frame's post-advance view-model read-backs (watch values
+        // + observed fires), collected across BOTH advance paths and shipped to the
+        // main world in one lock at the end of the node.
+        let mut vm_readbacks: Vec<VmReadback> = Vec::new();
+
         // M2b: the resource-recycle watermark for this frame, shared by every instance
         // and by both submit paths (so the run-ahead metric reflects the real value).
         // Three cases:
@@ -2107,6 +2235,21 @@ impl Node for RiveFillNode {
             if apply_vm_writes && !item.vm_writes.is_empty() {
                 crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
             }
+            // M-READBACK: prime any newly-observed paths BEFORE advance so a change/
+            // fire on THIS advance is caught (the floor advance system's
+            // `prime_observed`, against the instance-owned primed set — the shim's
+            // change flag only sees changes after subscription). Same gate. Runs
+            // even with an EMPTY observe list: the helper prunes `vm_primed` to the
+            // current list, so a path unobserved this frame (component removed /
+            // replaced) is dropped and a later re-observe re-primes — instead of
+            // delivering a stale accumulated fire. No-op cost when both are empty.
+            if apply_vm_writes {
+                crate::view_model::prime_observed_slice(
+                    &inst.artboard,
+                    &item.vm_observe,
+                    &mut inst.vm_primed,
+                );
+            }
             // M-NESTED: redirect rig + text writes to a nested child if this face
             // targets one (resolved per-frame; a miss warns + falls back to root).
             // Input/pointer stay on the root scene (they keep using inst.artboard).
@@ -2144,6 +2287,25 @@ impl Node for RiveFillNode {
             let advance_t0 = std::time::Instant::now();
             inst.state_machine.advance(item.step);
             frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
+
+            // M-READBACK: read watched paths + flush observed paths AFTER advance
+            // (so reads reflect this tick's script / state-machine output — the
+            // floor advance system's refresh_watch + drain_observed, ferried back
+            // over the channel instead of written inline). Same once-per-visual-
+            // frame gate as the writes: the observe flush is destructive, and this
+            // keeps one read-back per frame.
+            if apply_vm_writes && (!item.vm_watch.is_empty() || !item.vm_observe.is_empty()) {
+                let values = crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
+                let fired =
+                    crate::view_model::drain_observed_slice(&inst.artboard, &item.vm_observe);
+                if !values.is_empty() || !fired.is_empty() {
+                    vm_readbacks.push(VmReadback {
+                        entity,
+                        values,
+                        fired,
+                    });
+                }
+            }
 
             // SPIKE: under RIVE_BATCH the per-instance record + blit below are skipped;
             // all artboards are recorded together in one begin/flush after the loop.
@@ -2394,6 +2556,16 @@ impl Node for RiveFillNode {
                     if apply_vm_writes && !item.vm_writes.is_empty() {
                         crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
                     }
+                    // M-READBACK: prime newly-observed paths before advance — runs
+                    // even with an empty observe list so `vm_primed` is pruned to
+                    // the current registrations (see the dedicated path).
+                    if apply_vm_writes {
+                        crate::view_model::prime_observed_slice(
+                            &inst.artboard,
+                            &item.vm_observe,
+                            &mut inst.vm_primed,
+                        );
+                    }
                     // M-NESTED: redirect rig + text writes to a nested child if this
                     // face targets one (see dedicated path); a miss warns + uses root.
                     let nested_ab =
@@ -2462,6 +2634,26 @@ impl Node for RiveFillNode {
                     let advance_t0 = std::time::Instant::now();
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
+
+                    // M-READBACK: read watches + flush observes after advance (see
+                    // the dedicated path — same gate, same channel).
+                    if apply_vm_writes
+                        && (!item.vm_watch.is_empty() || !item.vm_observe.is_empty())
+                    {
+                        let values =
+                            crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
+                        let fired = crate::view_model::drain_observed_slice(
+                            &inst.artboard,
+                            &item.vm_observe,
+                        );
+                        if !values.is_empty() || !fired.is_empty() {
+                            vm_readbacks.push(VmReadback {
+                                entity: item.entity,
+                                values,
+                                fired,
+                            });
+                        }
+                    }
                 }
             }
 
@@ -2679,6 +2871,14 @@ impl Node for RiveFillNode {
             *recycle_unsafe_warned = unsafe_now;
         }
 
+        // M-READBACK: ship this frame's read-backs to the main world (one short
+        // lock; drained by `drain_vm_readback` at the next frame's PreUpdate).
+        if !vm_readbacks.is_empty() {
+            if let Some(channel) = world.get_resource::<RiveVmReadbackChannel>() {
+                channel.0.lock().unwrap().append(&mut vm_readbacks);
+            }
+        }
+
         // Drop instances whose entity is no longer extracted this frame.
         let live: std::collections::HashSet<Entity> =
             frame_items.iter().map(|x| x.entity).collect();
@@ -2773,6 +2973,7 @@ fn build_instance(
         display: item.display.clone(),
         last_pointer_down: false,
         last_pointer_present: false,
+        vm_primed: HashSet::new(),
     })
 }
 
@@ -2838,5 +3039,6 @@ fn build_atlas_instance(
         state_machine,
         last_pointer_down: false,
         last_pointer_present: false,
+        vm_primed: HashSet::new(),
     })
 }

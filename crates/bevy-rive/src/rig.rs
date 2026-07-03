@@ -7,9 +7,9 @@
 //!
 //! Reads (a bone's current transform, a constraint's strength, a solo's active
 //! child) are available at the safe layer
-//! ([`Artboard::bone_get`](rive_renderer::Artboard::bone_get) etc.); a Bevy
-//! read-back channel is deferred (see `docs/feature-support.md`), mirroring the
-//! view-model watch read-back.
+//! ([`Artboard::bone_get`](rive_renderer::Artboard::bone_get) etc.); Bevy-side
+//! rig read-back is deferred — next in line to ride the now-existing render→main
+//! channel (`RiveVmReadbackChannel`; see `docs/feature-support.md` backlog #1).
 
 use bevy::prelude::*;
 

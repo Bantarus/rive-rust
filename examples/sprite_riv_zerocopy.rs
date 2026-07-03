@@ -27,6 +27,16 @@
 //!                                 has a visible enum, e.g.
 //!                                 RIVE_RIV=voxelien_face.riv RIVE_VM_SET_ENUM="viseme=8"
 //!                                 (mouth shape changes vs index 0).
+//!   RIVE_VM_WATCH="path"          watch this NUMBER property on each face and log its
+//!                                 read-back — proves view-model watch READ-BACK through the
+//!                                 render→main channel (M-READBACK). A script-driven value
+//!                                 shows live movement, e.g.
+//!                                 RIVE_RIV=voxelien_face.riv RIVE_VM_WATCH="breath/scaleX".
+//!   RIVE_VM_OBSERVE="p1,p2"       observe these paths — each change/trigger-fire emits a
+//!                                 RivePropertyChanged message, counted + logged (proves
+//!                                 OBSERVE through the same channel). A script-driven path
+//!                                 fires ~every frame; a static one never, e.g.
+//!                                 RIVE_RIV=voxelien_face.riv RIVE_VM_OBSERVE="breath/scaleX,viseme".
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the
@@ -44,7 +54,8 @@ use bevy::winit::WinitSettings;
 
 use bevy_rive::{
     install_interlock_device_callback, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile,
-    RivePointer, RiveSampling, RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
+    RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveViewModel,
+    RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -82,6 +93,12 @@ struct Cfg {
     /// async-load window and applied once the face goes live (the lost-update fix), vs the
     /// default every-frame re-assert which self-heals.
     vm_oneshot: bool,
+    /// M-READBACK: `RIVE_VM_WATCH="path"` — watch this NUMBER property on each face and log
+    /// its per-frame read-back, proving watch READ-BACK through the render→main channel.
+    vm_watch: Option<String>,
+    /// M-READBACK: `RIVE_VM_OBSERVE="p1,p2"` — observe these paths; `report_vm_readback`
+    /// counts + logs the resulting `RivePropertyChanged` messages.
+    vm_observe: Vec<String>,
     /// M-INPUT: `RIVE_POINTER="x,y"` — attach a `RivePointer` at this fixed TARGET-PIXEL
     /// position to each face, proving pointer-input forwarding through the zero-copy
     /// (render-world) advance path. The node re-asserts `pointer_move` every frame, so a
@@ -163,6 +180,21 @@ fn main() {
         let (path, idx) = s.split_once('=')?;
         Some((path.trim().to_string(), idx.trim().parse().ok()?))
     });
+    // M-READBACK: RIVE_VM_WATCH="path" (a number property) + RIVE_VM_OBSERVE="p1,p2" —
+    // prove watch read-back + change/trigger observation through the render→main channel.
+    let vm_watch = std::env::var("RIVE_VM_WATCH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let vm_observe: Vec<String> = std::env::var("RIVE_VM_OBSERVE")
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default();
     // M-INPUT: RIVE_POINTER="x,y" — a fixed target-pixel pointer position forwarded to each
     // face, proving pointer-input forwarding through the zero-copy advance path.
     let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| {
@@ -245,6 +277,8 @@ fn main() {
         keys,
         vm_set_enum,
         vm_oneshot: std::env::var_os("RIVE_VM_ONESHOT").is_some(),
+        vm_watch,
+        vm_observe,
         pointer,
     })
     .init_resource::<CaptureState>()
@@ -256,6 +290,7 @@ fn main() {
             resync_atlas_sprites,
             drive_cull,
             drive_vm_writes,
+            report_vm_readback,
             drive_capture,
             drive_perf_exit,
         )
@@ -302,10 +337,21 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         // (forwarded to the render world and applied before advance). Under RIVE_VM_ONESHOT,
         // queue the write ONCE here at spawn (before the .riv loads) and never re-assert it —
         // the write must be retained across the load window to land.
-        if let Some((path, index)) = &cfg.vm_set_enum {
+        // M-READBACK: the same component carries the watch/observe registrations —
+        // the render node reads/flushes them after advance and the results come back
+        // over the render→main channel (RIVE_VM_WATCH / RIVE_VM_OBSERVE).
+        if cfg.vm_set_enum.is_some() || cfg.vm_watch.is_some() || !cfg.vm_observe.is_empty() {
             let mut vm = RiveViewModel::default();
             if cfg.vm_oneshot {
-                vm.set_enum_index(path.clone(), *index);
+                if let Some((path, index)) = &cfg.vm_set_enum {
+                    vm.set_enum_index(path.clone(), *index);
+                }
+            }
+            if let Some(path) = &cfg.vm_watch {
+                vm.watch_number(path.clone());
+            }
+            for path in &cfg.vm_observe {
+                vm.observe(path.clone());
             }
             e.insert(vm);
         }
@@ -334,6 +380,56 @@ fn drive_vm_writes(cfg: Res<Cfg>, mut q: Query<&mut RiveViewModel>) {
     }
     for mut vm in &mut q {
         vm.set_enum_index(path.clone(), *index);
+    }
+}
+
+/// M-READBACK: the consumer-side proof that view-model reads flow render→main
+/// under `zero_copy`. Logs the watched number's read-back (`RiveViewModel::values`,
+/// filled by the channel drain) whenever it changes — first 10 changes verbosely,
+/// then just the tally — and counts `RivePropertyChanged` fires per observed path,
+/// printing a cumulative tally every 60 frames. No-op unless `RIVE_VM_WATCH` /
+/// `RIVE_VM_OBSERVE` was set.
+fn report_vm_readback(
+    cfg: Res<Cfg>,
+    q: Query<(Entity, &RiveViewModel)>,
+    mut fires: MessageReader<RivePropertyChanged>,
+    mut fire_tally: Local<std::collections::HashMap<String, u32>>,
+    mut last: Local<std::collections::HashMap<Entity, f32>>,
+    mut value_changes: Local<u32>,
+    mut frames: Local<u32>,
+) {
+    if cfg.vm_watch.is_none() && cfg.vm_observe.is_empty() {
+        return;
+    }
+    *frames += 1;
+    for msg in fires.read() {
+        *fire_tally.entry(msg.path.clone()).or_insert(0) += 1;
+    }
+    if let Some(path) = &cfg.vm_watch {
+        for (entity, vm) in &q {
+            if let Some(v) = vm.number(path) {
+                if last.get(&entity) != Some(&v) {
+                    *value_changes += 1;
+                    if *value_changes <= 10 {
+                        info!("vm watch read-back: {path:?} = {v} ({entity:?}, change #{})", *value_changes);
+                    }
+                    last.insert(entity, v);
+                }
+            }
+        }
+    }
+    if frames.is_multiple_of(60) {
+        let fires: Vec<String> = cfg
+            .vm_observe
+            .iter()
+            .map(|p| format!("{p:?}={}", fire_tally.get(p).copied().unwrap_or(0)))
+            .collect();
+        info!(
+            "vm read-back tally after {} frames: watch changes={}, observe fires: [{}]",
+            *frames,
+            *value_changes,
+            fires.join(", ")
+        );
     }
 }
 

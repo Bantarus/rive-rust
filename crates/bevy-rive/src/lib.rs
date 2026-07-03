@@ -134,8 +134,10 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 // Per-feature module (the "add a Rive feature" convention — see
 // docs/feature-support.md). The `RiveViewModel` component is tier-agnostic. Its
 // WRITE apply helper is dual-tier (`floor` applies inline; `zero_copy` ferries
-// writes to the render world and calls it there); only the watch read-back path
-// remains `floor`-only for now.
+// writes to the render world and calls it there); watch/observe READ-back is
+// dual-tier too (`floor` reads inline after advance; `zero_copy` ships results
+// back over the `RiveVmReadbackChannel` render→main back-channel, one frame of
+// latency — see the module docs).
 mod view_model;
 pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
 
@@ -440,8 +442,9 @@ impl RiveAnimation {
     /// (state machines have no scalar playhead). Out-of-range times are clamped to
     /// `[0, duration]`. Pair with [`pause`](Self::pause) for scrubbing. Builder-style.
     ///
-    /// Reading the live playhead / duration back into Bevy is deferred (same rationale
-    /// as the view-model watch read-back); use the safe layer's
+    /// Reading the live playhead / duration back into Bevy is deferred — next in
+    /// line for the render→main channel (see `docs/feature-support.md` backlog #1);
+    /// use the safe layer's
     /// [`StateMachine::time`](rive_renderer::StateMachine::time) /
     /// [`duration`](rive_renderer::StateMachine::duration) for that.
     pub fn seek(&mut self, time_seconds: f32) -> &mut Self {

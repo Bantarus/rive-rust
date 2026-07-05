@@ -76,9 +76,10 @@ renders:
 
 Also shipped since: out-of-band asset loading, runtime text get/set, the audio bridge,
 gamepad/keyboard/focus input, playback seek/pause/speed controls, runtime bone/constraint/solo
-control, nested-artboard access, and the first render→main read-back channel (view-model
-watch/observe in both tiers). Planned next: rig/focus/playhead read-back over that channel,
-view-model list structural mutation — see the [feature matrix](docs/feature-support.md).
+control, nested-artboard access, and the render→main read-back channel carrying view-model
+watch/observe, rig (bone/constraint/solo), focus-state, and live playhead/duration reads in
+both tiers (text-run read-back remains safe-layer-only). Planned next: view-model list
+structural mutation — see the [feature matrix](docs/feature-support.md).
 State-machine inputs and events read-back are **out of scope** (deprecated by Rive, superseded
 by data binding).
 

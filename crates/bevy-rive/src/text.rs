@@ -7,8 +7,9 @@
 //!
 //! Reads (a run's current string) are available at the safe layer
 //! ([`Artboard::text_get`](rive_renderer::Artboard::text_get)); Bevy-side text
-//! read-back is deferred — a candidate for the now-existing render→main channel
-//! (`RiveVmReadbackChannel`; see `docs/feature-support.md` backlog #1).
+//! read-back is deferred — a candidate for the render→main channel
+//! (`RiveReadbackChannel`), which already carries the view-model / rig / focus /
+//! playhead reads (see `docs/feature-support.md`).
 
 use bevy::prelude::*;
 

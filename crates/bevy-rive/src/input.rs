@@ -15,7 +15,7 @@
 
 use bevy::prelude::*;
 
-pub use rive_renderer::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers};
+pub use rive_renderer::{FocusDir, FocusState, GamepadAxis, GamepadButton, Key, KeyModifiers};
 
 /// One queued input command, applied to the instance before the next advance.
 #[derive(Clone, Debug)]
@@ -59,6 +59,14 @@ pub struct RiveInput {
     /// following frame. Absent under `floor` (it drains `cmds` inline).
     #[cfg(feature = "zero_copy")]
     staged: Vec<InputCmd>,
+    /// Whether to read the state machine's [`FocusState`] back after each advance
+    /// (opt-in via [`watch_focus`](Self::watch_focus)). A persistent registration,
+    /// ferried each frame under `zero_copy` like the view-model watch list.
+    focus_watched: bool,
+    /// Last read-back focus state (refreshed after advance when `focus_watched`;
+    /// `floor` inline, `zero_copy` one frame late over the channel). `None` until
+    /// the first read-back lands.
+    focus: Option<FocusState>,
 }
 
 impl RiveInput {
@@ -117,6 +125,36 @@ impl RiveInput {
     /// Queues a clear of the primary focus.
     pub fn clear_focus(&mut self) {
         self.cmds.push(InputCmd::ClearFocus);
+    }
+
+    /// Registers the state machine's [`FocusState`] to read back after each advance
+    /// (what holds focus / whether it wants keyboard input). Read it with
+    /// [`focus_state`](Self::focus_state). Idempotent. Only a `.riv` that authors
+    /// focus + listeners reports a non-default state; a linear-animation scene always
+    /// reads the default (nothing focused).
+    pub fn watch_focus(&mut self) {
+        self.focus_watched = true;
+    }
+
+    /// Last read-back [`FocusState`] (if [watched](Self::watch_focus)). Reflects the
+    /// state *after* the last advance (one frame late under `zero_copy`); `None`
+    /// until the first read-back lands.
+    pub fn focus_state(&self) -> Option<FocusState> {
+        self.focus
+    }
+
+    /// Whether focus read-back is registered — read by the `floor` advance loop and
+    /// (for `zero_copy`) ferried by extract + rechecked by the drain.
+    #[cfg(any(feature = "floor", feature = "zero_copy"))]
+    pub(crate) fn wants_focus(&self) -> bool {
+        self.focus_watched
+    }
+
+    /// Stores a focus read-back. Shared by both tiers (`floor` writes inline after
+    /// advance; `zero_copy` from the channel drain).
+    #[cfg(any(feature = "floor", feature = "zero_copy"))]
+    pub(crate) fn set_focus_readback(&mut self, focus: FocusState) {
+        self.focus = Some(focus);
     }
 
     /// `zero_copy`: whether there is staging work (queued or staged commands).

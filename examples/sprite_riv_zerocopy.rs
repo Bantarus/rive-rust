@@ -37,6 +37,23 @@
 //!                                 OBSERVE through the same channel). A script-driven path
 //!                                 fires ~every frame; a static one never, e.g.
 //!                                 RIVE_RIV=voxelien_face.riv RIVE_VM_OBSERVE="breath/scaleX,viseme".
+//!   RIVE_RIG_WATCH="name"         watch bone `name`'s rotation + constraint `name`'s strength
+//!                                 (empty name = the first unnamed component of each type) and
+//!                                 log the read-backs — proves RIG read-back through the channel.
+//!                                 An animation-driven bone shows live movement, e.g.
+//!                                 RIVE_RIV=9939-18941-big-wheel-demo.riv RIVE_RIG_WATCH="".
+//!   RIVE_RIG_SPIN=1               drive the watched bone's rotation procedurally (+3°/frame,
+//!                                 via the proven RiveRig write ferry) so the rig read-back has
+//!                                 a MOVING value to track — proves the write→advance→read
+//!                                 round-trip (the read follows one frame behind). Pair with
+//!                                 RIVE_RIG_WATCH.
+//!   RIVE_WATCH_PLAYHEAD=1         watch the live playhead + duration and log them — proves
+//!                                 PLAYHEAD read-back. Only a linear-animation scene has a
+//!                                 scalar playhead, e.g. RIVE_RIV=5122-10308-eye-joysticks-demo.riv
+//!                                 (a 3s loop; on a state machine both read None).
+//!   RIVE_WATCH_FOCUS=1            watch the state machine's FocusState and log it — proves
+//!                                 FOCUS read-back (API-level: no demo asset authors FocusData,
+//!                                 so the delivered state is the default nothing-focused).
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the
@@ -53,9 +70,9 @@ use bevy::window::PresentMode;
 use bevy::winit::WinitSettings;
 
 use bevy_rive::{
-    install_interlock_device_callback, RiveActive, RiveAnimation, RiveAtlasKey, RiveFile,
-    RivePointer, RivePropertyChanged, RiveSampling, RiveSurface, RiveTarget, RiveViewModel,
-    RiveZeroCopyPlugin,
+    install_interlock_device_callback, BoneProp, RiveActive, RiveAnimation, RiveAtlasKey,
+    RiveFile, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface,
+    RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
 };
 
 #[derive(Resource)]
@@ -99,6 +116,16 @@ struct Cfg {
     /// M-READBACK: `RIVE_VM_OBSERVE="p1,p2"` — observe these paths; `report_vm_readback`
     /// counts + logs the resulting `RivePropertyChanged` messages.
     vm_observe: Vec<String>,
+    /// M-READBACK: `RIVE_RIG_WATCH="name"` — watch bone `name` rotation + constraint
+    /// `name` strength on each face and log the read-backs (`""` = first unnamed).
+    rig_watch: Option<String>,
+    /// M-READBACK: `RIVE_RIG_SPIN=1` — drive the watched bone's rotation (+3°/frame)
+    /// so the read-back tracks a moving value (the write→advance→read round-trip).
+    rig_spin: bool,
+    /// M-READBACK: `RIVE_WATCH_PLAYHEAD=1` — watch the live playhead/duration.
+    watch_playhead: bool,
+    /// M-READBACK: `RIVE_WATCH_FOCUS=1` — watch the state machine's `FocusState`.
+    watch_focus: bool,
     /// M-INPUT: `RIVE_POINTER="x,y"` — attach a `RivePointer` at this fixed TARGET-PIXEL
     /// position to each face, proving pointer-input forwarding through the zero-copy
     /// (render-world) advance path. The node re-asserts `pointer_move` every frame, so a
@@ -195,6 +222,15 @@ fn main() {
                 .collect()
         })
         .unwrap_or_default();
+    // M-READBACK: rig / playhead / focus read-back knobs (see the header). The rig
+    // name may be EMPTY (= the first unnamed bone/constraint), so `.ok()` alone —
+    // no emptiness filter like vm_watch's.
+    let rig_watch = std::env::var("RIVE_RIG_WATCH")
+        .ok()
+        .map(|s| s.trim().to_string());
+    let rig_spin = std::env::var_os("RIVE_RIG_SPIN").is_some();
+    let watch_playhead = std::env::var_os("RIVE_WATCH_PLAYHEAD").is_some();
+    let watch_focus = std::env::var_os("RIVE_WATCH_FOCUS").is_some();
     // M-INPUT: RIVE_POINTER="x,y" — a fixed target-pixel pointer position forwarded to each
     // face, proving pointer-input forwarding through the zero-copy advance path.
     let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| {
@@ -279,6 +315,10 @@ fn main() {
         vm_oneshot: std::env::var_os("RIVE_VM_ONESHOT").is_some(),
         vm_watch,
         vm_observe,
+        rig_watch,
+        rig_spin,
+        watch_playhead,
+        watch_focus,
         pointer,
     })
     .init_resource::<CaptureState>()
@@ -290,7 +330,9 @@ fn main() {
             resync_atlas_sprites,
             drive_cull,
             drive_vm_writes,
+            drive_rig_spin,
             report_vm_readback,
+            report_reads,
             drive_capture,
             drive_perf_exit,
         )
@@ -319,6 +361,10 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     for i in 0..cfg.instances {
         let mut anim = RiveAnimation::new(handle.clone());
         anim.speed = cfg.speed;
+        // M-READBACK: register the live playhead/duration read (RIVE_WATCH_PLAYHEAD).
+        if cfg.watch_playhead {
+            anim.watch_playhead();
+        }
         // M-SCALE: under RIVE_ATLAS, opt every face into the shared atlas (one pass for
         // all of them); otherwise each gets its own dedicated image (the default tier).
         // RIVE_KEYS>1 round-robins faces across that many pools (distinct keys ⇒ distinct pages).
@@ -363,6 +409,20 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
                 pos: Some(pos),
                 primary_down: false,
             });
+        }
+        // M-READBACK: register rig reads (bone rotation + constraint strength by the
+        // same name; "" = first unnamed) and the focus read — `report_reads` logs
+        // the values the render→main channel delivers.
+        if let Some(name) = &cfg.rig_watch {
+            let mut rig = RiveRig::default();
+            rig.watch_bone(name.clone(), BoneProp::Rotation);
+            rig.watch_constraint_strength(name.clone());
+            e.insert(rig);
+        }
+        if cfg.watch_focus {
+            let mut input = RiveInput::default();
+            input.watch_focus();
+            e.insert(input);
         }
     }
 }
@@ -429,6 +489,86 @@ fn report_vm_readback(
             *frames,
             *value_changes,
             fires.join(", ")
+        );
+    }
+}
+
+/// M-READBACK proof driver: spin the watched bone (+3°/frame via the proven
+/// `RiveRig` write ferry) so the rig read-back has a MOVING value to track —
+/// the write→advance→read round-trip. No-op unless `RIVE_RIG_SPIN` (and
+/// `RIVE_RIG_WATCH`) was set.
+fn drive_rig_spin(cfg: Res<Cfg>, mut q: Query<&mut RiveRig>, mut angle: Local<f32>) {
+    if !cfg.rig_spin {
+        return;
+    }
+    let Some(name) = cfg.rig_watch.as_ref() else {
+        return;
+    };
+    *angle = (*angle + 3.0) % 360.0;
+    for mut rig in &mut q {
+        rig.set_bone(name.clone(), BoneProp::Rotation, *angle);
+    }
+}
+
+/// M-READBACK: the consumer-side proof for the rig / playhead / focus reads —
+/// logs each read-back's value when it changes (bone rotation verbosely for the
+/// first 10 changes) and a cumulative tally every 60 frames. No-op unless
+/// `RIVE_RIG_WATCH` / `RIVE_WATCH_PLAYHEAD` / `RIVE_WATCH_FOCUS` was set.
+fn report_reads(
+    cfg: Res<Cfg>,
+    q: Query<(
+        Entity,
+        &RiveAnimation,
+        Option<&RiveRig>,
+        Option<&RiveInput>,
+    )>,
+    mut last_bone: Local<std::collections::HashMap<Entity, f32>>,
+    mut bone_changes: Local<u32>,
+    mut playhead_frames: Local<u32>,
+    mut frames: Local<u32>,
+) {
+    if cfg.rig_watch.is_none() && !cfg.watch_playhead && !cfg.watch_focus {
+        return;
+    }
+    *frames += 1;
+    // With N>1 instances, the `*_now` snapshots report the last-iterated face.
+    let mut playhead_now = None;
+    let mut strength_now = None;
+    let mut focus_now = None;
+    let mut any_playhead = false;
+    for (entity, anim, rig, input) in &q {
+        if let (Some(name), Some(rig)) = (cfg.rig_watch.as_ref(), rig) {
+            if let Some(rot) = rig.bone(name, BoneProp::Rotation) {
+                if last_bone.get(&entity) != Some(&rot) {
+                    *bone_changes += 1;
+                    if *bone_changes <= 10 {
+                        info!(
+                            "rig read-back: bone {name:?} rotation = {rot} ({entity:?}, change #{})",
+                            *bone_changes
+                        );
+                    }
+                    last_bone.insert(entity, rot);
+                }
+            }
+            strength_now = rig.constraint_strength(name);
+        }
+        if cfg.watch_playhead {
+            any_playhead |= anim.playhead().is_some();
+            playhead_now = Some((anim.playhead(), anim.duration()));
+        }
+        if let Some(input) = input {
+            focus_now = Some(input.focus_state());
+        }
+    }
+    // Once per FRAME (not per entity), so the count stays a frame tally at N>1.
+    if any_playhead {
+        *playhead_frames += 1;
+    }
+    if frames.is_multiple_of(60) {
+        info!(
+            "read-back tally after {} frames: bone changes={}, constraint strength={:?}, \
+             playhead frames-with-value={}, playhead now={:?}, focus={:?}",
+            *frames, *bone_changes, strength_now, *playhead_frames, playhead_now, focus_now,
         );
     }
 }

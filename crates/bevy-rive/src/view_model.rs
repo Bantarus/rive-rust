@@ -26,7 +26,7 @@
 //! - **Watch read-back** AND **observe** (change/trigger fires): `floor` reads
 //!   inline after advance (same frame); `zero_copy` reads after the render-node
 //!   advance and ships the results back over the **render→main back-channel**
-//!   (`RiveVmReadbackChannel` in `zero_copy.rs`), drained into
+//!   (`RiveReadbackChannel` in `zero_copy.rs`), drained into
 //!   [`RiveViewModel::values`] / [`RivePropertyChanged`] in `PreUpdate` — so
 //!   under `zero_copy` a read-back lands one frame after the advance it observed
 //!   (the node runs after the main schedule).

@@ -136,7 +136,7 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 // WRITE apply helper is dual-tier (`floor` applies inline; `zero_copy` ferries
 // writes to the render world and calls it there); watch/observe READ-back is
 // dual-tier too (`floor` reads inline after advance; `zero_copy` ships results
-// back over the `RiveVmReadbackChannel` render→main back-channel, one frame of
+// back over the `RiveReadbackChannel` render→main back-channel, one frame of
 // latency — see the module docs).
 mod view_model;
 pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
@@ -157,16 +157,19 @@ pub use text::RiveText;
 
 // Per-feature module. Runtime rig control: the `RiveRig` component queues bone /
 // constraint / solo writes, applied before advance in both tiers (`floor` inline;
-// `zero_copy` ferried to the render world like text writes). Reads are at the safe
-// layer (`Artboard::bone_get` etc.).
+// `zero_copy` ferried to the render world like text writes). Reads are dual-tier
+// too — register with `watch_bone`/`watch_constraint_*`/`watch_solo`, refreshed
+// after advance (`floor` inline; `zero_copy` over the `RiveReadbackChannel`,
+// one frame of latency).
 mod rig;
 pub use rig::{BoneProp, ConstraintProp, RiveRig};
 
 // Per-feature module. Runtime input: the `RiveInput` component queues joystick /
 // keyboard / gamepad / focus commands, applied before advance in both tiers
 // (`floor` inline; `zero_copy` ferried to the render world like the rig writes).
+// The `watch_focus`/`focus_state` read-back is dual-tier too (like the rig reads).
 mod input;
-pub use input::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers, RiveInput};
+pub use input::{FocusDir, FocusState, GamepadAxis, GamepadButton, Key, KeyModifiers, RiveInput};
 
 // Per-feature module. Nested-artboard targeting: the optional `RiveNestedTarget`
 // component redirects an entity's rig / text writes to a nested child artboard
@@ -205,8 +208,9 @@ pub mod prelude {
     pub use rive_renderer::{Alignment, Fit};
     // The property selectors for `RiveRig::set_bone` / `set_constraint_prop`.
     pub use crate::{BoneProp, ConstraintProp};
-    // The input value types for `RiveInput` (keyboard / gamepad / focus).
-    pub use crate::{FocusDir, GamepadAxis, GamepadButton, Key, KeyModifiers};
+    // The input value types for `RiveInput` (keyboard / gamepad / focus + the
+    // `watch_focus` read-back's `FocusState`).
+    pub use crate::{FocusDir, FocusState, GamepadAxis, GamepadButton, Key, KeyModifiers};
 
     // Floor (default): the CPU-copy plugin entry point.
     #[cfg(feature = "floor")]
@@ -399,6 +403,17 @@ pub struct RiveAnimation {
     /// for the extract to ferry. Absent under `floor` (it drains `pending_seek` inline).
     #[cfg(feature = "zero_copy")]
     staged_seek: Option<f32>,
+    /// Whether to read the live playhead + duration back after each advance (opt-in
+    /// via [`watch_playhead`](Self::watch_playhead)). A persistent registration,
+    /// ferried each frame under `zero_copy` like the view-model watch list.
+    playhead_watched: bool,
+    /// Last read-back playhead position (seconds), refreshed after advance when
+    /// `playhead_watched` (`floor` inline, `zero_copy` one frame late). `None` until
+    /// the first read-back lands, or `None` on a state machine (no scalar playhead).
+    last_playhead: Option<f32>,
+    /// Last read-back duration (seconds); `Some` exactly when the scene is seekable
+    /// (a linear-animation scene), `None` for a state machine. See `last_playhead`.
+    last_duration: Option<f32>,
 }
 
 impl RiveAnimation {
@@ -414,6 +429,9 @@ impl RiveAnimation {
             pending_seek: None,
             #[cfg(feature = "zero_copy")]
             staged_seek: None,
+            playhead_watched: false,
+            last_playhead: None,
+            last_duration: None,
         }
     }
 
@@ -442,14 +460,53 @@ impl RiveAnimation {
     /// (state machines have no scalar playhead). Out-of-range times are clamped to
     /// `[0, duration]`. Pair with [`pause`](Self::pause) for scrubbing. Builder-style.
     ///
-    /// Reading the live playhead / duration back into Bevy is deferred — next in
-    /// line for the render→main channel (see `docs/feature-support.md` backlog #1);
-    /// use the safe layer's
-    /// [`StateMachine::time`](rive_renderer::StateMachine::time) /
-    /// [`duration`](rive_renderer::StateMachine::duration) for that.
+    /// To read the live playhead back (e.g. to drive a scrub bar), pair with
+    /// [`watch_playhead`](Self::watch_playhead) + [`playhead`](Self::playhead).
     pub fn seek(&mut self, time_seconds: f32) -> &mut Self {
         self.pending_seek = Some(time_seconds);
         self
+    }
+
+    /// Registers the live playhead + duration to read back after each advance. Read
+    /// them with [`playhead`](Self::playhead) / [`duration`](Self::duration).
+    /// Builder-style. Idempotent.
+    ///
+    /// Only **linear-animation** scenes have a scalar playhead — on a state machine
+    /// both reads are `None`. Under `zero_copy` the value trails the advance by one
+    /// frame (like the view-model watch read-back).
+    pub fn watch_playhead(&mut self) -> &mut Self {
+        self.playhead_watched = true;
+        self
+    }
+
+    /// Last read-back playhead position in seconds (if [watched](Self::watch_playhead)).
+    /// `None` until the first read-back lands, or on a state machine (no scalar
+    /// playhead). Reflects the position *after* the last advance.
+    pub fn playhead(&self) -> Option<f32> {
+        self.last_playhead
+    }
+
+    /// Last read-back playback duration in seconds (if [watched](Self::watch_playhead)).
+    /// Once the first read-back lands, `Some` exactly when the scene is seekable
+    /// (a linear-animation scene); `None` for a state machine (and before the
+    /// first read-back).
+    pub fn duration(&self) -> Option<f32> {
+        self.last_duration
+    }
+
+    /// Whether playhead read-back is registered — read by the `floor` advance loop
+    /// and (for `zero_copy`) ferried by extract + rechecked by the drain.
+    #[cfg(any(feature = "floor", feature = "zero_copy"))]
+    pub(crate) fn wants_playhead(&self) -> bool {
+        self.playhead_watched
+    }
+
+    /// Stores a playhead read-back (position + duration). Shared by both tiers
+    /// (`floor` writes inline after advance; `zero_copy` from the channel drain).
+    #[cfg(any(feature = "floor", feature = "zero_copy"))]
+    pub(crate) fn set_playhead_readback(&mut self, playhead: Option<f32>, duration: Option<f32>) {
+        self.last_playhead = playhead;
+        self.last_duration = duration;
     }
 
     /// Whether there is seek staging work this frame (a pending request to snapshot,
@@ -1110,6 +1167,44 @@ fn advance_and_upload_rive(
             crate::view_model::refresh_watch(vm, &inst.artboard);
             for path in crate::view_model::drain_observed(vm, &inst.artboard) {
                 vm_changes.write(RivePropertyChanged { entity, path });
+            }
+        }
+
+        // Read registered rig properties (bones / constraints / solos) AFTER
+        // advancing so they reflect the solved pose — redirected to the nested
+        // child if one is targeted, matching where the rig WRITES went above.
+        // RE-RESOLVE the nested target for the reads: advance can REPLACE the
+        // nested child instance (a data-bound artboard-reference property applies
+        // during updateDataBinds and resets the slot's instance), so the
+        // pre-advance `rig_text_ab` may point at a freed child. The pre-advance
+        // resolve stays correct for the WRITES (no advance ran in between).
+        if rig.as_ref().is_some_and(|r| r.has_reads()) {
+            let read_ab = nested_target.and_then(|t| t.resolve(&inst.artboard));
+            if let Some(rig) = rig.as_deref_mut() {
+                crate::rig::refresh_rig_reads(rig, read_ab.as_ref().unwrap_or(&inst.artboard));
+            }
+        }
+
+        // Read the state machine's focus state / live playhead AFTER advancing
+        // (both opt-in; the root state machine, never a nested child). The
+        // `wants_*` checks go through `Deref` (no change tick), and a value is
+        // stored only when it actually CHANGED — so an unwatched face, a stable
+        // focus, or a paused playhead doesn't trip `RiveInput`/`RiveAnimation`
+        // change detection (matching the zero_copy drain's frugality).
+        if let Some(input) = input.as_mut() {
+            // `wants_focus`/`focus_state` are `&self` — they resolve through
+            // `Deref` (no tick); only the `set_focus_readback` below deref-muts.
+            if input.wants_focus() {
+                let focus = inst.state_machine.focus_state();
+                if input.focus_state() != Some(focus) {
+                    input.set_focus_readback(focus);
+                }
+            }
+        }
+        if anim.wants_playhead() {
+            let (time, duration) = (inst.state_machine.time(), inst.state_machine.duration());
+            if anim.playhead() != time || anim.duration() != duration {
+                anim.set_playhead_readback(time, duration);
             }
         }
 

@@ -11,6 +11,15 @@
 //!                                      `cap.png.offscreen.png` (the raw Image,
 //!                                      straight RGBA), then exit
 //!   RIVE_CAPTURE_FRAMES=6              warm-up frames before capture (default 6)
+//!   RIVE_RIG_WATCH="name"              M-READBACK floor proof: watch bone `name`'s
+//!                                      rotation + constraint `name`'s strength ("" =
+//!                                      first unnamed of each type) and log read-backs
+//!   RIVE_RIG_SPIN=1                    drive the watched bone (+3°/frame) so the
+//!                                      read-back tracks a moving value (write→read
+//!                                      round-trip; pair with RIVE_RIG_WATCH)
+//!   RIVE_WATCH_PLAYHEAD=1              watch + log the live playhead/duration (only a
+//!                                      linear-animation scene has one)
+//!   RIVE_WATCH_FOCUS=1                 watch + log the state machine's FocusState
 //!
 //! The frozen color/orientation contract requires `Tonemapping::None` + no `Hdr`
 //! on the camera (so the sRGB sample->output round-trip is an identity) and
@@ -21,7 +30,7 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::winit::WinitSettings;
 
-use bevy_rive::{RiveAnimation, RiveFile, RivePlugin, RiveTarget};
+use bevy_rive::{BoneProp, RiveAnimation, RiveFile, RiveInput, RivePlugin, RiveRig, RiveTarget};
 
 #[derive(Resource)]
 struct Cfg {
@@ -30,6 +39,15 @@ struct Cfg {
     capture: Option<String>,
     warmup: u32,
     speed: f32,
+    /// M-READBACK floor proof: watch bone/constraint `name` ("" = first unnamed).
+    rig_watch: Option<String>,
+    /// M-READBACK floor proof: drive the watched bone (+3°/frame) so the read-back
+    /// tracks a moving value.
+    rig_spin: bool,
+    /// M-READBACK floor proof: watch the live playhead/duration.
+    watch_playhead: bool,
+    /// M-READBACK floor proof: watch the state machine's `FocusState`.
+    watch_focus: bool,
 }
 
 #[derive(Resource, Default)]
@@ -89,10 +107,19 @@ fn main() {
             capture,
             warmup,
             speed,
+            rig_watch: std::env::var("RIVE_RIG_WATCH")
+                .ok()
+                .map(|s| s.trim().to_string()),
+            rig_spin: std::env::var_os("RIVE_RIG_SPIN").is_some(),
+            watch_playhead: std::env::var_os("RIVE_WATCH_PLAYHEAD").is_some(),
+            watch_focus: std::env::var_os("RIVE_WATCH_FOCUS").is_some(),
         })
         .init_resource::<CaptureState>()
         .add_systems(Startup, setup)
-        .add_systems(Update, (attach_display, drive_capture).chain())
+        .add_systems(
+            Update,
+            (attach_display, drive_rig_spin, report_reads, drive_capture).chain(),
+        )
         .run();
 }
 
@@ -112,9 +139,104 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
     let handle: Handle<RiveFile> = assets.load(cfg.riv.clone());
     let mut anim = RiveAnimation::new(handle);
     anim.speed = cfg.speed;
-    commands.spawn((anim, RiveTarget::new(cfg.size, cfg.size), RiveEntity));
+    // M-READBACK floor proof: register the opt-in reads (see the header knobs);
+    // `report_reads` logs what the floor advance system writes back inline.
+    if cfg.watch_playhead {
+        anim.watch_playhead();
+    }
+    let mut e = commands.spawn((anim, RiveTarget::new(cfg.size, cfg.size), RiveEntity));
+    if let Some(name) = &cfg.rig_watch {
+        let mut rig = RiveRig::default();
+        rig.watch_bone(name.clone(), BoneProp::Rotation);
+        rig.watch_constraint_strength(name.clone());
+        e.insert(rig);
+    }
+    if cfg.watch_focus {
+        let mut input = RiveInput::default();
+        input.watch_focus();
+        e.insert(input);
+    }
     // `attach_display` spawns the textured quad once the plugin writes the real
     // image handle back into RiveTarget.
+}
+
+/// M-READBACK proof driver: spin the watched bone (+3°/frame via the proven
+/// `RiveRig` write path) so the read-back tracks a moving value — the
+/// write→advance→read round-trip. No-op unless `RIVE_RIG_SPIN` (and
+/// `RIVE_RIG_WATCH`) was set.
+fn drive_rig_spin(cfg: Res<Cfg>, mut q: Query<&mut RiveRig>, mut angle: Local<f32>) {
+    if !cfg.rig_spin {
+        return;
+    }
+    let Some(name) = cfg.rig_watch.as_ref() else {
+        return;
+    };
+    *angle = (*angle + 3.0) % 360.0;
+    for mut rig in &mut q {
+        rig.set_bone(name.clone(), BoneProp::Rotation, *angle);
+    }
+}
+
+/// M-READBACK floor proof: logs each watched read-back when it changes (bone
+/// rotation verbosely for the first 10 changes) + a tally every 60 frames — the
+/// floor analogue of the zero-copy example's `report_reads`. No-op unless a
+/// read knob was set.
+fn report_reads(
+    cfg: Res<Cfg>,
+    q: Query<(
+        Entity,
+        &RiveAnimation,
+        Option<&RiveRig>,
+        Option<&RiveInput>,
+    )>,
+    mut last_bone: Local<std::collections::HashMap<Entity, f32>>,
+    mut bone_changes: Local<u32>,
+    mut playhead_frames: Local<u32>,
+    mut frames: Local<u32>,
+) {
+    if cfg.rig_watch.is_none() && !cfg.watch_playhead && !cfg.watch_focus {
+        return;
+    }
+    *frames += 1;
+    let mut playhead_now = None;
+    let mut strength_now = None;
+    let mut focus_now = None;
+    let mut any_playhead = false;
+    for (entity, anim, rig, input) in &q {
+        if let (Some(name), Some(rig)) = (cfg.rig_watch.as_ref(), rig) {
+            if let Some(rot) = rig.bone(name, BoneProp::Rotation) {
+                if last_bone.get(&entity) != Some(&rot) {
+                    *bone_changes += 1;
+                    if *bone_changes <= 10 {
+                        info!(
+                            "rig read-back: bone {name:?} rotation = {rot} ({entity:?}, change #{})",
+                            *bone_changes
+                        );
+                    }
+                    last_bone.insert(entity, rot);
+                }
+            }
+            strength_now = rig.constraint_strength(name);
+        }
+        if cfg.watch_playhead {
+            any_playhead |= anim.playhead().is_some();
+            playhead_now = Some((anim.playhead(), anim.duration()));
+        }
+        if let Some(input) = input {
+            focus_now = Some(input.focus_state());
+        }
+    }
+    // Once per FRAME (not per entity), so the count stays a frame tally.
+    if any_playhead {
+        *playhead_frames += 1;
+    }
+    if frames.is_multiple_of(60) {
+        info!(
+            "read-back tally after {} frames: bone changes={}, constraint strength={:?}, \
+             playhead frames-with-value={}, playhead now={:?}, focus={:?}",
+            *frames, *bone_changes, strength_now, *playhead_frames, playhead_now, focus_now,
+        );
+    }
 }
 
 /// Spawns the display quad once the plugin has allocated the target image.

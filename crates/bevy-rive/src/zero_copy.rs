@@ -239,14 +239,15 @@ impl Plugin for RiveZeroCopyPlugin {
         // the `.riv` AssetLoader is registered exactly once and identically).
         RivePlugin::register_asset(app);
 
-        // M-READBACK: the render→main back-channel for view-model watch/observe.
-        // One buffer, two clones of the same Arc — the node (render world) pushes,
-        // the PreUpdate drain (main world) consumes. `add_message` is idempotent,
-        // so composing with the floor RivePlugin (which also registers it) is fine.
+        // M-READBACK: the render→main back-channel for view-model / rig / focus /
+        // playhead read-back. One buffer, two clones of the same Arc — the node
+        // (render world) pushes, the PreUpdate drain (main world) consumes.
+        // `add_message` is idempotent, so composing with the floor RivePlugin (which
+        // also registers it) is fine.
         app.add_message::<RivePropertyChanged>();
-        let vm_readback = RiveVmReadbackChannel::default();
-        app.insert_resource(vm_readback.clone())
-            .add_systems(PreUpdate, drain_vm_readback);
+        let readback = RiveReadbackChannel::default();
+        app.insert_resource(readback.clone())
+            .add_systems(PreUpdate, drain_readback);
 
         // Main world: allocate the per-face display Image (the frozen seam) once the
         // .riv has loaded, AND assign atlas slots + write `RiveSurface` for opt-in
@@ -278,7 +279,7 @@ impl Plugin for RiveZeroCopyPlugin {
         render_app
             .init_resource::<ExtractedRives>()
             // M-READBACK: the render-world clone of the back-channel (same Arc).
-            .insert_resource(vm_readback)
+            .insert_resource(readback)
             .add_systems(ExtractSchedule, extract_rive_instances)
             .add_systems(
                 bevy::render::Render,
@@ -1176,7 +1177,7 @@ struct ExtractedRive {
     /// `RiveViewModel` or no queued writes.
     vm_writes: Vec<(String, RiveValue)>,
     /// M-READBACK: the registered watch list (path + declared read type), read in
-    /// the node after advance; results ship back over the [`RiveVmReadbackChannel`].
+    /// the node after advance; results ship back over the [`RiveReadbackChannel`].
     /// Empty for faces with no `RiveViewModel` / no watches, and for culled faces
     /// (no advance ⇒ nothing new to read; `values` keeps its last read-back).
     vm_watch: Vec<(String, crate::view_model::WatchKind)>,
@@ -1184,6 +1185,17 @@ struct ExtractedRive {
     /// after; fired paths ship back as [`RivePropertyChanged`] messages. Empty
     /// like `vm_watch` above.
     vm_observe: Vec<String>,
+    /// M-READBACK: the registered rig read list (from a `RiveRig`), read in the node
+    /// after advance (from the same nested-redirected artboard as the rig writes);
+    /// results ship back over the channel. Empty like `vm_watch` above.
+    rig_reads: Vec<crate::rig::RigRead>,
+    /// M-READBACK: whether the `RiveInput` registered focus read-back — the node
+    /// reads the state machine's `FocusState` after advance. `false` like the culled
+    /// faces' empty lists above.
+    focus_read: bool,
+    /// M-READBACK: whether the `RiveAnimation` registered playhead read-back — the
+    /// node reads the state machine's live time + duration after advance.
+    playhead_read: bool,
     /// M-TEXT: this frame's text-run set writes (from a `RiveText`), applied to
     /// the instance in the node before advance — the zero-copy analogue of the
     /// floor advance system's inline `apply_text_writes`. Empty for faces with no
@@ -1246,26 +1258,62 @@ struct ExtractedRives {
 }
 
 // ===========================================================================
-// M-READBACK: the render→main back-channel (view-model watch + observe).
+// M-READBACK: the render→main back-channel (all read surfaces — view-model
+// watch + observe, rig, focus, playhead).
 // ===========================================================================
 
-/// One instance's post-advance view-model read-back, produced by the render node
-/// and consumed by the main-world `PreUpdate` drain ([`drain_vm_readback`]).
-struct VmReadback {
+/// One instance's post-advance read-backs, produced by the render node and consumed
+/// by the main-world `PreUpdate` drain ([`drain_readback`]). Carries every read
+/// surface (view model / rig / focus / playhead) so ONE channel + one drain serve
+/// them all; each field stays empty / `None` for a face that didn't register that
+/// read (so an idle face ships nothing — see [`is_empty`](Self::is_empty)).
+struct Readback {
     /// The MAIN-world entity the read-back belongs to (the extract's stable key).
     entity: Entity,
-    /// This frame's watched-path reads (typed by the registered `watch_*` kind).
-    values: Vec<(String, RiveValue)>,
-    /// Observed paths that changed / fired on this frame's advance — each becomes
-    /// a [`RivePropertyChanged`] message.
-    fired: Vec<String>,
+    /// View-model watched-path reads (typed by the registered `watch_*` kind).
+    vm_values: Vec<(String, RiveValue)>,
+    /// View-model observed paths that changed / fired this advance — each becomes a
+    /// [`RivePropertyChanged`] message.
+    vm_fired: Vec<String>,
+    /// Rig reads (bone / constraint / solo) + values, stored back into the entity's
+    /// [`RiveRig`] on the drain side (which re-checks each is still registered).
+    rig_values: Vec<(crate::rig::RigRead, crate::rig::RigValue)>,
+    /// Focus state, if the entity's [`RiveInput`] registered `watch_focus`.
+    focus: Option<rive_renderer::FocusState>,
+    /// Live playhead + duration (seconds), if the [`RiveAnimation`] registered
+    /// `watch_playhead`. Either may be `None` (a state machine has no scalar playhead).
+    playhead: Option<(Option<f32>, Option<f32>)>,
 }
 
-/// The **render→main back-channel** (the first one in this tier): a shared buffer
-/// the render node pushes [`VmReadback`]s into after each advance, drained by a
-/// main-world `PreUpdate` system into [`RiveViewModel::values`] +
-/// [`RivePropertyChanged`] messages. Inserted into BOTH worlds by
-/// [`RiveZeroCopyPlugin::build`] (two clones of one `Arc`).
+impl Readback {
+    /// A fresh, empty read-back for `entity`; the node fills whichever reads the face
+    /// registered, then ships it only if [`is_empty`](Self::is_empty) is false.
+    fn new(entity: Entity) -> Self {
+        Self {
+            entity,
+            vm_values: Vec::new(),
+            vm_fired: Vec::new(),
+            rig_values: Vec::new(),
+            focus: None,
+            playhead: None,
+        }
+    }
+
+    /// Whether nothing was read this frame (so the node skips shipping it).
+    fn is_empty(&self) -> bool {
+        self.vm_values.is_empty()
+            && self.vm_fired.is_empty()
+            && self.rig_values.is_empty()
+            && self.focus.is_none()
+            && self.playhead.is_none()
+    }
+}
+
+/// The **render→main back-channel**: a shared buffer the render node pushes
+/// [`Readback`]s into after each advance, drained by a main-world `PreUpdate` system
+/// into each entity's read-back components (`RiveViewModel` / `RiveRig` / `RiveInput`
+/// / `RiveAnimation`). Inserted into BOTH worlds by [`RiveZeroCopyPlugin::build`]
+/// (two clones of one `Arc`).
 ///
 /// A plain `Arc<Mutex<Vec>>` (not a channel type) because this tier runs the
 /// render world on the main thread (pipelined rendering disabled), so main-world
@@ -1277,52 +1325,85 @@ struct VmReadback {
 ///
 /// Inherited limitation: under `RIVE_BLOCKING=1` the ATLAS advance loop is
 /// skipped entirely (the atlas render path is non-blocking-only, from before this
-/// slice), so an atlas face's watches/observes are inert there — dedicated faces
-/// are unaffected.
+/// slice), so an atlas face's reads are inert there — dedicated faces are unaffected.
 #[derive(Resource, Clone, Default)]
-struct RiveVmReadbackChannel(Arc<Mutex<Vec<VmReadback>>>);
+struct RiveReadbackChannel(Arc<Mutex<Vec<Readback>>>);
 
-/// Main-world `PreUpdate` drain of the [`RiveVmReadbackChannel`]: writes watched
-/// values into each entity's [`RiveViewModel::values`] and emits one
-/// [`RivePropertyChanged`] per observed path that changed/fired — the same
-/// consumer-facing API the `floor` tier serves inline. An entity that despawned
-/// (or dropped its `RiveViewModel`) between the node's read and this drain is
-/// skipped — its fires are dropped too, matching floor (no messages for dead
+/// Main-world `PreUpdate` drain of the [`RiveReadbackChannel`]: fans each
+/// [`Readback`] out to the entity's read-back components — the same consumer-facing
+/// API the `floor` tier serves inline. An entity that despawned (or dropped the
+/// relevant component) between the node's read and this drain is skipped for that
+/// read; its view-model fires are dropped too, matching floor (no messages for dead
 /// entities).
-fn drain_vm_readback(
-    channel: Res<RiveVmReadbackChannel>,
-    mut query: Query<&mut RiveViewModel>,
+///
+/// Each read is delivered only if the CURRENT component still registers it: a
+/// read-back was produced from LAST frame's registrations, and the component may
+/// have been replaced/unwatched in between — a new component must not receive reads
+/// it never registered (floor can't produce that either; it reads inline from the
+/// live component). Each write is also change-detection-frugal — only deref-mut when
+/// there is something to store / a value actually changed.
+fn drain_readback(
+    channel: Res<RiveReadbackChannel>,
+    mut vms: Query<&mut RiveViewModel>,
+    mut rigs: Query<&mut RiveRig>,
+    mut inputs: Query<&mut RiveInput>,
+    mut anims: Query<&mut RiveAnimation>,
     mut vm_changes: MessageWriter<RivePropertyChanged>,
 ) {
     // `mem::take` under one short lock; the node only appends (never holds the
     // lock across other work), and with pipelining off there is no contention.
     let batch = std::mem::take(&mut *channel.0.lock().unwrap());
     for rb in batch {
-        let Ok(mut vm) = query.get_mut(rb.entity) else {
-            continue; // despawned / component removed since the node read it
-        };
-        // Deliver only what the entity's CURRENT component registered: the
-        // read-back was produced from LAST frame's registrations, and the
-        // component may have been replaced in between — a new component must not
-        // receive values/fires for paths it never watched/observed (floor can't
-        // produce that either; it reads inline from the live component). In the
-        // normal (unreplaced) case every path passes.
-        // Only deref-mut when there are values, so a fires-only read-back doesn't
-        // trip `RiveViewModel` change detection.
-        if !rb.values.is_empty() {
-            let vm = &mut *vm;
-            for (path, value) in rb.values {
-                if vm.watch_list().iter().any(|(p, _)| *p == path) {
-                    vm.values.insert(path, value);
+        // --- View model: watched values + observed fires. ---
+        if let Ok(mut vm) = vms.get_mut(rb.entity) {
+            // Only deref-mut when there are values, so a fires-only read-back doesn't
+            // trip `RiveViewModel` change detection.
+            if !rb.vm_values.is_empty() {
+                let vm = &mut *vm;
+                for (path, value) in rb.vm_values {
+                    if vm.watch_list().iter().any(|(p, _)| *p == path) {
+                        vm.values.insert(path, value);
+                    }
+                }
+            }
+            for path in rb.vm_fired {
+                if vm.observe_list().contains(&path) {
+                    vm_changes.write(RivePropertyChanged {
+                        entity: rb.entity,
+                        path,
+                    });
                 }
             }
         }
-        for path in rb.fired {
-            if vm.observe_list().contains(&path) {
-                vm_changes.write(RivePropertyChanged {
-                    entity: rb.entity,
-                    path,
-                });
+
+        // --- Rig: bone / constraint / solo reads (store_read re-checks each). ---
+        if !rb.rig_values.is_empty() {
+            if let Ok(mut rig) = rigs.get_mut(rb.entity) {
+                for (read, value) in rb.rig_values {
+                    rig.store_read(&read, value);
+                }
+            }
+        }
+
+        // --- Focus: only if still watched AND actually changed (focus rarely moves,
+        // so this keeps `RiveInput` change detection quiet on a stable focus). ---
+        if let Some(focus) = rb.focus {
+            if let Ok(mut input) = inputs.get_mut(rb.entity) {
+                if input.wants_focus() && input.focus_state() != Some(focus) {
+                    input.set_focus_readback(focus);
+                }
+            }
+        }
+
+        // --- Playhead: only if still watched AND changed (no churn while paused or
+        // on a state machine, where both reads are a stable `None`). ---
+        if let Some((playhead, duration)) = rb.playhead {
+            if let Ok(mut anim) = anims.get_mut(rb.entity) {
+                if anim.wants_playhead()
+                    && (anim.playhead() != playhead || anim.duration() != duration)
+                {
+                    anim.set_playhead_readback(playhead, duration);
+                }
             }
         }
     }
@@ -1889,6 +1970,10 @@ fn extract_rive_instances(
                 vm_writes: Vec::new(),
                 vm_watch: Vec::new(),
                 vm_observe: Vec::new(),
+                // Culled: no advance ⇒ nothing new to read (reads keep last value).
+                rig_reads: Vec::new(),
+                focus_read: false,
+                playhead_read: false,
                 text_writes: Vec::new(),
                 rig_writes: Vec::new(),
                 input_cmds: Vec::new(),
@@ -1954,6 +2039,12 @@ fn extract_rive_instances(
             // the channel).
             vm_watch: vm.map(|v| v.watch_list().to_vec()).unwrap_or_default(),
             vm_observe: vm.map(|v| v.observe_list().to_vec()).unwrap_or_default(),
+            // M-READBACK: ferry the registered rig read list + the focus/playhead
+            // read flags (persistent registrations, cloned each frame like the watch
+            // lists; the node reads them after advance and ships results back).
+            rig_reads: rig.map(|r| r.read_list().to_vec()).unwrap_or_default(),
+            focus_read: input.is_some_and(|i| i.wants_focus()),
+            playhead_read: anim.wants_playhead(),
             text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             rig_writes: rig.map(|r| r.staged().to_vec()).unwrap_or_default(),
             input_cmds: input.map(|i| i.staged().to_vec()).unwrap_or_default(),
@@ -2118,10 +2209,10 @@ impl Node for RiveFillNode {
         // the frame's GPU total is not reported (avoids undercounting).
         let mut frame_gpu_ok = true;
 
-        // M-READBACK: this frame's post-advance view-model read-backs (watch values
-        // + observed fires), collected across BOTH advance paths and shipped to the
-        // main world in one lock at the end of the node.
-        let mut vm_readbacks: Vec<VmReadback> = Vec::new();
+        // M-READBACK: this frame's post-advance read-backs (view-model watch values
+        // + observed fires, rig reads, focus, playhead), collected across BOTH advance
+        // paths and shipped to the main world in one lock at the end of the node.
+        let mut readbacks: Vec<Readback> = Vec::new();
 
         // M2b: the resource-recycle watermark for this frame, shared by every instance
         // and by both submit paths (so the run-ahead metric reflects the real value).
@@ -2288,22 +2379,44 @@ impl Node for RiveFillNode {
             inst.state_machine.advance(item.step);
             frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
 
-            // M-READBACK: read watched paths + flush observed paths AFTER advance
-            // (so reads reflect this tick's script / state-machine output — the
-            // floor advance system's refresh_watch + drain_observed, ferried back
-            // over the channel instead of written inline). Same once-per-visual-
-            // frame gate as the writes: the observe flush is destructive, and this
-            // keeps one read-back per frame.
-            if apply_vm_writes && (!item.vm_watch.is_empty() || !item.vm_observe.is_empty()) {
-                let values = crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
-                let fired =
-                    crate::view_model::drain_observed_slice(&inst.artboard, &item.vm_observe);
-                if !values.is_empty() || !fired.is_empty() {
-                    vm_readbacks.push(VmReadback {
-                        entity,
-                        values,
-                        fired,
-                    });
+            // M-READBACK: read all registered reads AFTER advance (so they reflect
+            // this tick's script / state-machine output — the floor advance system's
+            // refresh_watch + drain_observed + refresh_rig_reads + focus/playhead
+            // reads, ferried back over the channel instead of written inline). Gated
+            // on `apply_vm_writes` so there is exactly one read-back per VISUAL frame
+            // (a multi-camera frame runs the node N times; the observe flush is
+            // destructive, so it must run once). Rig reads use the same nested-
+            // redirected artboard as the rig writes; vm/focus/playhead use the root.
+            if apply_vm_writes {
+                let mut rb = Readback::new(entity);
+                if !item.vm_watch.is_empty() || !item.vm_observe.is_empty() {
+                    rb.vm_values = crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
+                    rb.vm_fired =
+                        crate::view_model::drain_observed_slice(&inst.artboard, &item.vm_observe);
+                }
+                if !item.rig_reads.is_empty() {
+                    // RE-RESOLVE the nested target for the reads: advance can
+                    // REPLACE the nested child instance (a data-bound artboard-
+                    // reference property resets the slot during updateDataBinds),
+                    // so the pre-advance `rig_text_ab` may dangle. The pre-advance
+                    // resolve stays correct for the writes.
+                    let read_nested = item
+                        .nested_target
+                        .as_ref()
+                        .and_then(|t| t.resolve(&inst.artboard));
+                    rb.rig_values = crate::rig::read_rig_slice(
+                        read_nested.as_ref().unwrap_or(&inst.artboard),
+                        &item.rig_reads,
+                    );
+                }
+                if item.focus_read {
+                    rb.focus = Some(inst.state_machine.focus_state());
+                }
+                if item.playhead_read {
+                    rb.playhead = Some((inst.state_machine.time(), inst.state_machine.duration()));
+                }
+                if !rb.is_empty() {
+                    readbacks.push(rb);
                 }
             }
 
@@ -2635,23 +2748,40 @@ impl Node for RiveFillNode {
                     inst.state_machine.advance(item.step);
                     frame_advance_us += advance_t0.elapsed().as_secs_f64() * 1.0e6;
 
-                    // M-READBACK: read watches + flush observes after advance (see
-                    // the dedicated path — same gate, same channel).
-                    if apply_vm_writes
-                        && (!item.vm_watch.is_empty() || !item.vm_observe.is_empty())
-                    {
-                        let values =
-                            crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
-                        let fired = crate::view_model::drain_observed_slice(
-                            &inst.artboard,
-                            &item.vm_observe,
-                        );
-                        if !values.is_empty() || !fired.is_empty() {
-                            vm_readbacks.push(VmReadback {
-                                entity: item.entity,
-                                values,
-                                fired,
-                            });
+                    // M-READBACK: read all registered reads after advance (see the
+                    // dedicated path — same gate, same channel, same nested-redirect
+                    // for rig reads vs root for vm/focus/playhead).
+                    if apply_vm_writes {
+                        let mut rb = Readback::new(item.entity);
+                        if !item.vm_watch.is_empty() || !item.vm_observe.is_empty() {
+                            rb.vm_values =
+                                crate::view_model::read_watch_slice(&inst.artboard, &item.vm_watch);
+                            rb.vm_fired = crate::view_model::drain_observed_slice(
+                                &inst.artboard,
+                                &item.vm_observe,
+                            );
+                        }
+                        if !item.rig_reads.is_empty() {
+                            // Re-resolve the nested target AFTER advance (see the
+                            // dedicated path — advance can replace the nested child).
+                            let read_nested = item
+                                .nested_target
+                                .as_ref()
+                                .and_then(|t| t.resolve(&inst.artboard));
+                            rb.rig_values = crate::rig::read_rig_slice(
+                                read_nested.as_ref().unwrap_or(&inst.artboard),
+                                &item.rig_reads,
+                            );
+                        }
+                        if item.focus_read {
+                            rb.focus = Some(inst.state_machine.focus_state());
+                        }
+                        if item.playhead_read {
+                            rb.playhead =
+                                Some((inst.state_machine.time(), inst.state_machine.duration()));
+                        }
+                        if !rb.is_empty() {
+                            readbacks.push(rb);
                         }
                     }
                 }
@@ -2872,10 +3002,10 @@ impl Node for RiveFillNode {
         }
 
         // M-READBACK: ship this frame's read-backs to the main world (one short
-        // lock; drained by `drain_vm_readback` at the next frame's PreUpdate).
-        if !vm_readbacks.is_empty() {
-            if let Some(channel) = world.get_resource::<RiveVmReadbackChannel>() {
-                channel.0.lock().unwrap().append(&mut vm_readbacks);
+        // lock; drained by `drain_readback` at the next frame's PreUpdate).
+        if !readbacks.is_empty() {
+            if let Some(channel) = world.get_resource::<RiveReadbackChannel>() {
+                channel.0.lock().unwrap().append(&mut readbacks);
             }
         }
 

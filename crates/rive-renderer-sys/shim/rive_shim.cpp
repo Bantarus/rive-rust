@@ -632,6 +632,11 @@ static RiveArtboard* make_artboard_handle(rive::File* file,
         return nullptr;
     }
     handle->artboard = std::move(ab);
+    // Stash the borrowed File* so the view-model TU can reach the VM definitions
+    // (rive::ViewModelRuntime) to mint fresh instances + source BindableArtboards
+    // without a retained Rust File. Safe: the ArtboardInstance holds an
+    // rcp<const File>, so the File outlives this handle.
+    handle->file = file;
 
     // Bind the artboard's DEFAULT view-model instance so editor-authored data
     // bindings resolve at runtime — including a script's view-model `Input<...>`
@@ -804,6 +809,37 @@ extern "C" void rive_bindable_artboard_destroy(RiveBindableArtboard* bindable)
         return;
     bindable->bindable = nullptr;
     delete bindable;
+}
+
+// Source a BindableArtboard from an ARTBOARD handle's own File (the stashed file*),
+// so the Bevy layer can bind a `propertyArtboard` slot WITHOUT retaining a Rust
+// File. Same value + ownership as rive_file_bindable_artboard_named, just reached
+// through the artboard instead of the File handle.
+extern "C" RiveBindableArtboard* rive_artboard_bindable_artboard_named(RiveArtboard* artboard,
+                                                                       const char* name)
+{
+    if (artboard == nullptr || artboard->file == nullptr || name == nullptr)
+    {
+        set_error("rive_artboard_bindable_artboard_named: invalid artboard or name");
+        return nullptr;
+    }
+    rive::rcp<rive::BindableArtboard> ba = artboard->file->bindableArtboardNamed(name);
+    if (ba == nullptr)
+        set_error("rive::File::bindableArtboardNamed found no artboard with that name");
+    return wrap_bindable(std::move(ba));
+}
+
+extern "C" RiveBindableArtboard* rive_artboard_bindable_artboard_default(RiveArtboard* artboard)
+{
+    if (artboard == nullptr || artboard->file == nullptr)
+    {
+        set_error("rive_artboard_bindable_artboard_default: invalid artboard");
+        return nullptr;
+    }
+    rive::rcp<rive::BindableArtboard> ba = artboard->file->bindableArtboardDefault();
+    if (ba == nullptr)
+        set_error("rive::File::bindableArtboardDefault returned null (no artboards)");
+    return wrap_bindable(std::move(ba));
 }
 
 // Wraps a Scene (state machine / animation) into a RiveStateMachine handle,

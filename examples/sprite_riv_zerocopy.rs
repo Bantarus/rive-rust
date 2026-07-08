@@ -70,10 +70,39 @@ use bevy::window::PresentMode;
 use bevy::winit::WinitSettings;
 
 use bevy_rive::{
-    install_interlock_device_callback, BoneProp, RiveActive, RiveAnimation, RiveAtlasKey,
-    RiveFile, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling, RiveSurface,
-    RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
+    install_interlock_device_callback, BoneProp, NewViewModel, RiveActive, RiveAnimation,
+    RiveAtlasKey, RiveFile, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling,
+    RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
 };
+
+/// A one-shot structural list command parsed from `RIVE_VM_LIST` (see `Cfg::vm_list`).
+#[derive(Clone)]
+enum VmListOp {
+    Clear,
+    Swap(usize, usize),
+    Remove(usize),
+    Add(String),
+}
+
+/// Parses `RIVE_VM_LIST="op;path[;args]"` into `(path, op)`. Returns `None` (with a
+/// warning) on a malformed spec.
+fn parse_vm_list(spec: &str) -> Option<(String, VmListOp)> {
+    let parts: Vec<&str> = spec.split(';').collect();
+    let op = match parts.as_slice() {
+        ["clear", path] => (path, VmListOp::Clear),
+        ["remove", path, i] => (path, VmListOp::Remove(i.trim().parse().ok()?)),
+        ["add", path, vm] => (path, VmListOp::Add((*vm).to_string())),
+        ["swap", path, ab] => {
+            let (a, b) = ab.split_once(',')?;
+            (path, VmListOp::Swap(a.trim().parse().ok()?, b.trim().parse().ok()?))
+        }
+        _ => {
+            warn!("RIVE_VM_LIST: bad spec {spec:?} (want op;path[;args])");
+            return None;
+        }
+    };
+    Some((op.0.trim().to_string(), op.1))
+}
 
 #[derive(Resource)]
 struct Cfg {
@@ -116,6 +145,13 @@ struct Cfg {
     /// M-READBACK: `RIVE_VM_OBSERVE="p1,p2"` — observe these paths; `report_vm_readback`
     /// counts + logs the resulting `RivePropertyChanged` messages.
     vm_observe: Vec<String>,
+    /// M-LIST: `RIVE_VM_LIST="op;path[;args]"` — queue ONE structural list command at
+    /// spawn (ferried through the render-world advance path, proving the zero-copy
+    /// list ferry). `op` ∈ clear / swap (args `a,b`) / remove (arg `i`) / add (arg
+    /// `VmName`, constructs a blank instance + appends). `None` by default. E.g.
+    /// `RIVE_RIV=25759-48234-slot-machine-game-with-scripting.riv`
+    /// `RIVE_VM_LIST="clear;Chicken/WheelCenter/WheelList"`.
+    vm_list: Option<(String, VmListOp)>,
     /// M-READBACK: `RIVE_RIG_WATCH="name"` — watch bone `name` rotation + constraint
     /// `name` strength on each face and log the read-backs (`""` = first unnamed).
     rig_watch: Option<String>,
@@ -315,6 +351,9 @@ fn main() {
         vm_oneshot: std::env::var_os("RIVE_VM_ONESHOT").is_some(),
         vm_watch,
         vm_observe,
+        vm_list: std::env::var("RIVE_VM_LIST")
+            .ok()
+            .and_then(|s| parse_vm_list(s.trim())),
         rig_watch,
         rig_spin,
         watch_playhead,
@@ -386,7 +425,11 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         // M-READBACK: the same component carries the watch/observe registrations —
         // the render node reads/flushes them after advance and the results come back
         // over the render→main channel (RIVE_VM_WATCH / RIVE_VM_OBSERVE).
-        if cfg.vm_set_enum.is_some() || cfg.vm_watch.is_some() || !cfg.vm_observe.is_empty() {
+        if cfg.vm_set_enum.is_some()
+            || cfg.vm_watch.is_some()
+            || !cfg.vm_observe.is_empty()
+            || cfg.vm_list.is_some()
+        {
             let mut vm = RiveViewModel::default();
             if cfg.vm_oneshot {
                 if let Some((path, index)) = &cfg.vm_set_enum {
@@ -398,6 +441,19 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
             }
             for path in &cfg.vm_observe {
                 vm.observe(path.clone());
+            }
+            // M-LIST: queue the one-shot structural command (ferried through the
+            // zero-copy advance path; retained across the async-load window like the
+            // one-shot enum write above, so it lands once the face goes live).
+            if let Some((path, op)) = &cfg.vm_list {
+                match op {
+                    VmListOp::Clear => vm.list_clear(path.clone()),
+                    VmListOp::Swap(a, b) => vm.list_swap(path.clone(), *a, *b),
+                    VmListOp::Remove(i) => vm.list_remove_at(path.clone(), *i),
+                    VmListOp::Add(name) => {
+                        vm.list_add_new(path.clone(), NewViewModel::blank(name.clone()));
+                    }
+                }
             }
             e.insert(vm);
         }

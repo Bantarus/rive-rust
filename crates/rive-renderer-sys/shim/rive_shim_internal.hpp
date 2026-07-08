@@ -31,6 +31,7 @@
 namespace rive {
 class RenderImage; // full type only needed where a RiveImage is built/destroyed
 class BindableArtboard; // full type only where a RiveBindableArtboard is built/destroyed
+class File; // borrowed File* stashed on RiveArtboard (for VM-runtime construction)
 // Typed alias of RiveStateMachine.scene used by the input TU (keyboard/gamepad/
 // focus live on StateMachineInstance, not the base Scene). The runtime is built
 // -fno-rtti, so we can't downcast `scene` back — instead the selectors capture
@@ -61,6 +62,19 @@ struct RiveBindableArtboard
     rive::rcp<rive::BindableArtboard> bindable;
 };
 
+// An OWNED, freshly-constructed view-model INSTANCE — minted by
+// rive_view_model_create_* from a RiveViewModelRuntime (see the view-model TU).
+// Unlike the BORROWED RiveViewModelInstance handles (which alias instances rive's
+// caches own), a freshly created instance is owned ONLY by this rcp until it is
+// added to a list (rive_vmi_list_add*) or assigned to a VM-reference property
+// (rive_vmi_replace_view_model), after which the list/parent co-owns it. Freed by
+// rive_owned_vmi_destroy; borrow it into the get/set surface with
+// rive_owned_vmi_borrow (its .get() reinterpret-casts to a RiveViewModelInstance).
+struct RiveOwnedVmInstance
+{
+    rive::rcp<rive::ViewModelInstanceRuntime> inst;
+};
+
 // One artboard instance + its bound default view model. DEFINED here (not in
 // rive_shim.cpp) so the view-model TU can reach `vmRuntime`. The other opaque
 // handle structs stay in rive_shim.cpp until a second TU needs them.
@@ -83,6 +97,14 @@ struct RiveArtboard
     {
         return borrowed != nullptr ? borrowed : artboard.get();
     }
+    // The File this artboard was instanced from (borrowed). Stashed at construction
+    // (make_artboard_handle) — the native File outlives the handle because the
+    // ArtboardInstance holds an rcp<const File>. Used to reach the view-model
+    // DEFINITIONS (rive::ViewModelRuntime) for minting fresh instances + to source
+    // BindableArtboards, WITHOUT retaining the Rust File. Propagated to borrowed
+    // nested-child handles so construction works from a nested artboard too. Null
+    // only for a handle built without a File (none in practice).
+    rive::File* file = nullptr;
     // The artboard's default view-model instance, bound so editor-authored data
     // bindings (incl. scripted view-model inputs) resolve at runtime. Held here
     // so the SAME instance is also bound to the state machine. Null for artboards

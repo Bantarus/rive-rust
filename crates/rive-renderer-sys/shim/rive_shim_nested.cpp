@@ -47,8 +47,10 @@ void copy_to_caller(const std::string& s, char* buf, size_t cap, size_t* out_len
 }
 
 // Wrap a borrowed child instance in a heap RiveArtboard (owned `artboard` left
-// null, so destroy frees only the wrapper). Null + error on OOM.
-RiveArtboard* make_borrowed(rive::ArtboardInstance* child)
+// null, so destroy frees only the wrapper). `file` is the parent handle's borrowed
+// File*, propagated so view-model construction works from a nested handle too. Null
+// + error on OOM.
+RiveArtboard* make_borrowed(rive::ArtboardInstance* child, rive::File* file)
 {
     auto* h = new (std::nothrow) RiveArtboard();
     if (h == nullptr)
@@ -57,6 +59,7 @@ RiveArtboard* make_borrowed(rive::ArtboardInstance* child)
         return nullptr;
     }
     h->borrowed = child;
+    h->file = file;
     return h;
 }
 } // namespace
@@ -117,7 +120,7 @@ extern "C" RiveArtboard* rive_artboard_nested_at(RiveArtboard* artboard, uint32_
         shim_set_error("nested artboard has no mounted instance");
         return nullptr;
     }
-    return make_borrowed(child);
+    return make_borrowed(child, artboard->file);
 }
 
 // Resolve a nested child by its NestedArtboard component name; returns a BORROWED
@@ -143,7 +146,7 @@ extern "C" RiveArtboard* rive_artboard_nested_named(RiveArtboard* artboard, cons
         shim_set_error("nested artboard has no mounted instance");
         return nullptr;
     }
-    return make_borrowed(child);
+    return make_borrowed(child, artboard->file);
 }
 
 // Resolve a nested child by a '/'-delimited path ("child/grandchild") that descends
@@ -169,5 +172,5 @@ extern "C" RiveArtboard* rive_artboard_nested_at_path(RiveArtboard* artboard, co
         shim_set_error("nested artboard has no mounted instance");
         return nullptr;
     }
-    return make_borrowed(child);
+    return make_borrowed(child, artboard->file);
 }

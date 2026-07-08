@@ -61,8 +61,23 @@ typedef struct RiveImage RiveImage;
 /* An OWNED, file-sourced artboard value — the value source for artboard-reference
  * (propertyArtboard) data binding (rive_artboard_vm_set_artboard / rive_vmi_set_artboard),
  * the artboard analogue of RiveImage. Created by rive_file_bindable_artboard_named /
- * _default and freed with rive_bindable_artboard_destroy. */
+ * _default (or rive_artboard_bindable_artboard_* from an artboard's own file) and
+ * freed with rive_bindable_artboard_destroy. */
 typedef struct RiveBindableArtboard RiveBindableArtboard;
+
+/* A view-model DEFINITION (rive::ViewModelRuntime) — BORROWED, owned by the File
+ * (valid while the owning RiveArtboard lives). Reached via
+ * rive_artboard_view_model_by_name/_index / rive_artboard_default_view_model; mints
+ * fresh instances via rive_view_model_create_*. Never freed by Rust. */
+typedef struct RiveViewModelRuntime RiveViewModelRuntime;
+
+/* An OWNED, freshly-constructed view-model INSTANCE — minted by
+ * rive_view_model_create_* to be added to a list (rive_vmi_list_add*) or assigned to
+ * a VM-reference property (rive_vmi_replace_view_model). Caller-owned: borrow it into
+ * the get/set surface with rive_owned_vmi_borrow, and free with rive_owned_vmi_destroy
+ * (the list/parent co-owns it after a successful add/assign, so destroying it then is
+ * safe). */
+typedef struct RiveOwnedVmInstance RiveOwnedVmInstance;
 
 /* 0 == success; nonzero == failure (see rive_last_error). */
 typedef int32_t RiveStatus;
@@ -195,6 +210,11 @@ RiveArtboard*      rive_artboard_nested_at_path(RiveArtboard*, const char* path)
 RiveBindableArtboard* rive_file_bindable_artboard_named(RiveFile*, const char* name);
 RiveBindableArtboard* rive_file_bindable_artboard_default(RiveFile*);
 void                  rive_bindable_artboard_destroy(RiveBindableArtboard*);
+/* Same value, sourced from an ARTBOARD handle's own File (its stashed file*) — lets
+ * a caller that holds only an artboard (e.g. the Bevy layer, which drops the Rust
+ * File after build) bind a propertyArtboard without retaining a File. */
+RiveBindableArtboard* rive_artboard_bindable_artboard_named(RiveArtboard*, const char* name);
+RiveBindableArtboard* rive_artboard_bindable_artboard_default(RiveArtboard*);
 
 /* Instantiates a scene/state machine to play. `_default` prefers the designer
  * default state machine, then falls back to the default Scene (first state
@@ -340,6 +360,45 @@ RiveStatus         rive_vmi_set_image(RiveViewModelInstance*, const char* path, 
 /* Bind a file-sourced BindableArtboard to a nested-VM or LIST-ITEM artboard property; NULL clears. */
 RiveStatus         rive_vmi_set_artboard(RiveViewModelInstance*, const char* path,
                                          RiveBindableArtboard* bindable);
+
+/* --- View-model INSTANCE construction + LIST structural mutation -------------
+ * Mint fresh, caller-OWNED view-model instances from a view-model DEFINITION
+ * (RiveViewModelRuntime, reached from an artboard's stashed File) and add/remove/
+ * swap them in a list property, or assign one to a VM-reference property. A newly
+ * created RiveOwnedVmInstance is owned ONLY by its handle until added/assigned (then
+ * the list/parent co-owns it); borrow it into the get/set surface above to populate
+ * it first, and free it with rive_owned_vmi_destroy. List indices are positional and
+ * shift on add/remove/swap. Implemented in rive_shim_viewmodel.cpp. */
+uint32_t               rive_artboard_view_model_count(RiveArtboard*);
+RiveViewModelRuntime*  rive_artboard_view_model_by_name(RiveArtboard*, const char* name);
+RiveViewModelRuntime*  rive_artboard_view_model_by_index(RiveArtboard*, uint32_t index);
+RiveViewModelRuntime*  rive_artboard_default_view_model(RiveArtboard*);
+RiveStatus             rive_view_model_name(RiveViewModelRuntime*, char* buf, size_t cap,
+                                            size_t* out_len);
+uint32_t               rive_view_model_instance_count(RiveViewModelRuntime*);
+RiveStatus             rive_view_model_instance_name_at(RiveViewModelRuntime*, uint32_t index,
+                                                        char* buf, size_t cap, size_t* out_len);
+RiveOwnedVmInstance*   rive_view_model_create_instance(RiveViewModelRuntime*);
+RiveOwnedVmInstance*   rive_view_model_create_default_instance(RiveViewModelRuntime*);
+RiveOwnedVmInstance*   rive_view_model_create_instance_from_name(RiveViewModelRuntime*,
+                                                                 const char* name);
+RiveOwnedVmInstance*   rive_view_model_create_instance_from_index(RiveViewModelRuntime*,
+                                                                  uint32_t index);
+RiveViewModelInstance* rive_owned_vmi_borrow(RiveOwnedVmInstance*);
+void                   rive_owned_vmi_destroy(RiveOwnedVmInstance*);
+RiveStatus         rive_vmi_list_add(RiveViewModelInstance*, const char* path,
+                                     RiveViewModelInstance* item);
+RiveStatus         rive_vmi_list_add_at(RiveViewModelInstance*, const char* path,
+                                        RiveViewModelInstance* item, uint32_t index);
+RiveStatus         rive_vmi_list_remove(RiveViewModelInstance*, const char* path,
+                                        RiveViewModelInstance* item);
+RiveStatus         rive_vmi_list_remove_at(RiveViewModelInstance*, const char* path, uint32_t index);
+RiveStatus         rive_vmi_list_swap(RiveViewModelInstance*, const char* path,
+                                      uint32_t a, uint32_t b);
+RiveStatus         rive_vmi_list_clear(RiveViewModelInstance*, const char* path);
+/* Assign `value` to a VM-reference property (`/` descends); fails on a type mismatch. */
+RiveStatus         rive_vmi_replace_view_model(RiveViewModelInstance*, const char* path,
+                                               RiveViewModelInstance* value);
 
 /* --- Text runs (get/set a TextValueRun's string) ----------------------------
  * Read / write a named text run's string at runtime. `name` is the run's

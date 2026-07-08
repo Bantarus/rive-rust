@@ -18,8 +18,12 @@
 //! Rive data-binding docs (https://rive.app/docs).
 //!
 //! Covers number / bool / trigger / color / string / enum, plus **image** writes
-//! ([`RiveViewModel::set_image`] — encoded bytes decoded + bound before advance).
-//! The component is tier-agnostic and works in **both tiers**:
+//! ([`RiveViewModel::set_image`] — encoded bytes decoded + bound before advance),
+//! **artboard-reference** writes ([`RiveViewModel::set_artboard`] / `clear_artboard`),
+//! and **structural** list commands ([`RiveViewModel::list_add_new`] /
+//! `list_insert_new` / `list_remove_at` / `list_swap` / `list_clear`) + VM-reference
+//! replacement ([`RiveViewModel::replace_view_model`]) — construct a new instance with
+//! [`NewViewModel`]. The component is tier-agnostic and works in **both tiers**:
 //! - **Writes**: the `floor` advance system applies them inline; the `zero_copy`
 //!   tier ferries them to the render world (where its instances live) via a
 //!   per-frame staging buffer.
@@ -61,6 +65,11 @@ pub enum RiveValue {
     /// (write-only). Decoded at apply time via the owning context. `Arc` so the
     /// `zero_copy` ferry to the render world is a cheap refcount bump.
     Image(Arc<[u8]>),
+    /// An **artboard-reference** binding (`propertyArtboard`, write-only): `Some(name)`
+    /// binds the artboard of that name from the face's **own file**; `None` clears it.
+    /// Resolved to a `BindableArtboard` at apply time (no demo asset authors this
+    /// property, so it is API-verified — see `docs/feature-support.md`).
+    ArtboardRef(Option<String>),
 }
 
 impl std::fmt::Debug for RiveValue {
@@ -75,6 +84,7 @@ impl std::fmt::Debug for RiveValue {
             Self::Trigger => f.write_str("Trigger"),
             // Don't dump the buffer — just its size (see the type doc).
             Self::Image(bytes) => write!(f, "Image({} bytes)", bytes.len()),
+            Self::ArtboardRef(name) => f.debug_tuple("ArtboardRef").field(name).finish(),
         }
     }
 }
@@ -111,16 +121,153 @@ pub struct RivePropertyChanged {
     pub path: String,
 }
 
+/// How to construct a fresh view-model instance for [`NewViewModel`] — mirrors
+/// rive's `ViewModelRuntime::create*` verbs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VmSource {
+    /// A blank instance (all default property values).
+    Blank,
+    /// The editor's default instance (falls back to blank if none authored).
+    Default,
+    /// A clone of the editor instance with this name.
+    FromName(String),
+    /// A clone of the editor instance at this index.
+    FromIndex(usize),
+}
+
+/// A description of a **new view-model instance** to construct and add to a list
+/// ([`RiveViewModel::list_add_new`] / [`RiveViewModel::list_insert_new`]) or assign to
+/// a VM-reference property ([`RiveViewModel::replace_view_model`]). Names the
+/// view-model definition (`vm`), how to seed it (`source`), and any initial property
+/// writes (`init`, applied to the new instance before it is added — flat paths
+/// relative to it). Build with [`Self::blank`] / [`Self::default_instance`] /
+/// [`Self::from_name`] / [`Self::from_index`], then chain `with_*` seeds.
+///
+/// ```no_run
+/// # use bevy_rive::prelude::*;
+/// let item = NewViewModel::blank("WheelItem")
+///     .with_number("value", 7.0)
+///     .with_string("label", "Cherry");
+/// # let _ = item;
+/// ```
+#[derive(Debug, Clone, PartialEq)]
+pub struct NewViewModel {
+    vm: String,
+    source: VmSource,
+    init: Vec<(String, RiveValue)>,
+}
+
+impl NewViewModel {
+    /// A blank instance of view-model definition `vm`.
+    pub fn blank(vm: impl Into<String>) -> Self {
+        Self::new(vm, VmSource::Blank)
+    }
+    /// The editor's default instance of `vm` (falls back to blank).
+    pub fn default_instance(vm: impl Into<String>) -> Self {
+        Self::new(vm, VmSource::Default)
+    }
+    /// A clone of the editor instance named `instance` of definition `vm`.
+    pub fn from_name(vm: impl Into<String>, instance: impl Into<String>) -> Self {
+        Self::new(vm, VmSource::FromName(instance.into()))
+    }
+    /// A clone of the editor instance at `index` of definition `vm`.
+    pub fn from_index(vm: impl Into<String>, index: usize) -> Self {
+        Self::new(vm, VmSource::FromIndex(index))
+    }
+    fn new(vm: impl Into<String>, source: VmSource) -> Self {
+        Self { vm: vm.into(), source, init: Vec::new() }
+    }
+
+    /// Seeds a **number** property on the new instance. Chainable.
+    #[must_use]
+    pub fn with_number(mut self, path: impl Into<String>, value: f32) -> Self {
+        self.init.push((path.into(), RiveValue::Number(value)));
+        self
+    }
+    /// Seeds a **bool** property. Chainable.
+    #[must_use]
+    pub fn with_bool(mut self, path: impl Into<String>, value: bool) -> Self {
+        self.init.push((path.into(), RiveValue::Bool(value)));
+        self
+    }
+    /// Seeds a **color** property (ARGB). Chainable.
+    #[must_use]
+    pub fn with_color(mut self, path: impl Into<String>, argb: u32) -> Self {
+        self.init.push((path.into(), RiveValue::Color(argb)));
+        self
+    }
+    /// Seeds a **string** property. Chainable.
+    #[must_use]
+    pub fn with_string(mut self, path: impl Into<String>, value: impl Into<String>) -> Self {
+        self.init.push((path.into(), RiveValue::Text(value.into())));
+        self
+    }
+    /// Seeds an **enum** property by 0-based value index. Chainable.
+    #[must_use]
+    pub fn with_enum_index(mut self, path: impl Into<String>, index: u32) -> Self {
+        self.init.push((path.into(), RiveValue::EnumIndex(index)));
+        self
+    }
+    /// Seeds an **enum** property by value label. Chainable.
+    #[must_use]
+    pub fn with_enum_name(mut self, path: impl Into<String>, name: impl Into<String>) -> Self {
+        self.init.push((path.into(), RiveValue::EnumName(name.into())));
+        self
+    }
+    /// Seeds an **image** property (encoded PNG/JPEG/WEBP bytes). Chainable.
+    #[must_use]
+    pub fn with_image(mut self, path: impl Into<String>, bytes: impl Into<Arc<[u8]>>) -> Self {
+        self.init.push((path.into(), RiveValue::Image(bytes.into())));
+        self
+    }
+    /// Seeds an **artboard-reference** property (bind the named artboard from the
+    /// face's own file). Chainable.
+    #[must_use]
+    pub fn with_artboard(mut self, path: impl Into<String>, artboard: impl Into<String>) -> Self {
+        self.init
+            .push((path.into(), RiveValue::ArtboardRef(Some(artboard.into()))));
+        self
+    }
+}
+
+/// A queued **structural** command against a view-model list / VM-reference —
+/// ferried + applied before advance like a write (both tiers), but not expressible as
+/// a `(path, value)` write. `path` addresses the list (or VM-ref) — a flat/`/`-nested
+/// path, or `name[i]/...` to reach through a list item (resolved via
+/// [`rive_renderer::Artboard::vm_resolve`]).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ListCmd {
+    /// Construct a new instance and append it (`index` = None) or insert it at `index`.
+    AddNew { path: String, item: NewViewModel, index: Option<usize> },
+    /// Remove the item at `index`.
+    RemoveAt { path: String, index: usize },
+    /// Swap the items at `a` and `b`.
+    Swap { path: String, a: usize, b: usize },
+    /// Remove all items.
+    Clear { path: String },
+    /// Construct a new instance and assign it to the VM-reference property at `path`.
+    ReplaceViewModel { path: String, item: NewViewModel },
+}
+
 /// Read/write a face's view-model properties. Spawn alongside `RiveAnimation`.
 #[derive(Component, Default, Debug)]
 pub struct RiveViewModel {
     /// Pending writes, drained + applied before each advance.
     writes: Vec<(String, RiveValue)>,
+    /// Pending **structural** commands (list add/remove/swap/clear + VM-ref replace),
+    /// drained + applied before each advance, AFTER `writes` — so a value write on an
+    /// existing item lands before a same-frame restructure. Populate a NEWLY
+    /// constructed item via [`NewViewModel`]'s `with_*` seeds (its index isn't known
+    /// until apply), not a follow-up indexed write. Ferried like `writes`.
+    list_cmds: Vec<ListCmd>,
     /// `zero_copy` double-buffer: `writes` are moved here (main world) so the
     /// read-only extract step can ferry them to the render world, then they are
     /// cleared the following frame. Absent under `floor` (it drains `writes` inline).
     #[cfg(feature = "zero_copy")]
     staged: Vec<(String, RiveValue)>,
+    /// `zero_copy` double-buffer for `list_cmds` (mirrors `staged`).
+    #[cfg(feature = "zero_copy")]
+    staged_cmds: Vec<ListCmd>,
     /// Paths refreshed into `values` after each advance, with how to read each.
     watch: Vec<(String, WatchKind)>,
     /// Paths observed for change/fire — each emits a [`RivePropertyChanged`] on the
@@ -183,6 +330,63 @@ impl RiveViewModel {
     /// may descend nested view models (`/`) or index a list item (`name[i]`).
     pub fn set_image(&mut self, path: impl Into<String>, bytes: impl Into<Arc<[u8]>>) {
         self.writes.push((path.into(), RiveValue::Image(bytes.into())));
+    }
+
+    /// Queues a write to an **artboard-reference** (`propertyArtboard`) property:
+    /// binds the artboard named `artboard` **from the face's own file** (so a
+    /// `NestedArtboard` bound to this property instances it on the next advance). The
+    /// path may descend nested view models (`/`) or index a list item (`name[i]`).
+    pub fn set_artboard(&mut self, path: impl Into<String>, artboard: impl Into<String>) {
+        self.writes
+            .push((path.into(), RiveValue::ArtboardRef(Some(artboard.into()))));
+    }
+
+    /// Queues a clear of an **artboard-reference** property (unbinds any bound artboard).
+    pub fn clear_artboard(&mut self, path: impl Into<String>) {
+        self.writes.push((path.into(), RiveValue::ArtboardRef(None)));
+    }
+
+    // ---- list structural mutation + VM-instance construction ----
+
+    /// Constructs a new view-model instance (per `item`) and **appends** it to the
+    /// list property at `path`. Applied before the next advance, in both tiers. The
+    /// new item's index is the list's length at apply time; to populate it, seed
+    /// `item` via [`NewViewModel`]'s `with_*` (preferred — no index guessing) rather
+    /// than a follow-up indexed write.
+    pub fn list_add_new(&mut self, path: impl Into<String>, item: NewViewModel) {
+        self.list_cmds
+            .push(ListCmd::AddNew { path: path.into(), item, index: None });
+    }
+
+    /// Constructs a new view-model instance (per `item`) and **inserts** it at `index`
+    /// in the list at `path` (valid range `0..=len`; `index == len` appends).
+    pub fn list_insert_new(&mut self, path: impl Into<String>, index: usize, item: NewViewModel) {
+        self.list_cmds
+            .push(ListCmd::AddNew { path: path.into(), item, index: Some(index) });
+    }
+
+    /// Removes the item at `index` from the list at `path`.
+    pub fn list_remove_at(&mut self, path: impl Into<String>, index: usize) {
+        self.list_cmds
+            .push(ListCmd::RemoveAt { path: path.into(), index });
+    }
+
+    /// Swaps the items at `a` and `b` in the list at `path`.
+    pub fn list_swap(&mut self, path: impl Into<String>, a: usize, b: usize) {
+        self.list_cmds.push(ListCmd::Swap { path: path.into(), a, b });
+    }
+
+    /// Removes all items from the list at `path`, leaving it empty.
+    pub fn list_clear(&mut self, path: impl Into<String>) {
+        self.list_cmds.push(ListCmd::Clear { path: path.into() });
+    }
+
+    /// Constructs a new view-model instance (per `item`) and assigns it to the
+    /// **view-model-reference** property at `path`. The new instance's view-model type
+    /// must match the property's referenced type.
+    pub fn replace_view_model(&mut self, path: impl Into<String>, item: NewViewModel) {
+        self.list_cmds
+            .push(ListCmd::ReplaceViewModel { path: path.into(), item });
     }
 
     /// Registers a **number** property to read back into [`Self::values`] each
@@ -280,12 +484,15 @@ impl RiveViewModel {
     /// change-detection mark), so the staging system can skip idle components.
     #[cfg(feature = "zero_copy")]
     pub(crate) fn has_staging_work(&self) -> bool {
-        !self.writes.is_empty() || !self.staged.is_empty()
+        !self.writes.is_empty()
+            || !self.staged.is_empty()
+            || !self.list_cmds.is_empty()
+            || !self.staged_cmds.is_empty()
     }
 
-    /// `zero_copy`: move this frame's queued writes into the staging buffer (or
-    /// clear last frame's), so the read-only extract can ferry them. Called once
-    /// per frame after gameplay, before extract.
+    /// `zero_copy`: move this frame's queued writes + structural commands into their
+    /// staging buffers (or clear last frame's), so the read-only extract can ferry
+    /// them. Called once per frame after gameplay, before extract.
     #[cfg(feature = "zero_copy")]
     pub(crate) fn stage_writes(&mut self) {
         if self.writes.is_empty() {
@@ -293,12 +500,23 @@ impl RiveViewModel {
         } else {
             self.staged = std::mem::take(&mut self.writes);
         }
+        if self.list_cmds.is_empty() {
+            self.staged_cmds.clear();
+        } else {
+            self.staged_cmds = std::mem::take(&mut self.list_cmds);
+        }
     }
 
     /// `zero_copy`: the writes staged for this frame (ferried by extract).
     #[cfg(feature = "zero_copy")]
     pub(crate) fn staged(&self) -> &[(String, RiveValue)] {
         &self.staged
+    }
+
+    /// `zero_copy`: the structural commands staged for this frame (ferried by extract).
+    #[cfg(feature = "zero_copy")]
+    pub(crate) fn staged_cmds(&self) -> &[ListCmd] {
+        &self.staged_cmds
     }
 
     /// `zero_copy`: the registered watch list (path + declared type), ferried by
@@ -360,6 +578,10 @@ fn apply_flat_write(
         RiveValue::EnumName(n) => artboard.vm_set_enum_name(path, n),
         RiveValue::Trigger => artboard.vm_fire_trigger(path),
         RiveValue::Image(bytes) => artboard.vm_set_image(path, &ctx.decode_image(bytes)?),
+        RiveValue::ArtboardRef(Some(name)) => {
+            artboard.vm_set_artboard(path, &artboard.bindable_artboard_named(name)?)
+        }
+        RiveValue::ArtboardRef(None) => artboard.vm_clear_artboard(path),
     }
 }
 
@@ -374,16 +596,122 @@ fn apply_indexed_write(
     value: &RiveValue,
 ) -> rive_renderer::Result<()> {
     let (item, leaf) = artboard.vm_resolve(path)?;
+    apply_value_to_handle(ctx, artboard, &item, &leaf, value)
+}
+
+/// Writes `value` to `leaf` on a resolved view-model-instance `handle` — the shared
+/// per-property write path for indexed writes and for seeding a freshly constructed
+/// instance ([`build_new_vm`]). `artboard` is needed to source a `BindableArtboard`
+/// for an [`RiveValue::ArtboardRef`]; `ctx` to decode an [`RiveValue::Image`].
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+fn apply_value_to_handle(
+    ctx: &rive_renderer::Context,
+    artboard: &rive_renderer::Artboard,
+    handle: &rive_renderer::RiveViewModelInstance,
+    leaf: &str,
+    value: &RiveValue,
+) -> rive_renderer::Result<()> {
     match value {
-        RiveValue::Number(n) => item.set_number(&leaf, *n),
-        RiveValue::Bool(b) => item.set_bool(&leaf, *b),
-        RiveValue::Color(c) => item.set_color(&leaf, *c),
-        RiveValue::Text(s) => item.set_string(&leaf, s),
-        RiveValue::EnumIndex(i) => item.set_enum_index(&leaf, *i),
-        RiveValue::EnumName(n) => item.set_enum_name(&leaf, n),
-        RiveValue::Trigger => item.fire_trigger(&leaf),
-        RiveValue::Image(bytes) => item.set_image(&leaf, &ctx.decode_image(bytes)?),
+        RiveValue::Number(n) => handle.set_number(leaf, *n),
+        RiveValue::Bool(b) => handle.set_bool(leaf, *b),
+        RiveValue::Color(c) => handle.set_color(leaf, *c),
+        RiveValue::Text(s) => handle.set_string(leaf, s),
+        RiveValue::EnumIndex(i) => handle.set_enum_index(leaf, *i),
+        RiveValue::EnumName(n) => handle.set_enum_name(leaf, n),
+        RiveValue::Trigger => handle.fire_trigger(leaf),
+        RiveValue::Image(bytes) => handle.set_image(leaf, &ctx.decode_image(bytes)?),
+        RiveValue::ArtboardRef(Some(name)) => {
+            handle.set_artboard(leaf, &artboard.bindable_artboard_named(name)?)
+        }
+        RiveValue::ArtboardRef(None) => handle.clear_artboard(leaf),
     }
+}
+
+/// Applies a slice of structural list/VM-ref commands to the artboard's bound view
+/// model. Shared by both tiers (`floor` drains inline; `zero_copy` ferries a slice).
+/// Call **after** [`apply_writes_slice`] (see the `list_cmds` field doc). Per-command
+/// failures `warn!` and continue.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+pub(crate) fn apply_list_cmds_slice(
+    ctx: &rive_renderer::Context,
+    artboard: &rive_renderer::Artboard,
+    cmds: &[ListCmd],
+) {
+    for cmd in cmds {
+        if let Err(e) = apply_list_cmd(ctx, artboard, cmd) {
+            warn!("rive: view-model list command {cmd:?} failed: {e}");
+        }
+    }
+}
+
+/// Applies one structural command. `path` addresses the list (or VM-ref property);
+/// [`rive_renderer::Artboard::vm_resolve`] resolves it to the owning instance + the
+/// final (list/property) name, handling flat, `/`-nested, and `name[i]/…` paths.
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+fn apply_list_cmd(
+    ctx: &rive_renderer::Context,
+    artboard: &rive_renderer::Artboard,
+    cmd: &ListCmd,
+) -> rive_renderer::Result<()> {
+    match cmd {
+        ListCmd::RemoveAt { path, index } => {
+            let (owner, name) = artboard.vm_resolve(path)?;
+            owner.list_remove_at(&name, *index)
+        }
+        ListCmd::Swap { path, a, b } => {
+            let (owner, name) = artboard.vm_resolve(path)?;
+            owner.list_swap(&name, *a, *b)
+        }
+        ListCmd::Clear { path } => {
+            let (owner, name) = artboard.vm_resolve(path)?;
+            owner.list_clear(&name)
+        }
+        ListCmd::AddNew { path, item, index } => {
+            let owned = build_new_vm(ctx, artboard, item)?;
+            let (owner, name) = artboard.vm_resolve(path)?;
+            match index {
+                Some(i) => owner.list_add_at(&name, &owned.borrow(), *i),
+                None => owner.list_add(&name, &owned.borrow()),
+            }
+        }
+        ListCmd::ReplaceViewModel { path, item } => {
+            let owned = build_new_vm(ctx, artboard, item)?;
+            let (owner, leaf) = artboard.vm_resolve(path)?;
+            owner.replace_view_model(&leaf, &owned.borrow())
+        }
+    }
+}
+
+/// Constructs a fresh view-model instance per `item` (definition + source) and seeds
+/// its initial properties. The caller adds it to a list / assigns it (the list/parent
+/// then co-owns it). A bad seed `warn!`s and continues (one bad path doesn't abort
+/// the construct).
+#[cfg(any(feature = "floor", feature = "zero_copy"))]
+fn build_new_vm<'a>(
+    ctx: &rive_renderer::Context,
+    artboard: &'a rive_renderer::Artboard,
+    item: &NewViewModel,
+) -> rive_renderer::Result<rive_renderer::RiveOwnedViewModel<'a>> {
+    let def = artboard.view_model_by_name(&item.vm).ok_or_else(|| {
+        rive_renderer::Error::ViewModel(format!("view-model definition {:?} not found", item.vm))
+    })?;
+    let owned = match &item.source {
+        VmSource::Blank => def.create_instance()?,
+        VmSource::Default => def.create_default_instance()?,
+        VmSource::FromName(n) => def.create_instance_from_name(n)?,
+        VmSource::FromIndex(i) => def.create_instance_from_index(*i)?,
+    };
+    // Borrow the new instance to seed its properties; the borrow ends with this block
+    // (before `owned` is moved out — it aliases `owned`, which has no `Drop`).
+    {
+        let handle = owned.borrow();
+        for (p, v) in &item.init {
+            if let Err(e) = apply_value_to_handle(ctx, artboard, &handle, p, v) {
+                warn!("rive: new view-model seed {p:?} failed: {e}");
+            }
+        }
+    }
+    Ok(owned)
 }
 
 /// Drains queued writes to the artboard's bound view model. Call **before**
@@ -397,6 +725,19 @@ pub(crate) fn apply_writes(
 ) {
     let writes = std::mem::take(&mut vm.writes);
     apply_writes_slice(ctx, artboard, &writes);
+}
+
+/// Drains queued **structural** commands (list add/remove/swap/clear + VM-ref
+/// replace) to the artboard's bound view model. Call **after** [`apply_writes`] and
+/// **before** advancing (see the `list_cmds` field doc for the ordering rationale).
+#[cfg(feature = "floor")]
+pub(crate) fn apply_list_cmds(
+    ctx: &rive_renderer::Context,
+    vm: &mut RiveViewModel,
+    artboard: &rive_renderer::Artboard,
+) {
+    let cmds = std::mem::take(&mut vm.list_cmds);
+    apply_list_cmds_slice(ctx, artboard, &cmds);
 }
 
 /// Reads each watched path with its declared typed getter, returning the

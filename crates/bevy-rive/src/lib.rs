@@ -139,7 +139,7 @@ pub use zero_copy::{install_interlock_device_callback, RiveGraphAnchor, RiveZero
 // back over the `RiveReadbackChannel` render→main back-channel, one frame of
 // latency — see the module docs).
 mod view_model;
-pub use view_model::{RivePropertyChanged, RiveValue, RiveViewModel};
+pub use view_model::{NewViewModel, RivePropertyChanged, RiveValue, RiveViewModel, VmSource};
 
 // Per-feature module (the "add a Rive feature" convention). Out-of-band asset
 // loading: the `RiveAssets` component supplies externally-referenced images /
@@ -199,9 +199,9 @@ pub use audio::{monitor_peak, RiveAudioDecoder, RiveAudioStream, RiveExternalAud
 pub mod prelude {
     // Frozen components + asset — spawned identically by BOTH tiers.
     pub use crate::{
-        ArtboardSelector, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey, RiveAudio, RiveFile,
-        RiveFit, RiveInput, RiveNestedTarget, RivePointer, RivePropertyChanged, RiveRig,
-        RiveSampling, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel,
+        ArtboardSelector, NewViewModel, RiveActive, RiveAnimation, RiveAssets, RiveAtlasKey,
+        RiveAudio, RiveFile, RiveFit, RiveInput, RiveNestedTarget, RivePointer, RivePropertyChanged,
+        RiveRig, RiveSampling, RiveSurface, RiveTarget, RiveText, RiveValue, RiveViewModel, VmSource,
         StateMachineSelector,
     };
     // The fit/alignment enums needed to build a [`RiveFit`] (re-exported from rive_renderer).
@@ -1111,6 +1111,10 @@ fn advance_and_upload_rive(
         // caught (the shim's change flag only sees changes after subscription).
         if let Some(vm) = view_model.as_deref_mut() {
             crate::view_model::apply_writes(ctx, vm, &inst.artboard);
+            // Structural list/VM-ref commands after the value writes (see the
+            // `list_cmds` field doc): a same-frame value write on an existing item
+            // lands before a restructure; new items are seeded within the command.
+            crate::view_model::apply_list_cmds(ctx, vm, &inst.artboard);
             crate::view_model::prime_observed(vm, &inst.artboard);
         }
 

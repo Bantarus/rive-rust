@@ -586,17 +586,21 @@ fn parse_index_segment(seg: &str) -> Result<Option<(&str, usize)>> {
 
 /// A borrowed **view-model instance** handle — the artboard's root view model, a
 /// nested view model, or a list item. Obtained from [`Artboard::vm_root`] and
-/// navigated via [`Self::view_model`] / [`Self::list_item`].
+/// navigated via [`Self::view_model`] / [`Self::list_item`]; a freshly constructed
+/// instance also yields one via [`RiveOwnedViewModel::borrow`].
 ///
 /// **Borrowed:** it aliases an instance owned by rive's caches under the root view
-/// model, so the borrow checker ties it to the source [`Artboard`]. Supports scalar
-/// reads **and writes** (`set_*` / [`Self::fire_trigger`]) + introspection +
-/// navigation — so a caller can drive a nested view model or a **list item**, which
-/// the flat artboard-rooted `vm_set_*` path can't address (rive's resolver can't
-/// index lists; use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). It
-/// can also bind an **image** property ([`Self::set_image`]) or an **artboard
-/// reference** ([`Self::set_artboard`]). List *structural* mutation (add/remove/swap)
-/// is deferred (see `docs/feature-support.md`). `!Send`/`!Sync` (rive handles are not thread-safe).
+/// model (or, from [`RiveOwnedViewModel::borrow`], the owned instance), so the borrow
+/// checker ties it to the source [`Artboard`] (or owned handle). Supports scalar reads
+/// **and writes** (`set_*` / [`Self::fire_trigger`]) + introspection + navigation — so
+/// a caller can drive a nested view model or a **list item**, which the flat
+/// artboard-rooted `vm_set_*` path can't address (rive's resolver can't index lists;
+/// use [`Artboard::vm_resolve`] for the `name[i]/leaf` shorthand). It can also bind an
+/// **image** property ([`Self::set_image`]) or an **artboard reference**
+/// ([`Self::set_artboard`]), and **structurally mutate a list** ([`Self::list_add`] /
+/// [`Self::list_remove_at`] / [`Self::list_swap`] / [`Self::list_clear`] …) or replace
+/// a VM reference ([`Self::replace_view_model`]). `!Send`/`!Sync` (rive handles are not
+/// thread-safe).
 #[derive(Debug)]
 pub struct RiveViewModelInstance<'a> {
     ptr: *mut sys::RiveViewModelInstance,
@@ -868,6 +872,383 @@ impl<'a> RiveViewModelInstance<'a> {
         // SAFETY: live handle + valid C string; a null bindable clears the property.
         let st = unsafe { sys::rive_vmi_set_artboard(self.ptr, c.as_ptr(), std::ptr::null_mut()) };
         vm_status(st)
+    }
+
+    // ---- LIST structural mutation (add / remove / swap / clear) ----
+    // Operate on the **list** property at `path` on this instance. A structural edit
+    // marks data bindings dirty, so it takes effect on the next advance. Indices are
+    // positional and shift on add/remove/swap: after a mutation, re-fetch list items
+    // via [`Self::list_item`] (a handle to a *removed* item is invalid; handles to
+    // surviving items stay valid but their index may have changed). The `item` to add
+    // is typically a freshly built [`RiveOwnedViewModel`] borrowed with
+    // [`RiveOwnedViewModel::borrow`]; once added, the list co-owns it.
+
+    /// Appends `item` to the end of the **list** property at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn list_add(&self, path: &str, item: &RiveViewModelInstance<'_>) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `item.ptr` is a live instance handle.
+        let st = unsafe { sys::rive_vmi_list_add(self.ptr, c.as_ptr(), item.ptr) };
+        vm_status(st)
+    }
+
+    /// Inserts `item` at `index` in the **list** at `path` (valid range `0..=len`;
+    /// `index == len` appends).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list or `index` is out of range;
+    /// [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn list_add_at(
+        &self,
+        path: &str,
+        item: &RiveViewModelInstance<'_>,
+        index: usize,
+    ) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `item.ptr` is a live instance handle.
+        let st = unsafe { sys::rive_vmi_list_add_at(self.ptr, c.as_ptr(), item.ptr, index as u32) };
+        vm_status(st)
+    }
+
+    /// Removes **every** occurrence of `item` (matched by underlying instance) from
+    /// the **list** at `path`. Get `item` from [`Self::list_item`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn list_remove(&self, path: &str, item: &RiveViewModelInstance<'_>) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `item.ptr` is a live instance handle.
+        let st = unsafe { sys::rive_vmi_list_remove(self.ptr, c.as_ptr(), item.ptr) };
+        vm_status(st)
+    }
+
+    /// Removes the item at `index` from the **list** at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list or `index` is out of range;
+    /// [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn list_remove_at(&self, path: &str, index: usize) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_list_remove_at(self.ptr, c.as_ptr(), index as u32) };
+        vm_status(st)
+    }
+
+    /// Swaps the items at `a` and `b` in the **list** at `path`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list or either index is out of range;
+    /// [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn list_swap(&self, path: &str, a: usize, b: usize) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_list_swap(self.ptr, c.as_ptr(), a as u32, b as u32) };
+        vm_status(st)
+    }
+
+    /// Removes all items from the **list** at `path`, leaving it empty.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a list property; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn list_clear(&self, path: &str) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string.
+        let st = unsafe { sys::rive_vmi_list_clear(self.ptr, c.as_ptr()) };
+        vm_status(st)
+    }
+
+    /// Assigns `value` to the **view-model-reference** property at `path` (`/`
+    /// descends). `value` is typically a freshly built [`RiveOwnedViewModel`] borrowed
+    /// with [`RiveOwnedViewModel::borrow`]; once assigned, the parent co-owns it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `path` is not a view-model-reference property, or
+    /// `value`'s view-model **type** doesn't match the property's referenced type
+    /// (rive enforces the match); [`Error::InvalidPath`] for an interior NUL byte.
+    pub fn replace_view_model(
+        &self,
+        path: &str,
+        value: &RiveViewModelInstance<'_>,
+    ) -> Result<()> {
+        let c = Self::path(path)?;
+        // SAFETY: live handle + valid C string; `value.ptr` is a live instance handle.
+        let st = unsafe { sys::rive_vmi_replace_view_model(self.ptr, c.as_ptr(), value.ptr) };
+        vm_status(st)
+    }
+}
+
+/// View-model **construction** accessors — reach a view-model *definition*
+/// ([`RiveViewModelRuntime`]) to mint fresh instances for lists / VM-references, plus
+/// artboard-sourced [`BindableArtboard`] values (so a caller holding only an
+/// [`Artboard`] can bind a `propertyArtboard` without its [`File`]).
+impl Artboard {
+    /// Number of view-model definitions in this artboard's file.
+    pub fn view_model_count(&self) -> usize {
+        // SAFETY: live artboard handle (0 if it has no file).
+        unsafe { sys::rive_artboard_view_model_count(self.inner.ptr) as usize }
+    }
+
+    /// The names of the file's view-model **definitions** (index ↔ name, for
+    /// [`Self::view_model_by_index`] / [`Self::view_model_by_name`]) — mirrors
+    /// [`Self::artboard_names`](crate::Artboard) / `state_machine_names` for discovery.
+    pub fn view_model_names(&self) -> Vec<String> {
+        (0..self.view_model_count())
+            .filter_map(|i| self.view_model_by_index(i).map(|d| d.name()))
+            .collect()
+    }
+
+    /// The view-model **definition** named `name` (used to construct instances), or
+    /// `None` if the artboard has no file or no such definition.
+    ///
+    /// PERF: rive allocates a fresh runtime each call and caches it for the file's
+    /// lifetime (it is never released early), so resolve a definition **once** and
+    /// reuse the returned handle across many `create_*` calls rather than re-fetching
+    /// it per construction — a hot construct-and-resolve loop grows that cache.
+    pub fn view_model_by_name(&self, name: &str) -> Option<RiveViewModelRuntime<'_>> {
+        let c = Self::vm_path(name).ok()?;
+        // SAFETY: live artboard handle + valid C string; null if not found.
+        let p = unsafe { sys::rive_artboard_view_model_by_name(self.inner.ptr, c.as_ptr()) };
+        RiveViewModelRuntime::from_ptr(p, self.inner.ctx.ptr)
+    }
+
+    /// The view-model **definition** at `index`, or `None` if out of range.
+    pub fn view_model_by_index(&self, index: usize) -> Option<RiveViewModelRuntime<'_>> {
+        // SAFETY: live artboard handle; null if out of range.
+        let p = unsafe { sys::rive_artboard_view_model_by_index(self.inner.ptr, index as u32) };
+        RiveViewModelRuntime::from_ptr(p, self.inner.ctx.ptr)
+    }
+
+    /// The view-model **definition** bound to this artboard (the type of its own root
+    /// view model), or `None` if the artboard has no linked view model. Handy for
+    /// minting another instance of the same type (e.g. to add to a list of it).
+    pub fn default_view_model(&self) -> Option<RiveViewModelRuntime<'_>> {
+        // SAFETY: live artboard handle; null if no linked view model.
+        let p = unsafe { sys::rive_artboard_default_view_model(self.inner.ptr) };
+        RiveViewModelRuntime::from_ptr(p, self.inner.ctx.ptr)
+    }
+
+    /// Creates a [`BindableArtboard`] from the artboard named `name` in **this
+    /// artboard's own file** — the artboard analogue of [`File::bindable_artboard_named`]
+    /// for a caller that holds only an [`Artboard`] (e.g. after the [`File`] is
+    /// dropped). Bind it with [`Artboard::vm_set_artboard`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoArtboard`] if the file has no artboard with that name, the artboard
+    /// has no file, or `name` contained an interior NUL byte.
+    pub fn bindable_artboard_named(&self, name: &str) -> Result<BindableArtboard> {
+        let c = CString::new(name).map_err(|_| {
+            Error::NoArtboard("bindable artboard name contained an interior NUL byte".into())
+        })?;
+        // SAFETY: live artboard handle + valid C string.
+        let ptr = unsafe { sys::rive_artboard_bindable_artboard_named(self.inner.ptr, c.as_ptr()) };
+        self.wrap_artboard_bindable(ptr)
+    }
+
+    /// Creates a [`BindableArtboard`] from the **default** artboard of this artboard's
+    /// own file. See [`Self::bindable_artboard_named`].
+    ///
+    /// # Errors
+    ///
+    /// [`Error::NoArtboard`] if the file contains no artboards (or the artboard has no file).
+    pub fn bindable_artboard_default(&self) -> Result<BindableArtboard> {
+        // SAFETY: live artboard handle.
+        let ptr = unsafe { sys::rive_artboard_bindable_artboard_default(self.inner.ptr) };
+        self.wrap_artboard_bindable(ptr)
+    }
+
+    /// Wraps a shim bindable-artboard pointer, tying it to this artboard's context, or
+    /// maps null to [`Error::NoArtboard`].
+    fn wrap_artboard_bindable(
+        &self,
+        ptr: *mut sys::RiveBindableArtboard,
+    ) -> Result<BindableArtboard> {
+        if ptr.is_null() {
+            return Err(Error::NoArtboard(last_error()));
+        }
+        Ok(BindableArtboard {
+            ptr,
+            ctx: Rc::clone(&self.inner.ctx),
+        })
+    }
+}
+
+/// A view-model **definition** (`rive::ViewModelRuntime`) — the schema/type a
+/// view-model instance is an instance *of*. Obtained from [`Artboard::view_model_by_name`]
+/// / [`Artboard::view_model_by_index`] / [`Artboard::default_view_model`]; used to mint
+/// fresh [`RiveOwnedViewModel`] instances to add to a list or assign to a VM-reference
+/// property.
+///
+/// **Borrowed:** owned by the file, so the borrow checker ties it to the source
+/// [`Artboard`] (the file lives as long as the artboard). `!Send`/`!Sync`.
+///
+/// ```no_run
+/// # fn demo(artboard: &rive_renderer::Artboard) -> rive_renderer::Result<()> {
+/// // Build a fresh list item, populate it, and append it to a list property.
+/// let def = artboard.view_model_by_name("WheelItem").expect("view model exists");
+/// let item = def.create_instance()?;      // a caller-owned instance
+/// item.borrow().set_number("value", 7.0)?;
+/// let root = artboard.vm_root().expect("artboard has a view model");
+/// root.list_add("wheels", &item.borrow())?; // the list now co-owns it
+/// # Ok(()) }
+/// ```
+#[derive(Debug)]
+pub struct RiveViewModelRuntime<'a> {
+    ptr: *mut sys::RiveViewModelRuntime,
+    /// The owning artboard's render context — identity only, propagated to created
+    /// instances so a later image bind can reject a cross-context image (never deref'd;
+    /// the `'a` borrow keeps the real context alive).
+    ctx: *mut sys::RiveRenderContext,
+    _marker: PhantomData<&'a Artboard>,
+}
+
+impl<'a> RiveViewModelRuntime<'a> {
+    /// Wraps a shim runtime pointer, returning `None` for null (no such definition).
+    fn from_ptr(
+        ptr: *mut sys::RiveViewModelRuntime,
+        ctx: *mut sys::RiveRenderContext,
+    ) -> Option<Self> {
+        if ptr.is_null() {
+            None
+        } else {
+            Some(Self { ptr, ctx, _marker: PhantomData })
+        }
+    }
+
+    /// Wraps a freshly-minted owned-instance pointer, mapping null to the shim error.
+    fn wrap_owned(&self, ptr: *mut sys::RiveOwnedVmInstance) -> Result<RiveOwnedViewModel<'a>> {
+        if ptr.is_null() {
+            Err(Error::ViewModel(last_error()))
+        } else {
+            Ok(RiveOwnedViewModel { ptr, ctx: self.ctx, _marker: PhantomData })
+        }
+    }
+
+    /// Mints a **blank** instance (all default property values).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if construction fails (e.g. allocation failure).
+    pub fn create_instance(&self) -> Result<RiveOwnedViewModel<'a>> {
+        // SAFETY: live runtime handle.
+        let p = unsafe { sys::rive_view_model_create_instance(self.ptr) };
+        self.wrap_owned(p)
+    }
+
+    /// Mints the editor's **default** instance (falls back to a blank instance if the
+    /// definition authors no default).
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if construction fails.
+    pub fn create_default_instance(&self) -> Result<RiveOwnedViewModel<'a>> {
+        // SAFETY: live runtime handle.
+        let p = unsafe { sys::rive_view_model_create_default_instance(self.ptr) };
+        self.wrap_owned(p)
+    }
+
+    /// Mints a clone of the editor instance named `name`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if no editor instance has that name; [`Error::InvalidPath`]
+    /// for an interior NUL byte.
+    pub fn create_instance_from_name(&self, name: &str) -> Result<RiveOwnedViewModel<'a>> {
+        let c = CString::new(name).map_err(|_| Error::InvalidPath)?;
+        // SAFETY: live runtime handle + valid C string.
+        let p = unsafe { sys::rive_view_model_create_instance_from_name(self.ptr, c.as_ptr()) };
+        self.wrap_owned(p)
+    }
+
+    /// Mints a clone of the editor instance at `index`.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if `index` is out of range.
+    pub fn create_instance_from_index(&self, index: usize) -> Result<RiveOwnedViewModel<'a>> {
+        // SAFETY: live runtime handle.
+        let p = unsafe { sys::rive_view_model_create_instance_from_index(self.ptr, index as u32) };
+        self.wrap_owned(p)
+    }
+
+    /// This definition's name.
+    pub fn name(&self) -> String {
+        // SAFETY: live runtime handle; the shim's two-call protocol.
+        read_string_via(|buf, cap, out_len| unsafe {
+            sys::rive_view_model_name(self.ptr, buf, cap, out_len)
+        })
+        .unwrap_or_default()
+    }
+
+    /// Number of editor-authored named instances (the names
+    /// [`Self::create_instance_from_name`] can clone).
+    pub fn instance_count(&self) -> usize {
+        // SAFETY: live runtime handle.
+        unsafe { sys::rive_view_model_instance_count(self.ptr) as usize }
+    }
+
+    /// The names of the editor-authored instances (index ↔ name, for
+    /// [`Self::create_instance_from_index`] / [`Self::create_instance_from_name`]).
+    pub fn instance_names(&self) -> Vec<String> {
+        (0..self.instance_count())
+            .filter_map(|i| {
+                // SAFETY: live runtime handle; the shim's two-call protocol.
+                read_string_via(|buf, cap, out_len| unsafe {
+                    sys::rive_view_model_instance_name_at(self.ptr, i as u32, buf, cap, out_len)
+                })
+                .ok()
+            })
+            .collect()
+    }
+}
+
+/// An **owned**, freshly-constructed view-model instance — minted by
+/// [`RiveViewModelRuntime::create_instance`] (and friends). Populate it via
+/// [`Self::borrow`] (which yields the same read/write [`RiveViewModelInstance`]
+/// surface), then add it to a list ([`RiveViewModelInstance::list_add`]) or assign it
+/// to a VM-reference property ([`RiveViewModelInstance::replace_view_model`]) — after
+/// which the list/parent co-owns it and this handle may be dropped.
+///
+/// The Rust lifetime `'a` ties it to the source [`Artboard`], whose native file keeps
+/// the instance's backing data alive. `!Send`/`!Sync`.
+#[derive(Debug)]
+pub struct RiveOwnedViewModel<'a> {
+    ptr: *mut sys::RiveOwnedVmInstance,
+    /// Owning artboard's render context — identity only (see [`RiveViewModelRuntime`]).
+    ctx: *mut sys::RiveRenderContext,
+    _marker: PhantomData<&'a Artboard>,
+}
+
+impl Drop for RiveOwnedViewModel<'_> {
+    fn drop(&mut self) {
+        // SAFETY: created by the shim, destroyed exactly once. Dropping releases only
+        // *our* ref: if the instance was added to a list / assigned, that co-owner
+        // keeps it alive; otherwise this frees it.
+        unsafe { sys::rive_owned_vmi_destroy(self.ptr) };
+    }
+}
+
+impl RiveOwnedViewModel<'_> {
+    /// Borrows this owned instance as a [`RiveViewModelInstance`] to read/write its
+    /// properties (before or after adding it to a list). The borrow is tied to `self`.
+    pub fn borrow(&self) -> RiveViewModelInstance<'_> {
+        // SAFETY: live owned handle; the shim returns the inner instance pointer,
+        // non-null for any handle we hold (we never construct a null owned handle).
+        let p = unsafe { sys::rive_owned_vmi_borrow(self.ptr) };
+        RiveViewModelInstance::from_ptr(p, self.ctx)
+            .expect("owned view-model instance borrow returned null")
     }
 }
 

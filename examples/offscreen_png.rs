@@ -580,6 +580,100 @@ fn main() -> Result<()> {
         }
     }
 
+    // ---- view-model LIST structural mutation + INSTANCE construction ----
+    // All resolve the list (or VM-ref) owner via `vm_resolve`, which walks a flat /
+    // `/`-nested / `name[i]/…` path to the owning instance + the final name.
+
+    // RIVE_VM_LIST_SWAP="path=a,b": swap items a and b in a view-model list.
+    if let Ok(spec) = std::env::var("RIVE_VM_LIST_SWAP") {
+        if let Some((path, pair)) = spec.split_once('=') {
+            let (path, pair) = (path.trim(), pair.trim());
+            let (a, b) = pair.split_once(',').context("RIVE_VM_LIST_SWAP needs 'path=a,b'")?;
+            let (a, b): (usize, usize) = (a.trim().parse()?, b.trim().parse()?);
+            let (owner, name) = artboard.vm_resolve(path)?;
+            owner.list_swap(&name, a, b)?;
+            println!("  list swap {path:?}: {a} <-> {b}");
+        }
+    }
+
+    // RIVE_VM_LIST_REMOVE="path=index": remove the item at `index`.
+    if let Ok(spec) = std::env::var("RIVE_VM_LIST_REMOVE") {
+        if let Some((path, idx)) = spec.split_once('=') {
+            let (path, idx): (&str, usize) = (path.trim(), idx.trim().parse()?);
+            let (owner, name) = artboard.vm_resolve(path)?;
+            owner.list_remove_at(&name, idx)?;
+            println!("  list remove {path:?}[{idx}]");
+        }
+    }
+
+    // RIVE_VM_LIST_CLEAR="path": remove all items from the list.
+    if let Ok(path) = std::env::var("RIVE_VM_LIST_CLEAR") {
+        let path = path.trim();
+        let (owner, name) = artboard.vm_resolve(path)?;
+        owner.list_clear(&name)?;
+        println!("  list clear {path:?}");
+    }
+
+    // RIVE_VM_LIST_ADD="listpath=vmName": construct a fresh instance of definition
+    // `vmName` and append it. RIVE_VM_LIST_ADD_AT="i" inserts at index i instead.
+    // Optional RIVE_VM_NEW_ARTBOARD="prop=artboardName" seeds an artboard-reference on
+    // the new item (from this file), so the added item renders real content.
+    if let Ok(spec) = std::env::var("RIVE_VM_LIST_ADD") {
+        if let Some((path, vm_name)) = spec.split_once('=') {
+            let (path, vm_name) = (path.trim(), vm_name.trim());
+            let def = artboard
+                .view_model_by_name(vm_name)
+                .with_context(|| format!("view-model definition {vm_name:?} not found"))?;
+            let owned = def.create_instance()?;
+            if let Ok(seed) = std::env::var("RIVE_VM_NEW_ARTBOARD") {
+                if let Some((prop, ab_name)) = seed.split_once('=') {
+                    let ba = artboard.bindable_artboard_named(ab_name.trim())?;
+                    owned.borrow().set_artboard(prop.trim(), &ba)?;
+                    println!("  new-item seed: artboard {:?} = {}", prop.trim(), ab_name.trim());
+                }
+            }
+            let (owner, name) = artboard.vm_resolve(path)?;
+            match std::env::var("RIVE_VM_LIST_ADD_AT").ok().and_then(|s| s.trim().parse().ok()) {
+                Some(i) => {
+                    owner.list_add_at(&name, &owned.borrow(), i)?;
+                    println!("  list insert {path:?}[{i}] = new {vm_name}");
+                }
+                None => {
+                    owner.list_add(&name, &owned.borrow())?;
+                    println!("  list add {path:?} += new {vm_name}");
+                }
+            }
+        }
+    }
+
+    // RIVE_VM_REPLACE="path=vmName": construct a fresh instance of `vmName` and assign
+    // it to the view-model-reference property at `path` (type must match).
+    if let Ok(spec) = std::env::var("RIVE_VM_REPLACE") {
+        if let Some((path, vm_name)) = spec.split_once('=') {
+            let (path, vm_name) = (path.trim(), vm_name.trim());
+            let def = artboard
+                .view_model_by_name(vm_name)
+                .with_context(|| format!("view-model definition {vm_name:?} not found"))?;
+            let owned = def.create_default_instance()?;
+            let (owner, leaf) = artboard.vm_resolve(path)?;
+            owner.replace_view_model(&leaf, &owned.borrow())?;
+            println!("  replace view-model {path:?} = new {vm_name}");
+        }
+    }
+
+    // RIVE_VM_DEFS=1: list the file's view-model DEFINITIONS (name + instance names) —
+    // discover the `vmName`s RIVE_VM_LIST_ADD / RIVE_VM_REPLACE accept.
+    if std::env::var("RIVE_VM_DEFS").is_ok() {
+        let n = artboard.view_model_count();
+        println!("  view-model definitions: {n}");
+        for i in 0..n {
+            if let Some(def) = artboard.view_model_by_index(i) {
+                let insts = def.instance_names();
+                println!("    [{i}] {:?}  instances={insts:?}", def.name());
+            }
+        }
+    }
+
     // Advance the state machine, then render a single offscreen snapshot.
     // RIVE_ADVANCE_FRAMES (default 1) ticks autonomous scripts / animations
     // forward N 60Hz frames before the snapshot, so two runs at different frame

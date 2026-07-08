@@ -130,6 +130,24 @@ pub struct RiveBindableArtboard {
     _opaque: [u8; 0],
 }
 
+/// Opaque view-model **definition** (`rive::ViewModelRuntime`). A **borrowed** handle
+/// owned by the file (valid while the owning artboard lives). Reached via
+/// [`rive_artboard_view_model_by_name`] etc.; mints fresh instances via
+/// `rive_view_model_create_*`. Never freed.
+#[repr(C)]
+pub struct RiveViewModelRuntime {
+    _opaque: [u8; 0],
+}
+
+/// Opaque **owned**, freshly-constructed view-model instance — minted by
+/// `rive_view_model_create_*` to add to a list ([`rive_vmi_list_add`]) or assign to a
+/// VM-reference property ([`rive_vmi_replace_view_model`]). Borrow it with
+/// [`rive_owned_vmi_borrow`]; free with [`rive_owned_vmi_destroy`].
+#[repr(C)]
+pub struct RiveOwnedVmInstance {
+    _opaque: [u8; 0],
+}
+
 // ===== out-of-band asset loading =====
 
 /// Asset kind reported in [`RiveAssetRequest::asset_type`] (rive's `FileAsset`
@@ -259,6 +277,15 @@ extern "C" {
     ) -> *mut RiveBindableArtboard;
     pub fn rive_file_bindable_artboard_default(file: *mut RiveFile) -> *mut RiveBindableArtboard;
     pub fn rive_bindable_artboard_destroy(bindable: *mut RiveBindableArtboard);
+    /// Same value, sourced from an artboard handle's own file (lets a caller holding
+    /// only an artboard bind a `propertyArtboard` without retaining a Rust file).
+    pub fn rive_artboard_bindable_artboard_named(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+    ) -> *mut RiveBindableArtboard;
+    pub fn rive_artboard_bindable_artboard_default(
+        artboard: *mut RiveArtboard,
+    ) -> *mut RiveBindableArtboard;
 
     pub fn rive_artboard_state_machine_default(
         artboard: *mut RiveArtboard,
@@ -574,6 +601,88 @@ extern "C" {
         vmi: *mut RiveViewModelInstance,
         path: *const c_char,
         bindable: *mut RiveBindableArtboard,
+    ) -> RiveStatus;
+
+    // ===== View-model instance construction + list structural mutation ======
+    /// View-model DEFINITION access (from an artboard's stashed file) — mint fresh
+    /// instances, then add/remove/swap them in a list or assign to a VM-ref property.
+    pub fn rive_artboard_view_model_count(artboard: *mut RiveArtboard) -> u32;
+    pub fn rive_artboard_view_model_by_name(
+        artboard: *mut RiveArtboard,
+        name: *const c_char,
+    ) -> *mut RiveViewModelRuntime;
+    pub fn rive_artboard_view_model_by_index(
+        artboard: *mut RiveArtboard,
+        index: u32,
+    ) -> *mut RiveViewModelRuntime;
+    pub fn rive_artboard_default_view_model(
+        artboard: *mut RiveArtboard,
+    ) -> *mut RiveViewModelRuntime;
+    pub fn rive_view_model_name(
+        vmr: *mut RiveViewModelRuntime,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_view_model_instance_count(vmr: *mut RiveViewModelRuntime) -> u32;
+    pub fn rive_view_model_instance_name_at(
+        vmr: *mut RiveViewModelRuntime,
+        index: u32,
+        buf: *mut c_char,
+        cap: usize,
+        out_len: *mut usize,
+    ) -> RiveStatus;
+    pub fn rive_view_model_create_instance(
+        vmr: *mut RiveViewModelRuntime,
+    ) -> *mut RiveOwnedVmInstance;
+    pub fn rive_view_model_create_default_instance(
+        vmr: *mut RiveViewModelRuntime,
+    ) -> *mut RiveOwnedVmInstance;
+    pub fn rive_view_model_create_instance_from_name(
+        vmr: *mut RiveViewModelRuntime,
+        name: *const c_char,
+    ) -> *mut RiveOwnedVmInstance;
+    pub fn rive_view_model_create_instance_from_index(
+        vmr: *mut RiveViewModelRuntime,
+        index: u32,
+    ) -> *mut RiveOwnedVmInstance;
+    /// Borrow an owned instance into the get/set surface (valid while it lives).
+    pub fn rive_owned_vmi_borrow(owned: *mut RiveOwnedVmInstance) -> *mut RiveViewModelInstance;
+    /// Release the caller's ref (safe after add/assign — the list/parent co-owns it).
+    pub fn rive_owned_vmi_destroy(owned: *mut RiveOwnedVmInstance);
+    pub fn rive_vmi_list_add(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        item: *mut RiveViewModelInstance,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_add_at(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        item: *mut RiveViewModelInstance,
+        index: u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_remove(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        item: *mut RiveViewModelInstance,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_remove_at(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        index: u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_swap(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        a: u32,
+        b: u32,
+    ) -> RiveStatus;
+    pub fn rive_vmi_list_clear(vmi: *mut RiveViewModelInstance, path: *const c_char) -> RiveStatus;
+    /// Assign `value` to a VM-reference property (`/` descends); fails on type mismatch.
+    pub fn rive_vmi_replace_view_model(
+        vmi: *mut RiveViewModelInstance,
+        path: *const c_char,
+        value: *mut RiveViewModelInstance,
     ) -> RiveStatus;
 
     // ===== Text runs (get/set a TextValueRun's string) ======================

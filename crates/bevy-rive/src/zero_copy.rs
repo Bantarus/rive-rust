@@ -1176,6 +1176,10 @@ struct ExtractedRive {
     /// floor advance system's inline `apply_writes`. Empty for faces with no
     /// `RiveViewModel` or no queued writes.
     vm_writes: Vec<(String, RiveValue)>,
+    /// M-LIST: this frame's structural view-model commands (list add/remove/swap/clear
+    /// and VM-ref replace, from a `RiveViewModel`), applied in the node AFTER
+    /// `vm_writes` and before advance. Empty for faces with no `RiveViewModel` / none.
+    vm_cmds: Vec<crate::view_model::ListCmd>,
     /// M-READBACK: the registered watch list (path + declared read type), read in
     /// the node after advance; results ship back over the [`RiveReadbackChannel`].
     /// Empty for faces with no `RiveViewModel` / no watches, and for culled faces
@@ -1968,6 +1972,7 @@ fn extract_rive_instances(
                 // advance) is pointless this frame — ferry none. Same for the
                 // watch/observe lists (no advance ⇒ nothing new to read/flush).
                 vm_writes: Vec::new(),
+                vm_cmds: Vec::new(),
                 vm_watch: Vec::new(),
                 vm_observe: Vec::new(),
                 // Culled: no advance ⇒ nothing new to read (reads keep last value).
@@ -2033,6 +2038,8 @@ fn extract_rive_instances(
             // render world, where this tier's instances live). `stage_vm_writes`
             // populated `staged` from `writes` earlier this frame.
             vm_writes: vm.map(|v| v.staged().to_vec()).unwrap_or_default(),
+            // M-LIST: ferry this frame's staged structural commands (like `vm_writes`).
+            vm_cmds: vm.map(|v| v.staged_cmds().to_vec()).unwrap_or_default(),
             // M-READBACK: ferry the registered watch/observe lists (persistent
             // registrations, not drained — cloned each frame like the writes; the
             // node reads/flushes them after advance and ships results back over
@@ -2325,6 +2332,11 @@ impl Node for RiveFillNode {
             // once per visual frame (see `apply_vm_writes`) so a `fire_trigger` pulses once.
             if apply_vm_writes && !item.vm_writes.is_empty() {
                 crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
+            }
+            // M-LIST: apply structural list/VM-ref commands AFTER the value writes
+            // (see the `list_cmds` field doc). Same once-per-visual-frame gate.
+            if apply_vm_writes && !item.vm_cmds.is_empty() {
+                crate::view_model::apply_list_cmds_slice(ctx, &inst.artboard, &item.vm_cmds);
             }
             // M-READBACK: prime any newly-observed paths BEFORE advance so a change/
             // fire on THIS advance is caught (the floor advance system's
@@ -2668,6 +2680,11 @@ impl Node for RiveFillNode {
                     // dedicated-path apply above), gated once per visual frame.
                     if apply_vm_writes && !item.vm_writes.is_empty() {
                         crate::view_model::apply_writes_slice(ctx, &inst.artboard, &item.vm_writes);
+                    }
+                    // M-LIST: structural commands after the value writes (see the
+                    // dedicated-path apply above). Same once-per-visual-frame gate.
+                    if apply_vm_writes && !item.vm_cmds.is_empty() {
+                        crate::view_model::apply_list_cmds_slice(ctx, &inst.artboard, &item.vm_cmds);
                     }
                     // M-READBACK: prime newly-observed paths before advance — runs
                     // even with an empty observe list so `vm_primed` is pruned to

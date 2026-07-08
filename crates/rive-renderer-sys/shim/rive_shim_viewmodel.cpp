@@ -20,8 +20,14 @@
  *     color/string/enum/trigger + image + artboard) — so a caller can drive a nested VM or a LIST ITEM.
  *     An image (assetImage) property is bound from a decoded RiveImage (rive_image_decode
  *     lives in rive_shim.cpp); an artboard property is bound from a RiveBindableArtboard
- *     (rive_file_bindable_artboard_* — also in rive_shim.cpp). List structural mutation
- *     (add/remove/swap) is deferred — see docs/feature-support.md.
+ *     (rive_file_bindable_artboard_* — also in rive_shim.cpp).
+ *
+ * A third block (at the bottom) adds INSTANCE CONSTRUCTION + LIST STRUCTURAL MUTATION:
+ * a RiveViewModelRuntime* is a view-model DEFINITION (reached from an artboard's stashed
+ * File*) that mints fresh, caller-OWNED RiveOwnedVmInstance instances; those are populated
+ * via the borrow-into-the-get/set-surface trick (rive_owned_vmi_borrow), then added to a
+ * list (rive_vmi_list_add*) / assigned to a VM-ref property (rive_vmi_replace_view_model),
+ * after which the list/parent co-owns them.
  */
 #include "rive_shim_internal.hpp"
 
@@ -37,8 +43,9 @@
 #include "rive/viewmodel/runtime/viewmodel_instance_list_runtime.hpp"
 #include "rive/viewmodel/runtime/viewmodel_instance_asset_image_runtime.hpp" // image binding
 #include "rive/viewmodel/runtime/viewmodel_instance_artboard_runtime.hpp" // artboard-ref binding
-#include "rive/viewmodel/runtime/viewmodel_runtime.hpp" // PropertyData
+#include "rive/viewmodel/runtime/viewmodel_runtime.hpp" // PropertyData + createInstance*
 #include "rive/bindable_artboard.hpp" // BindableArtboard (RiveBindableArtboard::bindable)
+#include "rive/file.hpp" // File::viewModelBy* (VM-runtime construction from an artboard)
 
 using rive::ViewModelInstanceRuntime;
 
@@ -746,4 +753,357 @@ extern "C" RiveStatus rive_vmi_set_artboard(RiveViewModelInstance* handle,
 {
     ViewModelInstanceRuntime* vm = vmi_path(handle, path);
     return vm == nullptr ? 1 : vmi_set_artboard(vm, path, bindable);
+}
+
+// ===========================================================================
+// View-model INSTANCE construction + LIST structural mutation + VM-ref assignment.
+//
+// A RiveViewModelRuntime* is a view-model DEFINITION (rive::ViewModelRuntime),
+// borrowed + owned by the File (valid while the artboard's File lives). Reached from
+// an artboard handle via its stashed File*, it mints fresh, caller-OWNED instances
+// (RiveOwnedVmInstance) that can be populated (borrow into the get/set surface), then
+// added to a list (rive_vmi_list_add*) or assigned to a VM-reference property
+// (rive_vmi_replace_view_model) — after which the list/parent co-owns them, so the
+// owned wrapper may be destroyed. Every mutator marks data-bindings dirty, so a
+// structural edit takes effect on the next advance. Indices are positional and shift
+// on add/remove/swap. The void-returning natives (remove-at/swap) silently no-op out
+// of range, so we bounds-check against size() to surface a useful error.
+// ===========================================================================
+
+namespace {
+using rive::ViewModelRuntime;
+
+inline ViewModelRuntime* as_vmr(RiveViewModelRuntime* h)
+{
+    return reinterpret_cast<ViewModelRuntime*>(h);
+}
+inline RiveViewModelRuntime* as_vmr_handle(ViewModelRuntime* p)
+{
+    return reinterpret_cast<RiveViewModelRuntime*>(p);
+}
+
+// Resolve a (handle, path) to its list runtime, or null (+ error) if the handle is
+// null, the path is null, or `path` is not a list property. Mirrors the resolution
+// the existing rive_vmi_list_size / _instance_at inline.
+rive::ViewModelInstanceListRuntime* vmi_list(RiveViewModelInstance* handle, const char* path)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    if (vm == nullptr)
+        return nullptr;
+    auto* list = vm->propertyList(path);
+    if (list == nullptr)
+        shim_set_error("view-model list property not found");
+    return list;
+}
+
+// Wrap a freshly-created instance rcp in an owned handle, or null (+ error) if the
+// creation returned null (invalid VM) or on OOM. Shared by the four create verbs.
+RiveOwnedVmInstance* wrap_owned(rive::rcp<ViewModelInstanceRuntime> inst, const char* whatFailed)
+{
+    if (inst == nullptr)
+    {
+        shim_set_error(whatFailed);
+        return nullptr;
+    }
+    auto* h = new (std::nothrow) RiveOwnedVmInstance{std::move(inst)};
+    if (h == nullptr)
+        shim_set_error("out of memory allocating RiveOwnedVmInstance");
+    return h;
+}
+} // namespace
+
+// ---- Artboard -> view-model DEFINITION (rive::ViewModelRuntime) access ----
+
+// Number of view-model definitions in the artboard's File (0 if no file).
+extern "C" uint32_t rive_artboard_view_model_count(RiveArtboard* artboard)
+{
+    if (artboard == nullptr || artboard->file == nullptr)
+        return 0;
+    return static_cast<uint32_t>(artboard->file->viewModelCount());
+}
+
+// The view-model definition named `name`, or null + error if the artboard has no
+// file or no such view model.
+extern "C" RiveViewModelRuntime* rive_artboard_view_model_by_name(RiveArtboard* artboard,
+                                                                  const char* name)
+{
+    if (artboard == nullptr || artboard->file == nullptr || name == nullptr)
+    {
+        shim_set_error("artboard has no file, or the view-model name is null");
+        return nullptr;
+    }
+    ViewModelRuntime* vmr = artboard->file->viewModelByName(name);
+    if (vmr == nullptr)
+        shim_set_error("no view-model definition with that name");
+    return as_vmr_handle(vmr);
+}
+
+// The view-model definition at `index`, or null + error if out of range.
+extern "C" RiveViewModelRuntime* rive_artboard_view_model_by_index(RiveArtboard* artboard,
+                                                                   uint32_t index)
+{
+    if (artboard == nullptr || artboard->file == nullptr)
+    {
+        shim_set_error("artboard has no file");
+        return nullptr;
+    }
+    ViewModelRuntime* vmr = artboard->file->viewModelByIndex(index);
+    if (vmr == nullptr)
+        shim_set_error("view-model definition index out of range");
+    return as_vmr_handle(vmr);
+}
+
+// The view-model definition bound to THIS artboard (the type of its own root VM), or
+// null + error if the artboard has no linked view model.
+extern "C" RiveViewModelRuntime* rive_artboard_default_view_model(RiveArtboard* artboard)
+{
+    if (artboard == nullptr || artboard->file == nullptr || artboard->inst() == nullptr)
+    {
+        shim_set_error("artboard has no file or instance");
+        return nullptr;
+    }
+    ViewModelRuntime* vmr = artboard->file->defaultArtboardViewModel(artboard->inst());
+    if (vmr == nullptr)
+        shim_set_error("artboard has no linked view model");
+    return as_vmr_handle(vmr);
+}
+
+// ---- view-model DEFINITION introspection ----
+
+// The definition's name (two-call buffer protocol).
+extern "C" RiveStatus rive_view_model_name(RiveViewModelRuntime* vmr, char* buf, size_t cap,
+                                           size_t* out_len)
+{
+    if (vmr == nullptr)
+    {
+        shim_set_error("view-model runtime handle is null");
+        return 1;
+    }
+    copy_to_caller(as_vmr(vmr)->name(), buf, cap, out_len);
+    return RIVE_OK;
+}
+
+// Number of editor-authored named instances of this definition (the names
+// createInstanceFromName / _index can clone).
+extern "C" uint32_t rive_view_model_instance_count(RiveViewModelRuntime* vmr)
+{
+    if (vmr == nullptr)
+        return 0;
+    return static_cast<uint32_t>(as_vmr(vmr)->instanceCount());
+}
+
+// The name of the editor instance at `index` (two-call buffer protocol).
+extern "C" RiveStatus rive_view_model_instance_name_at(RiveViewModelRuntime* vmr, uint32_t index,
+                                                       char* buf, size_t cap, size_t* out_len)
+{
+    if (vmr == nullptr)
+    {
+        shim_set_error("view-model runtime handle is null");
+        return 1;
+    }
+    std::vector<std::string> names = as_vmr(vmr)->instanceNames();
+    if (index >= names.size())
+    {
+        shim_set_error("view-model instance name index out of range");
+        return 1;
+    }
+    copy_to_caller(names[index], buf, cap, out_len);
+    return RIVE_OK;
+}
+
+// ---- mint fresh, caller-OWNED instances ----
+
+// A blank instance (all default property values).
+extern "C" RiveOwnedVmInstance* rive_view_model_create_instance(RiveViewModelRuntime* vmr)
+{
+    if (vmr == nullptr)
+    {
+        shim_set_error("view-model runtime handle is null");
+        return nullptr;
+    }
+    return wrap_owned(as_vmr(vmr)->createInstance(), "createInstance returned null");
+}
+
+// The editor's default instance (falls back to a blank instance if none authored).
+extern "C" RiveOwnedVmInstance* rive_view_model_create_default_instance(RiveViewModelRuntime* vmr)
+{
+    if (vmr == nullptr)
+    {
+        shim_set_error("view-model runtime handle is null");
+        return nullptr;
+    }
+    return wrap_owned(as_vmr(vmr)->createDefaultInstance(), "createDefaultInstance returned null");
+}
+
+// A clone of the editor instance named `name` (null + error if not found/exported).
+extern "C" RiveOwnedVmInstance* rive_view_model_create_instance_from_name(RiveViewModelRuntime* vmr,
+                                                                          const char* name)
+{
+    if (vmr == nullptr || name == nullptr)
+    {
+        shim_set_error("view-model runtime handle or instance name is null");
+        return nullptr;
+    }
+    return wrap_owned(as_vmr(vmr)->createInstanceFromName(std::string(name)),
+                      "no editor view-model instance with that name");
+}
+
+// A clone of the editor instance at `index` (null + error if out of range).
+extern "C" RiveOwnedVmInstance* rive_view_model_create_instance_from_index(RiveViewModelRuntime* vmr,
+                                                                           uint32_t index)
+{
+    if (vmr == nullptr)
+    {
+        shim_set_error("view-model runtime handle is null");
+        return nullptr;
+    }
+    return wrap_owned(as_vmr(vmr)->createInstanceFromIndex(index),
+                      "view-model instance index out of range");
+}
+
+// ---- owned-instance borrow + destroy ----
+
+// Borrow the owned instance as a RiveViewModelInstance* so the get/set surface can
+// populate it before it is added to a list / assigned. The borrow is valid while the
+// owned handle lives (and, after an add/assign, while the list/parent holds it).
+extern "C" RiveViewModelInstance* rive_owned_vmi_borrow(RiveOwnedVmInstance* owned)
+{
+    if (owned == nullptr)
+    {
+        shim_set_error("owned view-model instance handle is null");
+        return nullptr;
+    }
+    return as_handle(owned->inst.get());
+}
+
+// Release the caller's ref on an owned instance. Safe to call after adding it to a
+// list / assigning it (the list/parent co-owns it, so it survives); if it was never
+// added, this frees it.
+extern "C" void rive_owned_vmi_destroy(RiveOwnedVmInstance* owned)
+{
+    if (owned == nullptr)
+        return;
+    owned->inst = nullptr; // drop our rcp; the list/parent keeps it alive if added
+    delete owned;
+}
+
+// ---- LIST structural mutation (on the list-owning handle + path) ----
+
+// Append `item` to the end of the list.
+extern "C" RiveStatus rive_vmi_list_add(RiveViewModelInstance* handle, const char* path,
+                                        RiveViewModelInstance* item)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    if (item == nullptr)
+    {
+        shim_set_error("list item to add is null");
+        return 1;
+    }
+    list->addInstance(as_vmi(item));
+    return RIVE_OK;
+}
+
+// Insert `item` at `index` (valid range [0, size]; append allowed at index==size).
+extern "C" RiveStatus rive_vmi_list_add_at(RiveViewModelInstance* handle, const char* path,
+                                           RiveViewModelInstance* item, uint32_t index)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    if (item == nullptr)
+    {
+        shim_set_error("list item to add is null");
+        return 1;
+    }
+    if (!list->addInstanceAt(as_vmi(item), static_cast<int>(index)))
+    {
+        shim_set_error("list insert index out of range");
+        return 1;
+    }
+    return RIVE_OK;
+}
+
+// Remove EVERY occurrence of `item` (matched by underlying instance).
+extern "C" RiveStatus rive_vmi_list_remove(RiveViewModelInstance* handle, const char* path,
+                                           RiveViewModelInstance* item)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    if (item == nullptr)
+    {
+        shim_set_error("list item to remove is null");
+        return 1;
+    }
+    list->removeInstance(as_vmi(item));
+    return RIVE_OK;
+}
+
+// Remove the item at `index` (error if out of range — the native no-ops silently).
+extern "C" RiveStatus rive_vmi_list_remove_at(RiveViewModelInstance* handle, const char* path,
+                                              uint32_t index)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    if (index >= list->size())
+    {
+        shim_set_error("list remove index out of range");
+        return 1;
+    }
+    list->removeInstanceAt(static_cast<int>(index));
+    return RIVE_OK;
+}
+
+// Swap the items at `a` and `b` (error if either is out of range).
+extern "C" RiveStatus rive_vmi_list_swap(RiveViewModelInstance* handle, const char* path,
+                                         uint32_t a, uint32_t b)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    const size_t n = list->size();
+    if (a >= n || b >= n)
+    {
+        shim_set_error("list swap index out of range");
+        return 1;
+    }
+    list->swap(a, b);
+    return RIVE_OK;
+}
+
+// Remove all items, leaving the list empty.
+extern "C" RiveStatus rive_vmi_list_clear(RiveViewModelInstance* handle, const char* path)
+{
+    auto* list = vmi_list(handle, path);
+    if (list == nullptr)
+        return 1;
+    list->removeAllInstances();
+    return RIVE_OK;
+}
+
+// ---- VM-reference property assignment ----
+
+// Assign `value` to the view-model-reference property at `path` (`/` descends). Fails
+// (error) if `path` is not a VM-reference property or `value`'s view-model TYPE does
+// not match the property's referenced type (rive enforces the id match).
+extern "C" RiveStatus rive_vmi_replace_view_model(RiveViewModelInstance* handle, const char* path,
+                                                  RiveViewModelInstance* value)
+{
+    ViewModelInstanceRuntime* vm = vmi_path(handle, path);
+    if (vm == nullptr)
+        return 1;
+    if (value == nullptr)
+    {
+        shim_set_error("replacement view-model instance is null");
+        return 1;
+    }
+    if (!vm->replaceViewModel(path, as_vmi(value)))
+    {
+        shim_set_error("replaceViewModel failed (not a view-model property or type mismatch)");
+        return 1;
+    }
+    return RIVE_OK;
 }

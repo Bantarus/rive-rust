@@ -89,7 +89,10 @@ mod scene;
 pub use scene::{Artboard, File, HitResult, StateMachine};
 
 mod view_model;
-pub use view_model::{BindableArtboard, RiveImage, RiveValueKind, RiveViewModelInstance};
+pub use view_model::{
+    BindableArtboard, RiveImage, RiveOwnedViewModel, RiveValueKind, RiveViewModelInstance,
+    RiveViewModelRuntime,
+};
 
 mod assets;
 pub use assets::{AssetRequest, AssetType};

@@ -76,7 +76,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 |---------|:------:|-----------|-------|
 | Advance / playback tick | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | `StateMachine::advance`; per-instance `RiveAnimation.speed` / `paused` / `seek` (see playback controls below) |
 | Pointer input → Listeners / joysticks | ✅ | [state-machines](https://rive.app/docs/runtimes/state-machines) | move/down/up/exit; `RivePointer` — **both tiers AND every zero-copy draw path** (floor + zero-copy **dedicated** + zero-copy **atlas** tiles). The inversion tracks the face's Fit/Alignment; atlas faces are tile-aware (target-pixel coords are normalized into the face's tile before inverting, via `set_pointer_tile`) |
-| **View-model data binding** | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **per-item / nested writes** ✅ — the handle is now read-**write** (`set_*` / `fire_trigger`), and `Artboard::vm_resolve` walks a `name[i]/leaf` path to drive a **list item** (which the flat resolver can't index); the `RiveViewModel` component accepts the same `[i]` paths in both tiers; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). **Image-reference props** ✅ — decode encoded bytes (PNG/JPEG/WEBP) to a reusable `RiveImage` (`Context::decode_image`), then bind with `Artboard::vm_set_image` (flat + `/`-nested) / `RiveViewModelInstance::set_image` (nested/list-item), or unbind with `vm_clear_image`/`clear_image`; `RiveViewModel::set_image(path, bytes)` ferries + decodes at apply in BOTH tiers (same-context enforced → `ContextMismatch`). `RiveViewModel` component = queued writes + typed `watch` read-back in **BOTH tiers** ✅ — `floor` refreshes `values` inline after advance (same frame); `zero_copy` reads after the render-node advance and ships results back over the **render→main back-channel** (`RiveReadbackChannel`, drained in `PreUpdate` — so a `zero_copy` read-back trails the advance it observed by one frame). **Artboard-reference props** ✅ — `File::bindable_artboard_named`/`_default` build a `BindableArtboard`, bound via `Artboard::vm_set_artboard` / `RiveViewModelInstance::set_artboard` (mirrors the image-ref path; same-context enforced); see the nested-artboard row. **Deferred:** list **structural** mutation (add/remove/swap), Bevy `set_artboard` ferry (safe-layer-only; the per-instance `File` is dropped, and no demo asset authors `propertyArtboard`) |
+| **View-model data binding** | 🟡 | [data-binding](https://rive.app/docs/runtimes/data-binding) | get/set **number/bool/trigger/color/string/enum** (flat + `/`-nested paths) ✅; **introspection incl. nested VMs + lists** via the borrowed `RiveViewModelInstance` handle (`Artboard::vm_root` → `view_model`/`list_size`/`list_item` + reads) ✅; **per-item / nested writes** ✅ — the handle is now read-**write** (`set_*` / `fire_trigger`), and `Artboard::vm_resolve` walks a `name[i]/leaf` path to drive a **list item** (which the flat resolver can't index); the `RiveViewModel` component accepts the same `[i]` paths in both tiers; **WRITE forwarding in BOTH tiers** ✅ (`floor` inline; `zero_copy` ferried to the render world before advance). **Image-reference props** ✅ — decode encoded bytes (PNG/JPEG/WEBP) to a reusable `RiveImage` (`Context::decode_image`), then bind with `Artboard::vm_set_image` (flat + `/`-nested) / `RiveViewModelInstance::set_image` (nested/list-item), or unbind with `vm_clear_image`/`clear_image`; `RiveViewModel::set_image(path, bytes)` ferries + decodes at apply in BOTH tiers (same-context enforced → `ContextMismatch`). `RiveViewModel` component = queued writes + typed `watch` read-back in **BOTH tiers** ✅ — `floor` refreshes `values` inline after advance (same frame); `zero_copy` reads after the render-node advance and ships results back over the **render→main back-channel** (`RiveReadbackChannel`, drained in `PreUpdate` — so a `zero_copy` read-back trails the advance it observed by one frame). **Artboard-reference props** ✅ — `File::bindable_artboard_named`/`_default` build a `BindableArtboard`, bound via `Artboard::vm_set_artboard` / `RiveViewModelInstance::set_artboard` (mirrors the image-ref path; same-context enforced); see the nested-artboard row. **List STRUCTURAL mutation + INSTANCE construction** ✅ — mint fresh instances from a view-model DEFINITION (`Artboard::view_model_by_name`/`_by_index`/`default_view_model` → `RiveViewModelRuntime::create_instance`/`_default_instance`/`_from_name`/`_from_index` — reached through the artboard's stashed `File*`, so NO retained Rust `File`), populate them (`RiveOwnedViewModel::borrow` → the read-write handle), then `RiveViewModelInstance::list_add`/`_add_at`/`_remove`/`_remove_at`/`_swap`/`_clear` or `replace_view_model` (type-checked). The `RiveViewModel` component ferries declarative structural commands in BOTH tiers (`list_add_new`(`NewViewModel`)/`list_insert_new`/`list_remove_at`/`list_swap`/`list_clear`/`replace_view_model`), applied AFTER value writes before advance; the **Bevy `set_artboard` ferry now SHIPS too** (`RiveViewModel::set_artboard`/`clear_artboard` via an artboard-sourced `BindableArtboard`). Render-proven on the slot-machine `WheelList` (swap/remove/clear + construct-and-add each visibly change the render; a seeded `Iconartboard` is seed-sensitive; zero-copy `list_clear` proven on the 4090). **Deferred:** constructing an *anonymous inline* nested VM type (only top-level, named `viewModelBy*` definitions are constructable — an inline type like the slot machine's `IconType` has no name to look up) |
 | State-machine inputs (bool/number/trigger) | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated — not supported.** The classic `Scene::getBool/getNumber/getTrigger` path is superseded by view-model **data binding** (the modern channel, already shipped). See Excluded. |
 | View-model change / trigger observation | ✅ | [data-binding](https://rive.app/docs/runtimes/data-binding) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property — **BOTH tiers** (`floor` emits inline; `zero_copy` fires travel the render→main back-channel and are emitted from the `PreUpdate` drain, one frame after the advance that fired; both zero-copy advance paths — dedicated + atlas — are wired). Supersedes the deprecated events read-back below. |
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
@@ -92,9 +92,20 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **List structural mutation + nested-VM construction** — list read / size / per-item writes ship;
-   add/remove/swap + creating new list-item / VM instances remain (need `ViewModelInstanceListRuntime`
-   mutators). Pairs with the Bevy `set_artboard` ferry (needs per-instance `File` retention).
+1. **Text-run read-back over the render→main channel** — `Artboard::text_get` is safe-layer-only;
+   lift it into the `RiveReadbackChannel` (like the rig / playhead reads) so `RiveText` can read a
+   run's live string back in both tiers. Small, mirrors the shipped read surfaces.
+2. **Constructing anonymous inline nested VM types** — instance construction ships for top-level
+   named `viewModelBy*` definitions; an *inline* nested type (e.g. the slot machine's `IconType`,
+   which has no top-level name) can't be minted. Would need a nested-definition accessor.
+
+*(Backlog item "List structural mutation + nested-VM construction" is COMPLETE: mint fresh
+view-model instances from a definition (`Artboard::view_model_by_name` → `RiveViewModelRuntime::
+create_instance*` — reached through the artboard's stashed `File*`, so no retained Rust `File`),
+populate + `list_add`/`_add_at`/`_remove`/`_remove_at`/`_swap`/`_clear` / `replace_view_model` on the
+handle, and the `RiveViewModel` component's declarative structural commands in BOTH tiers — plus the
+long-deferred Bevy `set_artboard` ferry, now unblocked by the same artboard-sourced `BindableArtboard`.
+Render-proven on the slot-machine `WheelList`; see the view-model row above.)*
 
 *(Backlog item "Bevy-side read-back in `zero_copy`" is COMPLETE: the render→main back-channel
 (`RiveReadbackChannel`, an `Arc<Mutex<Vec>>` shared by both worlds — node reads after advance,
@@ -155,13 +166,18 @@ both deprecated; view-model data binding is the modern write *and* read channel.
 - **artboard reference props** — both now **ship**: `propertyImage` (decode → `RiveImage` →
   `vm_set_image`) and `propertyArtboard` (`File::bindable_artboard_*` → `BindableArtboard` →
   `vm_set_artboard` / `set_artboard`), shipped WITH nested-artboard access (which is where the
-  `BindableArtboard` value source comes from). The only remaining gap is the **Bevy `set_artboard`
-  ferry** — safe-layer + example only, since the per-instance `File` is dropped after build and no
-  demo asset authors a `propertyArtboard` property to render-prove it (the focus/FocusData situation).
-- **list STRUCTURAL mutation (add/remove/swap)** — list read / size / item-introspection **and per-item
-  writes** now ship (the handle is read-write; `vm_resolve` drives `list[i]/leaf`); only add/remove/swap +
-  creating new list-item instances remain (need `ViewModelInstanceListRuntime` mutators + VM-instance
-  construction). Reads + per-item writes cover the common game case.
+  `BindableArtboard` value source comes from). The **Bevy `set_artboard` ferry now SHIPS too** —
+  `RiveViewModel::set_artboard`/`clear_artboard` in both tiers, sourced from an artboard-owned
+  `BindableArtboard` (`Artboard::bindable_artboard_named`, via the stashed `File*`), so it needs NO
+  retained Rust `File`. Still API/round-trip-verified only (no demo asset authors `propertyArtboard`).
+- **list STRUCTURAL mutation (add/remove/swap) + INSTANCE construction — now SHIP**: mint fresh
+  instances from a view-model DEFINITION (`Artboard::view_model_by_name` → `RiveViewModelRuntime::
+  create_instance*`, through the artboard's stashed `File*`), populate them (`RiveOwnedViewModel::
+  borrow`), then `RiveViewModelInstance::list_add`/`_add_at`/`_remove`/`_remove_at`/`_swap`/`_clear` /
+  `replace_view_model` (type-checked); the `RiveViewModel` component ferries declarative structural
+  commands (`list_add_new`/`list_insert_new`/`list_remove_at`/`list_swap`/`list_clear`/
+  `replace_view_model`) in BOTH tiers. Render-proven on the slot-machine `WheelList`. Only remaining
+  gap: constructing an *anonymous inline* nested VM type (no top-level name to `viewModelBy*`).
 
 ---
 

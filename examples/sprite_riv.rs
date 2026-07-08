@@ -20,6 +20,11 @@
 //!   RIVE_WATCH_PLAYHEAD=1              watch + log the live playhead/duration (only a
 //!                                      linear-animation scene has one)
 //!   RIVE_WATCH_FOCUS=1                 watch + log the state machine's FocusState
+//!   RIVE_TEXT_WATCH="name"             M-READBACK text proof: watch text run `name`
+//!                                      ("" = first unnamed) and log its read-back string
+//!   RIVE_TEXT_SET="value"              set the watched run to `value` at spawn (via the
+//!                                      proven RiveText write path) so the read tracks the
+//!                                      write; pair with RIVE_TEXT_WATCH
 //!
 //! The frozen color/orientation contract requires `Tonemapping::None` + no `Hdr`
 //! on the camera (so the sRGB sample->output round-trip is an identity) and
@@ -30,7 +35,9 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::winit::WinitSettings;
 
-use bevy_rive::{BoneProp, RiveAnimation, RiveFile, RiveInput, RivePlugin, RiveRig, RiveTarget};
+use bevy_rive::{
+    BoneProp, RiveAnimation, RiveFile, RiveInput, RivePlugin, RiveRig, RiveTarget, RiveText,
+};
 
 #[derive(Resource)]
 struct Cfg {
@@ -48,6 +55,11 @@ struct Cfg {
     watch_playhead: bool,
     /// M-READBACK floor proof: watch the state machine's `FocusState`.
     watch_focus: bool,
+    /// M-READBACK text proof: watch text run `name` ("" = first unnamed).
+    text_watch: Option<String>,
+    /// M-READBACK text proof: set the watched run to this value at spawn, so the
+    /// read-back tracks a write (the text analogue of `rig_spin`).
+    text_set: Option<String>,
 }
 
 #[derive(Resource, Default)]
@@ -113,6 +125,11 @@ fn main() {
             rig_spin: std::env::var_os("RIVE_RIG_SPIN").is_some(),
             watch_playhead: std::env::var_os("RIVE_WATCH_PLAYHEAD").is_some(),
             watch_focus: std::env::var_os("RIVE_WATCH_FOCUS").is_some(),
+            text_watch: std::env::var("RIVE_TEXT_WATCH")
+                .ok()
+                .map(|s| s.trim().to_string()),
+            // Not trimmed — the set value is used verbatim (may contain spaces).
+            text_set: std::env::var("RIVE_TEXT_SET").ok(),
         })
         .init_resource::<CaptureState>()
         .add_systems(Startup, setup)
@@ -156,6 +173,16 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
         input.watch_focus();
         e.insert(input);
     }
+    if let Some(name) = &cfg.text_watch {
+        let mut text = RiveText::default();
+        text.watch_text(name.clone());
+        // Optionally drive the run so the read-back tracks a write (like RIVE_RIG_SPIN
+        // for bones) — set BEFORE the first advance so the read returns it this tick.
+        if let Some(value) = &cfg.text_set {
+            text.set(name.clone(), value.clone());
+        }
+        e.insert(text);
+    }
     // `attach_display` spawns the textured quad once the plugin writes the real
     // image handle back into RiveTarget.
 }
@@ -188,21 +215,29 @@ fn report_reads(
         &RiveAnimation,
         Option<&RiveRig>,
         Option<&RiveInput>,
+        Option<&RiveText>,
     )>,
     mut last_bone: Local<std::collections::HashMap<Entity, f32>>,
     mut bone_changes: Local<u32>,
+    mut last_text: Local<std::collections::HashMap<Entity, Option<String>>>,
+    mut text_changes: Local<u32>,
     mut playhead_frames: Local<u32>,
     mut frames: Local<u32>,
 ) {
-    if cfg.rig_watch.is_none() && !cfg.watch_playhead && !cfg.watch_focus {
+    if cfg.rig_watch.is_none()
+        && !cfg.watch_playhead
+        && !cfg.watch_focus
+        && cfg.text_watch.is_none()
+    {
         return;
     }
     *frames += 1;
     let mut playhead_now = None;
     let mut strength_now = None;
     let mut focus_now = None;
+    let mut text_now = None;
     let mut any_playhead = false;
-    for (entity, anim, rig, input) in &q {
+    for (entity, anim, rig, input, text) in &q {
         if let (Some(name), Some(rig)) = (cfg.rig_watch.as_ref(), rig) {
             if let Some(rot) = rig.bone(name, BoneProp::Rotation) {
                 if last_bone.get(&entity) != Some(&rot) {
@@ -217,6 +252,20 @@ fn report_reads(
                 }
             }
             strength_now = rig.constraint_strength(name);
+        }
+        if let (Some(name), Some(text)) = (cfg.text_watch.as_ref(), text) {
+            let now = text.text(name).map(|s| s.to_string());
+            if last_text.get(&entity) != Some(&now) {
+                *text_changes += 1;
+                if *text_changes <= 10 {
+                    info!(
+                        "text read-back: run {name:?} = {now:?} ({entity:?}, change #{})",
+                        *text_changes
+                    );
+                }
+                last_text.insert(entity, now.clone());
+            }
+            text_now = now;
         }
         if cfg.watch_playhead {
             any_playhead |= anim.playhead().is_some();
@@ -233,8 +282,16 @@ fn report_reads(
     if frames.is_multiple_of(60) {
         info!(
             "read-back tally after {} frames: bone changes={}, constraint strength={:?}, \
-             playhead frames-with-value={}, playhead now={:?}, focus={:?}",
-            *frames, *bone_changes, strength_now, *playhead_frames, playhead_now, focus_now,
+             playhead frames-with-value={}, playhead now={:?}, focus={:?}, \
+             text changes={}, text now={:?}",
+            *frames,
+            *bone_changes,
+            strength_now,
+            *playhead_frames,
+            playhead_now,
+            focus_now,
+            *text_changes,
+            text_now,
         );
     }
 }

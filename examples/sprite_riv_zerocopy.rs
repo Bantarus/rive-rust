@@ -54,6 +54,13 @@
 //!   RIVE_WATCH_FOCUS=1            watch the state machine's FocusState and log it — proves
 //!                                 FOCUS read-back (API-level: no demo asset authors FocusData,
 //!                                 so the delivered state is the default nothing-focused).
+//!   RIVE_TEXT_WATCH="name"        watch text run `name` (empty = first unnamed) and log its
+//!                                 read-back string — proves TEXT read-back through the channel
+//!                                 (one frame behind). E.g. RIVE_RIV=9939-18941-big-wheel-demo.riv
+//!                                 RIVE_TEXT_WATCH="" reads "BIG".
+//!   RIVE_TEXT_SET="value"         set the watched run to `value` at spawn (via the proven
+//!                                 RiveText write ferry) so the read tracks the write. Pair with
+//!                                 RIVE_TEXT_WATCH.
 //!
 //! The **display path is identical to M1a**: a Bevy `Sprite` on
 //! `RiveTarget.image`. That is the whole point of the uniform seam — only the
@@ -72,7 +79,7 @@ use bevy::winit::WinitSettings;
 use bevy_rive::{
     install_interlock_device_callback, BoneProp, NewViewModel, RiveActive, RiveAnimation,
     RiveAtlasKey, RiveFile, RiveInput, RivePointer, RivePropertyChanged, RiveRig, RiveSampling,
-    RiveSurface, RiveTarget, RiveViewModel, RiveZeroCopyPlugin,
+    RiveSurface, RiveTarget, RiveText, RiveViewModel, RiveZeroCopyPlugin,
 };
 
 /// A one-shot structural list command parsed from `RIVE_VM_LIST` (see `Cfg::vm_list`).
@@ -162,6 +169,10 @@ struct Cfg {
     watch_playhead: bool,
     /// M-READBACK: `RIVE_WATCH_FOCUS=1` — watch the state machine's `FocusState`.
     watch_focus: bool,
+    /// M-READBACK: `RIVE_TEXT_WATCH="name"` — watch text run `name` ("" = first unnamed).
+    text_watch: Option<String>,
+    /// M-READBACK: `RIVE_TEXT_SET="value"` — set the watched run at spawn (read tracks write).
+    text_set: Option<String>,
     /// M-INPUT: `RIVE_POINTER="x,y"` — attach a `RivePointer` at this fixed TARGET-PIXEL
     /// position to each face, proving pointer-input forwarding through the zero-copy
     /// (render-world) advance path. The node re-asserts `pointer_move` every frame, so a
@@ -267,6 +278,12 @@ fn main() {
     let rig_spin = std::env::var_os("RIVE_RIG_SPIN").is_some();
     let watch_playhead = std::env::var_os("RIVE_WATCH_PLAYHEAD").is_some();
     let watch_focus = std::env::var_os("RIVE_WATCH_FOCUS").is_some();
+    // M-READBACK: RIVE_TEXT_WATCH="name" watches a text run; RIVE_TEXT_SET drives it.
+    let text_watch = std::env::var("RIVE_TEXT_WATCH")
+        .ok()
+        .map(|s| s.trim().to_string());
+    // Not trimmed — the set value is used verbatim (may contain spaces).
+    let text_set = std::env::var("RIVE_TEXT_SET").ok();
     // M-INPUT: RIVE_POINTER="x,y" — a fixed target-pixel pointer position forwarded to each
     // face, proving pointer-input forwarding through the zero-copy advance path.
     let pointer = std::env::var("RIVE_POINTER").ok().and_then(|s| {
@@ -358,6 +375,8 @@ fn main() {
         rig_spin,
         watch_playhead,
         watch_focus,
+        text_watch,
+        text_set,
         pointer,
     })
     .init_resource::<CaptureState>()
@@ -480,6 +499,16 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, cfg: Res<Cfg>) {
             input.watch_focus();
             e.insert(input);
         }
+        // M-READBACK: register a text-run read (and optionally drive it) — `report_reads`
+        // logs the string the render→main channel delivers (one frame behind).
+        if let Some(name) = &cfg.text_watch {
+            let mut text = RiveText::default();
+            text.watch_text(name.clone());
+            if let Some(value) = &cfg.text_set {
+                text.set(name.clone(), value.clone());
+            }
+            e.insert(text);
+        }
     }
 }
 
@@ -577,13 +606,20 @@ fn report_reads(
         &RiveAnimation,
         Option<&RiveRig>,
         Option<&RiveInput>,
+        Option<&RiveText>,
     )>,
     mut last_bone: Local<std::collections::HashMap<Entity, f32>>,
     mut bone_changes: Local<u32>,
+    mut last_text: Local<std::collections::HashMap<Entity, Option<String>>>,
+    mut text_changes: Local<u32>,
     mut playhead_frames: Local<u32>,
     mut frames: Local<u32>,
 ) {
-    if cfg.rig_watch.is_none() && !cfg.watch_playhead && !cfg.watch_focus {
+    if cfg.rig_watch.is_none()
+        && !cfg.watch_playhead
+        && !cfg.watch_focus
+        && cfg.text_watch.is_none()
+    {
         return;
     }
     *frames += 1;
@@ -591,8 +627,9 @@ fn report_reads(
     let mut playhead_now = None;
     let mut strength_now = None;
     let mut focus_now = None;
+    let mut text_now = None;
     let mut any_playhead = false;
-    for (entity, anim, rig, input) in &q {
+    for (entity, anim, rig, input, text) in &q {
         if let (Some(name), Some(rig)) = (cfg.rig_watch.as_ref(), rig) {
             if let Some(rot) = rig.bone(name, BoneProp::Rotation) {
                 if last_bone.get(&entity) != Some(&rot) {
@@ -607,6 +644,20 @@ fn report_reads(
                 }
             }
             strength_now = rig.constraint_strength(name);
+        }
+        if let (Some(name), Some(text)) = (cfg.text_watch.as_ref(), text) {
+            let now = text.text(name).map(|s| s.to_string());
+            if last_text.get(&entity) != Some(&now) {
+                *text_changes += 1;
+                if *text_changes <= 10 {
+                    info!(
+                        "text read-back: run {name:?} = {now:?} ({entity:?}, change #{})",
+                        *text_changes
+                    );
+                }
+                last_text.insert(entity, now.clone());
+            }
+            text_now = now;
         }
         if cfg.watch_playhead {
             any_playhead |= anim.playhead().is_some();
@@ -623,8 +674,16 @@ fn report_reads(
     if frames.is_multiple_of(60) {
         info!(
             "read-back tally after {} frames: bone changes={}, constraint strength={:?}, \
-             playhead frames-with-value={}, playhead now={:?}, focus={:?}",
-            *frames, *bone_changes, strength_now, *playhead_frames, playhead_now, focus_now,
+             playhead frames-with-value={}, playhead now={:?}, focus={:?}, \
+             text changes={}, text now={:?}",
+            *frames,
+            *bone_changes,
+            strength_now,
+            *playhead_frames,
+            playhead_now,
+            focus_now,
+            *text_changes,
+            text_now,
         );
     }
 }

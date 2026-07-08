@@ -151,7 +151,9 @@ pub use assets::RiveAssets;
 // Per-feature module. Runtime text-run set: the `RiveText` component queues
 // `TextValueRun` string writes, applied before advance in both tiers (`floor`
 // inline; `zero_copy` ferried to the render world like view-model writes). Reads
-// are at the safe layer (`Artboard::text_get`).
+// are dual-tier too — register with `watch_text`/`watch_text_in`, refreshed after
+// advance (`floor` inline; `zero_copy` over the `RiveReadbackChannel`, one frame
+// of latency).
 mod text;
 pub use text::RiveText;
 
@@ -1174,18 +1176,31 @@ fn advance_and_upload_rive(
             }
         }
 
-        // Read registered rig properties (bones / constraints / solos) AFTER
-        // advancing so they reflect the solved pose — redirected to the nested
-        // child if one is targeted, matching where the rig WRITES went above.
-        // RE-RESOLVE the nested target for the reads: advance can REPLACE the
-        // nested child instance (a data-bound artboard-reference property applies
-        // during updateDataBinds and resets the slot's instance), so the
-        // pre-advance `rig_text_ab` may point at a freed child. The pre-advance
-        // resolve stays correct for the WRITES (no advance ran in between).
-        if rig.as_ref().is_some_and(|r| r.has_reads()) {
+        // Read registered rig properties (bones / constraints / solos) + text runs
+        // AFTER advancing so they reflect the solved pose / shaped text — redirected
+        // to the nested child if one is targeted, matching where the rig + text
+        // WRITES went above. RE-RESOLVE the nested target for the reads (once,
+        // shared by rig + text): advance can REPLACE the nested child instance (a
+        // data-bound artboard-reference property applies during updateDataBinds and
+        // resets the slot's instance), so the pre-advance `rig_text_ab` may point at
+        // a freed child. The pre-advance resolve stays correct for the WRITES (no
+        // advance ran in between). The `has_reads` checks go through `Deref` (no
+        // tick), so an unwatched face doesn't trip change detection — only the
+        // refresh deref-muts.
+        let rig_wants = rig.as_ref().is_some_and(|r| r.has_reads());
+        let text_wants = text.as_ref().is_some_and(|t| t.has_reads());
+        if rig_wants || text_wants {
             let read_ab = nested_target.and_then(|t| t.resolve(&inst.artboard));
-            if let Some(rig) = rig.as_deref_mut() {
-                crate::rig::refresh_rig_reads(rig, read_ab.as_ref().unwrap_or(&inst.artboard));
+            let read_ab = read_ab.as_ref().unwrap_or(&inst.artboard);
+            if rig_wants {
+                if let Some(rig) = rig.as_deref_mut() {
+                    crate::rig::refresh_rig_reads(rig, read_ab);
+                }
+            }
+            if text_wants {
+                if let Some(text) = text.as_deref_mut() {
+                    crate::text::refresh_text_reads(text, read_ab);
+                }
             }
         }
 

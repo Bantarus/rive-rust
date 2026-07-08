@@ -81,7 +81,7 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 | View-model change / trigger observation | ✅ | [data-binding](https://rive.app/docs/runtimes/data-binding) | the **read** channel (modern *events* replacement): after advance, `flushChanges()` per watched path → `RiveViewModel::observe(path)` emits a `RivePropertyChanged` Bevy message when the rig fires a trigger or changes a property — **BOTH tiers** (`floor` emits inline; `zero_copy` fires travel the render→main back-channel and are emitted from the `PreUpdate` drain, one frame after the advance that fired; both zero-copy advance paths — dedicated + atlas — are wired). Supersedes the deprecated events read-back below. |
 | ~~Events read-back (state changes, custom / open-url / audio)~~ | ⛔ | [state-machines](https://rive.app/docs/runtimes/state-machines) | **Deprecated by Rive — not supported.** "Listening to Rive Events at runtime is deprecated and will be removed in future versions." Use **view-model change / trigger observation** (the row above) instead. See Excluded. |
 | Named artboard / state-machine selection | ✅ | [artboards](https://rive.app/docs/runtimes/artboards) | `ArtboardSelector` / `StateMachineSelector` honor **Default / ByName / ByIndex** in BOTH tiers (`File::artboard_named/_at`, `Artboard::state_machine_named/_at`); discover names via `artboard_names()` / `state_machine_names()` |
-| Runtime text value get/set | ✅ | — | `TextValueRun` get/set by authored name (top-level or a nested artboard via a `/`-path). **`RiveText`** component queues set-writes (both tiers — `floor` inline, `zero_copy` ferried like view-model writes); `Artboard::text_get/text_set/text_set_in/text_run_names` at the safe layer. Setting re-shapes on the next advance. Bevy read-back deferred (safe-layer `text_get` covers it) |
+| Runtime text value get/set | ✅ | — | `TextValueRun` get/set by authored name (top-level or a nested artboard via a `/`-path). **`RiveText`** component queues set-writes (both tiers — `floor` inline, `zero_copy` ferried like view-model writes); `Artboard::text_get/text_set/text_set_in/text_run_names` at the safe layer. Setting re-shapes on the next advance. **Bevy-side text read-back** ✅ — register with `RiveText::watch_text`/`watch_text_in`, read with `text`/`text_in` (BOTH tiers: `floor` refreshes inline after advance, `zero_copy` over the render→main channel one frame late; reads honor the same `RiveNestedTarget` redirect as the text writes; live-proven — a run set to "RUST" reads back "RUST", the render visibly changes) |
 | Out-of-band asset loading (images/fonts/audio) | ✅ | [loading-assets](https://rive.app/docs/runtimes/loading-assets) | `FileAssetLoader` callback → supply the **Referenced** (not Embedded) images / fonts / audio a `.riv` needs. **`RiveAssets`** component (name → encoded bytes), both tiers; `Context::load_file_with_assets` at the safe layer. Host returns encoded file bytes (PNG/JPEG/WEBP, font, audio); rive decodes via the context factory (libpng/jpeg/webp + harfbuzz). A name not in the map (or decode failure) falls back to in-band content |
 | Audio playback | ✅ | [audio-events](https://rive.app/docs/runtimes/audio) | **system mode (default):** `--with_rive_audio=system` — rive owns a miniaudio device that plays a `.riv`'s audio events / embedded audio straight to the OS output **automatically during advance** (both tiers; no per-sound API). Host bridge controls: `rive_renderer::audio::{is_available,start,stop,set_volume}` (process-global engine) + the optional **`RiveAudio`** Bevy resource (master volume / mute). **host-mixer (external) mode:** the **`audio-external`** feature (`--with_rive_audio=external`) — rive owns NO device; the host pulls the mixed PCM (`rive_renderer::audio::external::{channels,sample_rate,read_frames,sum_frames}`) into its own mixer. `bevy-rive` routes it into **Bevy's own audio graph** via the **`RiveAudioStream`** `Decodable` source + **`RiveExternalAudioPlugin`** (unified mixing under Bevy's `GlobalVolume`; `RiveAudio` still applies as rive's master gain). The two modes are a mutually-exclusive whole-build choice |
 | **Joystick / gamepad / keyboard / focus input** | ✅ | — | host-driven inputs for game-controlled rigs, both tiers, via the **`RiveInput`** component (queues commands applied before advance — `floor` inline; `zero_copy` ferried, like the rig writes). Two shapes: **Joystick** is an AUTHORED component (like a bone) — `RiveInput::set_joystick(name, x, y)` / `Artboard::joystick_set`/`joystick_get`/`joystick_names`; the artboard APPLIES it during advance (drives linked animations/constraints), so a set sticks unless an animation also keys it (render-proven: the eye-joysticks demo's "Pupil" joystick visibly moves). **Keyboard / gamepad / focus** are a state-machine EVENT feed routed through the SM's `FocusManager` (focus tree auto-built at SM creation) to the focused element's listeners — `StateMachine::key_input(Key, KeyModifiers, …)` / `text_input` / `gamepad_button(GamepadButton, …)` / `gamepad_axis(GamepadAxis, …)` / `focus_advance(FocusDir)` / `clear_focus` / `focus_state()`; `RiveInput::key`/`key_down`/`key_up`/`text`/`gamepad_button`/`gamepad_axis`/`focus`/`clear_focus`. The event feed only DOES something when the `.riv` authors `FocusData` + key/gamepad listeners (otherwise "not consumed" — no demo asset authors these yet, so the feed is API/compile-verified, not render-proven). Gamepad state accumulates a faithful W3C snapshot per SM. **Bevy-side `focus_state` read-back** ✅ — `RiveInput::watch_focus()` + `focus_state()` (BOTH tiers: `floor` reads inline after advance; `zero_copy` over the render→main channel, one frame late; API-proven — the default nothing-focused state delivers; no demo asset authors `FocusData`). **Deferred:** multi-device gamepads; raw (non-standard) gamepad indices in the typed API |
@@ -92,12 +92,18 @@ and **view-model data binding** (`rive_shim_viewmodel.cpp` → `Artboard::vm_*` 
 
 ## Priority backlog (next features, ROI-ordered)
 
-1. **Text-run read-back over the render→main channel** — `Artboard::text_get` is safe-layer-only;
-   lift it into the `RiveReadbackChannel` (like the rig / playhead reads) so `RiveText` can read a
-   run's live string back in both tiers. Small, mirrors the shipped read surfaces.
-2. **Constructing anonymous inline nested VM types** — instance construction ships for top-level
+1. **Constructing anonymous inline nested VM types** — instance construction ships for top-level
    named `viewModelBy*` definitions; an *inline* nested type (e.g. the slot machine's `IconType`,
    which has no top-level name) can't be minted. Would need a nested-definition accessor.
+
+*(Backlog item "Text-run read-back over the render→main channel" is COMPLETE: `RiveText::watch_text`
+/`watch_text_in` register a run (by `/`-path + name); the value refreshes into `text`/`text_in`
+after each advance in BOTH tiers — `floor` inline (same frame), `zero_copy` over the
+`RiveReadbackChannel` (one frame late). A pure Bevy-layer slice (the safe-layer `text_get_in`
+already existed); mirrors the rig read surface, honoring the same `RiveNestedTarget` redirect (the
+node re-resolves the nested child AFTER advance, shared with the rig read). Render-proven both
+tiers on the big-wheel demo — a run set to "RUST" reads back "RUST" (floor same-frame; zero_copy
+one frame late), the render visibly changes; see the text-run row above.)*
 
 *(Backlog item "List structural mutation + nested-VM construction" is COMPLETE: mint fresh
 view-model instances from a definition (`Artboard::view_model_by_name` → `RiveViewModelRuntime::
@@ -111,8 +117,7 @@ Render-proven on the slot-machine `WheelList`; see the view-model row above.)*
 (`RiveReadbackChannel`, an `Arc<Mutex<Vec>>` shared by both worlds — node reads after advance,
 `PreUpdate` drain fans out, one frame of latency vs floor's same-frame reads) carries all the
 backlog read surfaces: view-model watch + observe, rig (bone/constraint/solo), `focus_state`,
-and the live playhead/duration — see the per-feature rows above. Text-run read-back remains
-safe-layer-only, a candidate for the same channel.)*
+the live playhead/duration, and text-run reads — see the per-feature rows above.)*
 
 *(Recently shipped: **nested-artboard runtime access + artboard-reference binding** — reach into a
 child artboard mounted by a `NestedArtboard` component: `Artboard::nested_artboard_count`/`_names`
@@ -162,7 +167,7 @@ both deprecated; view-model data binding is the modern write *and* read channel.
   watches / flushes observes after advance — both the dedicated and atlas paths — and a
   `PreUpdate` drain writes `RiveViewModel::values` + emits `RivePropertyChanged`; one frame
   of latency vs floor's same-frame reads). The same channel now also carries the rig /
-  `focus_state` / playhead reads (see their rows); text-run read-back remains safe-layer-only.
+  `focus_state` / playhead / text-run reads (see their rows).
 - **artboard reference props** — both now **ship**: `propertyImage` (decode → `RiveImage` →
   `vm_set_image`) and `propertyArtboard` (`File::bindable_artboard_*` → `BindableArtboard` →
   `vm_set_artboard` / `set_artboard`), shipped WITH nested-artboard access (which is where the

@@ -1200,6 +1200,10 @@ struct ExtractedRive {
     /// M-READBACK: whether the `RiveAnimation` registered playhead read-back — the
     /// node reads the state machine's live time + duration after advance.
     playhead_read: bool,
+    /// M-READBACK: the registered text read list (from a `RiveText`), read in the node
+    /// after advance (from the same nested-redirected artboard as the text/rig writes);
+    /// results ship back over the channel. Empty like `vm_watch` above.
+    text_reads: Vec<crate::text::TextRead>,
     /// M-TEXT: this frame's text-run set writes (from a `RiveText`), applied to
     /// the instance in the node before advance — the zero-copy analogue of the
     /// floor advance system's inline `apply_text_writes`. Empty for faces with no
@@ -1282,6 +1286,9 @@ struct Readback {
     /// Rig reads (bone / constraint / solo) + values, stored back into the entity's
     /// [`RiveRig`] on the drain side (which re-checks each is still registered).
     rig_values: Vec<(crate::rig::RigRead, crate::rig::RigValue)>,
+    /// Text-run reads (path + name) + string values, stored back into the entity's
+    /// [`RiveText`] on the drain side (which re-checks each is still registered).
+    text_values: Vec<(crate::text::TextRead, String)>,
     /// Focus state, if the entity's [`RiveInput`] registered `watch_focus`.
     focus: Option<rive_renderer::FocusState>,
     /// Live playhead + duration (seconds), if the [`RiveAnimation`] registered
@@ -1298,6 +1305,7 @@ impl Readback {
             vm_values: Vec::new(),
             vm_fired: Vec::new(),
             rig_values: Vec::new(),
+            text_values: Vec::new(),
             focus: None,
             playhead: None,
         }
@@ -1308,6 +1316,7 @@ impl Readback {
         self.vm_values.is_empty()
             && self.vm_fired.is_empty()
             && self.rig_values.is_empty()
+            && self.text_values.is_empty()
             && self.focus.is_none()
             && self.playhead.is_none()
     }
@@ -1350,6 +1359,7 @@ fn drain_readback(
     channel: Res<RiveReadbackChannel>,
     mut vms: Query<&mut RiveViewModel>,
     mut rigs: Query<&mut RiveRig>,
+    mut texts: Query<&mut RiveText>,
     mut inputs: Query<&mut RiveInput>,
     mut anims: Query<&mut RiveAnimation>,
     mut vm_changes: MessageWriter<RivePropertyChanged>,
@@ -1385,6 +1395,15 @@ fn drain_readback(
             if let Ok(mut rig) = rigs.get_mut(rb.entity) {
                 for (read, value) in rb.rig_values {
                     rig.store_read(&read, value);
+                }
+            }
+        }
+
+        // --- Text: run string reads (store_read re-checks each). ---
+        if !rb.text_values.is_empty() {
+            if let Ok(mut text) = texts.get_mut(rb.entity) {
+                for (read, value) in rb.text_values {
+                    text.store_read(&read, value);
                 }
             }
         }
@@ -1979,6 +1998,7 @@ fn extract_rive_instances(
                 rig_reads: Vec::new(),
                 focus_read: false,
                 playhead_read: false,
+                text_reads: Vec::new(),
                 text_writes: Vec::new(),
                 rig_writes: Vec::new(),
                 input_cmds: Vec::new(),
@@ -2052,6 +2072,9 @@ fn extract_rive_instances(
             rig_reads: rig.map(|r| r.read_list().to_vec()).unwrap_or_default(),
             focus_read: input.is_some_and(|i| i.wants_focus()),
             playhead_read: anim.wants_playhead(),
+            // M-READBACK: ferry the registered text read list (persistent, cloned each
+            // frame like `rig_reads`; the node reads it after advance, ships results back).
+            text_reads: text.map(|t| t.read_list().to_vec()).unwrap_or_default(),
             text_writes: text.map(|t| t.staged().to_vec()).unwrap_or_default(),
             rig_writes: rig.map(|r| r.staged().to_vec()).unwrap_or_default(),
             input_cmds: input.map(|i| i.staged().to_vec()).unwrap_or_default(),
@@ -2406,20 +2429,24 @@ impl Node for RiveFillNode {
                     rb.vm_fired =
                         crate::view_model::drain_observed_slice(&inst.artboard, &item.vm_observe);
                 }
-                if !item.rig_reads.is_empty() {
-                    // RE-RESOLVE the nested target for the reads: advance can
-                    // REPLACE the nested child instance (a data-bound artboard-
-                    // reference property resets the slot during updateDataBinds),
-                    // so the pre-advance `rig_text_ab` may dangle. The pre-advance
-                    // resolve stays correct for the writes.
+                // RE-RESOLVE the nested target ONCE for the rig + text reads (both
+                // read from the same nested-redirected artboard as their writes):
+                // advance can REPLACE the nested child instance (a data-bound
+                // artboard-reference property resets the slot during updateDataBinds),
+                // so the pre-advance `rig_text_ab` may dangle. The pre-advance resolve
+                // stays correct for the writes.
+                if !item.rig_reads.is_empty() || !item.text_reads.is_empty() {
                     let read_nested = item
                         .nested_target
                         .as_ref()
                         .and_then(|t| t.resolve(&inst.artboard));
-                    rb.rig_values = crate::rig::read_rig_slice(
-                        read_nested.as_ref().unwrap_or(&inst.artboard),
-                        &item.rig_reads,
-                    );
+                    let read_ab = read_nested.as_ref().unwrap_or(&inst.artboard);
+                    if !item.rig_reads.is_empty() {
+                        rb.rig_values = crate::rig::read_rig_slice(read_ab, &item.rig_reads);
+                    }
+                    if !item.text_reads.is_empty() {
+                        rb.text_values = crate::text::read_text_slice(read_ab, &item.text_reads);
+                    }
                 }
                 if item.focus_read {
                     rb.focus = Some(inst.state_machine.focus_state());
@@ -2778,17 +2805,23 @@ impl Node for RiveFillNode {
                                 &item.vm_observe,
                             );
                         }
-                        if !item.rig_reads.is_empty() {
-                            // Re-resolve the nested target AFTER advance (see the
-                            // dedicated path — advance can replace the nested child).
+                        // Re-resolve the nested target ONCE for rig + text reads AFTER
+                        // advance (see the dedicated path — advance can replace the
+                        // nested child; both reads use the same redirected artboard).
+                        if !item.rig_reads.is_empty() || !item.text_reads.is_empty() {
                             let read_nested = item
                                 .nested_target
                                 .as_ref()
                                 .and_then(|t| t.resolve(&inst.artboard));
-                            rb.rig_values = crate::rig::read_rig_slice(
-                                read_nested.as_ref().unwrap_or(&inst.artboard),
-                                &item.rig_reads,
-                            );
+                            let read_ab = read_nested.as_ref().unwrap_or(&inst.artboard);
+                            if !item.rig_reads.is_empty() {
+                                rb.rig_values =
+                                    crate::rig::read_rig_slice(read_ab, &item.rig_reads);
+                            }
+                            if !item.text_reads.is_empty() {
+                                rb.text_values =
+                                    crate::text::read_text_slice(read_ab, &item.text_reads);
+                            }
                         }
                         if item.focus_read {
                             rb.focus = Some(inst.state_machine.focus_state());

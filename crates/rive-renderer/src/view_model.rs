@@ -1039,6 +1039,56 @@ impl Artboard {
         RiveViewModelRuntime::from_ptr(p, self.inner.ctx.ptr)
     }
 
+    /// The view-model **definition** referenced by a `viewModel`-typed property, reached
+    /// by descending property references from a **named** root view model. This is the
+    /// way to construct a nested type that has **no top-level name** (so
+    /// [`Self::view_model_by_name`] can't find it) — you name the property that holds it,
+    /// not the type — and, since the descent resolves each hop by referenced-type **id**
+    /// and never by name, it reaches a named type just as well (handy for constructing
+    /// "whatever fills this property" without hard-coding its type name).
+    ///
+    /// `root` is a top-level view-model **type** name (like [`Self::view_model_by_name`]);
+    /// `path` is a `/`-separated chain of `viewModel`-typed **property** names descending
+    /// from it (e.g. `"WheelCenter"` for one level, `"WheelCenter/inner"` for two). Every
+    /// segment must be non-empty and name a `viewModel`-reference property — a list
+    /// property is **not** a hop (a list carries no element type), so its element type is
+    /// only reachable via a sibling `viewModel`-reference of the same type. Mint instances
+    /// with the returned handle's [`RiveViewModelRuntime::create_instance`] (and friends).
+    ///
+    /// Unlike the `Option`-returning [`Self::view_model_by_name`] / [`Self::view_model_by_index`],
+    /// this returns a [`Result`] so a multi-hop miss reports *which* step failed.
+    ///
+    /// ```no_run
+    /// # fn demo(artboard: &rive_renderer::Artboard) -> rive_renderer::Result<()> {
+    /// // Construct an instance of the (possibly nameless) type that fills the `WheelCenter`
+    /// // view-model-reference property of the `Chicken` view model — by naming the
+    /// // property, not the type. Populate `fresh.borrow()`, then add it to a list
+    /// // (`RiveViewModelInstance::list_add`) or assign it (`replace_view_model`).
+    /// let def = artboard.view_model_by_property_path("Chicken", "WheelCenter")?;
+    /// let fresh = def.create_instance()?;
+    /// # let _ = fresh;
+    /// # Ok(()) }
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`Error::ViewModel`] if the root definition or a property along `path` is missing,
+    /// a segment is empty or names a property that is not a view-model reference, or the
+    /// reference is out of range; [`Error::InvalidPath`] for an interior NUL byte in
+    /// `root` or `path`.
+    ///
+    /// PERF: like [`Self::view_model_by_name`], resolve **once** and reuse the handle
+    /// (rive caches the runtime for the file's lifetime).
+    pub fn view_model_by_property_path(&self, root: &str, path: &str) -> Result<RiveViewModelRuntime<'_>> {
+        let r = Self::vm_path(root)?;
+        let p = Self::vm_path(path)?;
+        // SAFETY: live artboard handle + valid C strings; null + error on any miss.
+        let ptr =
+            unsafe { sys::rive_artboard_view_model_by_property_path(self.inner.ptr, r.as_ptr(), p.as_ptr()) };
+        RiveViewModelRuntime::from_ptr(ptr, self.inner.ctx.ptr)
+            .ok_or_else(|| Error::ViewModel(last_error()))
+    }
+
     /// Creates a [`BindableArtboard`] from the artboard named `name` in **this
     /// artboard's own file** — the artboard analogue of [`File::bindable_artboard_named`]
     /// for a caller that holds only an [`Artboard`] (e.g. after the [`File`] is

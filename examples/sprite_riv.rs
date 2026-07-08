@@ -208,6 +208,9 @@ fn drive_rig_spin(cfg: Res<Cfg>, mut q: Query<&mut RiveRig>, mut angle: Local<f3
 /// rotation verbosely for the first 10 changes) + a tally every 60 frames — the
 /// floor analogue of the zero-copy example's `report_reads`. No-op unless a
 /// read knob was set.
+// A Bevy system: the arg count and the multi-component query tuple are inherent to
+// what it observes, so the two clippy heuristics don't apply.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn report_reads(
     cfg: Res<Cfg>,
     q: Query<(

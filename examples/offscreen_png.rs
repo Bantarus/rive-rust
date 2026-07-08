@@ -661,6 +661,45 @@ fn main() -> Result<()> {
         }
     }
 
+    // RIVE_VM_DESCEND="root:propPath" resolves an inline/anonymous nested view-model
+    // DEFINITION by descending viewModel-typed properties (propPath, '/'-separated) from
+    // the named root view model `root` via `view_model_by_property_path`, and reports the
+    // resolved type's name + whether `view_model_by_name` can ALSO find it (a `false`
+    // there means the descent reached a type with no top-level name — the whole point).
+    if let Ok(spec) = std::env::var("RIVE_VM_DESCEND") {
+        let (root, prop_path) = spec
+            .split_once(':')
+            .context("RIVE_VM_DESCEND needs 'root:propPath'")?;
+        let (root, prop_path) = (root.trim(), prop_path.trim());
+        let def = artboard.view_model_by_property_path(root, prop_path)?;
+        let name = def.name();
+        let findable = !name.is_empty() && artboard.view_model_by_name(&name).is_some();
+        println!(
+            "  descend {root:?}:{prop_path:?} -> def name={name:?} findable_by_name={findable} instances={:?}",
+            def.instance_names()
+        );
+    }
+
+    // RIVE_VM_REPLACE_NESTED="path=root:propPath": like RIVE_VM_REPLACE, but resolve the
+    // new instance's DEFINITION by DESCENDING viewModel-typed properties (propPath,
+    // '/'-separated) from the named root view model `root` via `view_model_by_property_path` —
+    // exercises constructing an inline/anonymous nested type (no top-level name).
+    if let Ok(spec) = std::env::var("RIVE_VM_REPLACE_NESTED") {
+        if let Some((path, descent)) = spec.split_once('=') {
+            let (path, descent) = (path.trim(), descent.trim());
+            let (root, prop_path) = descent
+                .split_once(':')
+                .context("RIVE_VM_REPLACE_NESTED needs 'path=root:propPath'")?;
+            let (root, prop_path) = (root.trim(), prop_path.trim());
+            let def = artboard.view_model_by_property_path(root, prop_path)?;
+            println!("  descended definition name: {:?}", def.name());
+            let owned = def.create_default_instance()?;
+            let (owner, leaf) = artboard.vm_resolve(path)?;
+            owner.replace_view_model(&leaf, &owned.borrow())?;
+            println!("  replace view-model {path:?} = new (descended {root}:{prop_path})");
+        }
+    }
+
     // RIVE_VM_DEFS=1: list the file's view-model DEFINITIONS (name + instance names) —
     // discover the `vmName`s RIVE_VM_LIST_ADD / RIVE_VM_REPLACE accept.
     if std::env::var("RIVE_VM_DEFS").is_ok() {

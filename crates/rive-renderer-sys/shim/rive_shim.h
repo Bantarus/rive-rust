@@ -327,8 +327,9 @@ RiveStatus         rive_artboard_vm_set_artboard(RiveArtboard*, const char* path
  * above reaches NAMED nested view models via '/', but cannot index lists nor
  * introspect a nested VM's schema; the handle API can. Navigation returns a
  * borrowed handle (null + rive_last_error on miss); reads/introspection mirror
- * the artboard-rooted verbs. Read-only this slice (writes via the setters above;
- * list mutation + image/artboard refs deferred). Implemented in
+ * the artboard-rooted verbs. The handle is read-WRITE (setters/fire-trigger), and
+ * list structural mutation + image/artboard-ref binding + nested-type construction
+ * all ship (see below). Implemented in
  * rive_shim_viewmodel.cpp. `out_type` ordinals add list=5, viewModel=8,
  * assetImage=11, artboard=12 to the scalar set documented above. */
 RiveViewModelInstance* rive_artboard_vm_root(RiveArtboard*);
@@ -373,6 +374,13 @@ uint32_t               rive_artboard_view_model_count(RiveArtboard*);
 RiveViewModelRuntime*  rive_artboard_view_model_by_name(RiveArtboard*, const char* name);
 RiveViewModelRuntime*  rive_artboard_view_model_by_index(RiveArtboard*, uint32_t index);
 RiveViewModelRuntime*  rive_artboard_default_view_model(RiveArtboard*);
+/* Reach an inline/anonymous nested view-model DEFINITION that has no top-level name
+ * (so rive_artboard_view_model_by_name can't find it): descend viewModel-typed
+ * properties by reference-id from a NAMED root view model `root`. `path` is a
+ * '/'-separated chain of viewModel-typed property names. Returns the File-cached child
+ * runtime (mint via rive_view_model_create_instance*), or null + error on any miss. */
+RiveViewModelRuntime*  rive_artboard_view_model_by_property_path(RiveArtboard*, const char* root,
+                                                         const char* path);
 RiveStatus             rive_view_model_name(RiveViewModelRuntime*, char* buf, size_t cap,
                                             size_t* out_len);
 uint32_t               rive_view_model_instance_count(RiveViewModelRuntime*);

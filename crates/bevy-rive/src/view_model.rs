@@ -23,7 +23,9 @@
 //! and **structural** list commands ([`RiveViewModel::list_add_new`] /
 //! `list_insert_new` / `list_remove_at` / `list_swap` / `list_clear`) + VM-reference
 //! replacement ([`RiveViewModel::replace_view_model`]) — construct a new instance with
-//! [`NewViewModel`]. The component is tier-agnostic and works in **both tiers**:
+//! [`NewViewModel`] (a top-level named type, or an inline/anonymous **nested** type via
+//! [`NewViewModel::nested_blank`] / `nested_default`). The component is tier-agnostic
+//! and works in **both tiers**:
 //! - **Writes**: the `floor` advance system applies them inline; the `zero_copy`
 //!   tier ferries them to the render world (where its instances live) via a
 //!   per-frame staging buffer.
@@ -135,13 +137,27 @@ pub enum VmSource {
     FromIndex(usize),
 }
 
+/// How to resolve the view-model **definition** for a [`NewViewModel`]: a top-level
+/// named type, or an inline/anonymous **nested** type reached by descending
+/// `viewModel`-typed properties from a named root (see
+/// [`rive_renderer::Artboard::view_model_by_property_path`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VmDef {
+    /// A top-level view-model definition, resolved by name.
+    Named(String),
+    /// An inline/anonymous nested type: descend `path` (`/`-separated `viewModel`-typed
+    /// property names) from the named `root` view model.
+    Nested { root: String, path: String },
+}
+
 /// A description of a **new view-model instance** to construct and add to a list
 /// ([`RiveViewModel::list_add_new`] / [`RiveViewModel::list_insert_new`]) or assign to
 /// a VM-reference property ([`RiveViewModel::replace_view_model`]). Names the
-/// view-model definition (`vm`), how to seed it (`source`), and any initial property
-/// writes (`init`, applied to the new instance before it is added — flat paths
-/// relative to it). Build with [`Self::blank`] / [`Self::default_instance`] /
-/// [`Self::from_name`] / [`Self::from_index`], then chain `with_*` seeds.
+/// view-model definition (top-level via [`Self::blank`] etc., or an inline/anonymous
+/// **nested** type via [`Self::nested_blank`] / [`Self::nested_default`]), how to seed
+/// it (`source`), and any initial property writes (`init`, applied to the new instance
+/// before it is added — flat paths relative to it). Chain `with_*` seeds after any
+/// constructor.
 ///
 /// ```no_run
 /// # use bevy_rive::prelude::*;
@@ -152,30 +168,50 @@ pub enum VmSource {
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewViewModel {
-    vm: String,
+    def: VmDef,
     source: VmSource,
     init: Vec<(String, RiveValue)>,
 }
 
 impl NewViewModel {
-    /// A blank instance of view-model definition `vm`.
+    /// A blank instance of top-level view-model definition `vm`.
     pub fn blank(vm: impl Into<String>) -> Self {
-        Self::new(vm, VmSource::Blank)
+        Self::new(VmDef::Named(vm.into()), VmSource::Blank)
     }
     /// The editor's default instance of `vm` (falls back to blank).
     pub fn default_instance(vm: impl Into<String>) -> Self {
-        Self::new(vm, VmSource::Default)
+        Self::new(VmDef::Named(vm.into()), VmSource::Default)
     }
     /// A clone of the editor instance named `instance` of definition `vm`.
     pub fn from_name(vm: impl Into<String>, instance: impl Into<String>) -> Self {
-        Self::new(vm, VmSource::FromName(instance.into()))
+        Self::new(VmDef::Named(vm.into()), VmSource::FromName(instance.into()))
     }
     /// A clone of the editor instance at `index` of definition `vm`.
     pub fn from_index(vm: impl Into<String>, index: usize) -> Self {
-        Self::new(vm, VmSource::FromIndex(index))
+        Self::new(VmDef::Named(vm.into()), VmSource::FromIndex(index))
     }
-    fn new(vm: impl Into<String>, source: VmSource) -> Self {
-        Self { vm: vm.into(), source, init: Vec::new() }
+    /// A **blank** instance of an inline/anonymous **nested** view-model type — reached
+    /// by descending `viewModel`-typed properties (`path`, `/`-separated) from the named
+    /// `root` view model (see [`rive_renderer::Artboard::view_model_by_property_path`]).
+    /// Use this to construct a nested type that has **no top-level name** (so
+    /// [`Self::blank`] can't name it), e.g. the type of a `viewModel`-reference property.
+    /// Seed via `with_*` as usual.
+    ///
+    /// Only `blank` / `default` sources are offered for nested types (no
+    /// `nested_from_name`/`_index`): an inline/nested type rarely authors named editor
+    /// instances to clone. If you need one, resolve the definition yourself with
+    /// [`rive_renderer::Artboard::view_model_by_property_path`] and call its
+    /// `create_instance_from_*`.
+    pub fn nested_blank(root: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::new(VmDef::Nested { root: root.into(), path: path.into() }, VmSource::Blank)
+    }
+    /// The editor **default** instance of an inline/anonymous nested type (falls back to
+    /// blank if none authored); see [`Self::nested_blank`].
+    pub fn nested_default(root: impl Into<String>, path: impl Into<String>) -> Self {
+        Self::new(VmDef::Nested { root: root.into(), path: path.into() }, VmSource::Default)
+    }
+    fn new(def: VmDef, source: VmSource) -> Self {
+        Self { def, source, init: Vec::new() }
     }
 
     /// Seeds a **number** property on the new instance. Chainable.
@@ -692,9 +728,13 @@ fn build_new_vm<'a>(
     artboard: &'a rive_renderer::Artboard,
     item: &NewViewModel,
 ) -> rive_renderer::Result<rive_renderer::RiveOwnedViewModel<'a>> {
-    let def = artboard.view_model_by_name(&item.vm).ok_or_else(|| {
-        rive_renderer::Error::ViewModel(format!("view-model definition {:?} not found", item.vm))
-    })?;
+    let def = match &item.def {
+        VmDef::Named(name) => artboard.view_model_by_name(name).ok_or_else(|| {
+            rive_renderer::Error::ViewModel(format!("view-model definition {name:?} not found"))
+        })?,
+        // Descend to an inline/anonymous nested type (returns its own informative error).
+        VmDef::Nested { root, path } => artboard.view_model_by_property_path(root, path)?,
+    };
     let owned = match &item.source {
         VmSource::Blank => def.create_instance()?,
         VmSource::Default => def.create_default_instance()?,

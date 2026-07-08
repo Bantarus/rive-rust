@@ -46,6 +46,9 @@
 #include "rive/viewmodel/runtime/viewmodel_runtime.hpp" // PropertyData + createInstance*
 #include "rive/bindable_artboard.hpp" // BindableArtboard (RiveBindableArtboard::bindable)
 #include "rive/file.hpp" // File::viewModelBy* (VM-runtime construction from an artboard)
+#include "rive/viewmodel/viewmodel.hpp" // ViewModel::property (nested-definition descent)
+#include "rive/viewmodel/viewmodel_property.hpp"          // ViewModelProperty (is<>/as<>)
+#include "rive/viewmodel/viewmodel_property_viewmodel.hpp" // ...ReferenceId() child index
 
 using rive::ViewModelInstanceRuntime;
 
@@ -865,6 +868,81 @@ extern "C" RiveViewModelRuntime* rive_artboard_default_view_model(RiveArtboard* 
     ViewModelRuntime* vmr = artboard->file->defaultArtboardViewModel(artboard->inst());
     if (vmr == nullptr)
         shim_set_error("artboard has no linked view model");
+    return as_vmr_handle(vmr);
+}
+
+// The DEFINITION of an inline/anonymous nested view-model type, reached by descending
+// viewModel-typed properties from a NAMED root view model `root` — the way to reach a
+// type that has no top-level name (so viewModelByName can't find it). `path` is a
+// '/'-separated chain of viewModel-typed property names; each hop resolves the named
+// property to its referenced type by REFERENCE-ID (an index into the File's view
+// models, never a name — so it reaches anonymous types identically to named ones). The
+// last hop's reference-id is the child definition's index, which viewModelByIndex
+// resolves to a File-cached runtime (same ownership as viewModelByName). Returns null +
+// error if the root/property is missing, a segment is not a view-model reference, the
+// reference is out of range, or the path is empty.
+extern "C" RiveViewModelRuntime* rive_artboard_view_model_by_property_path(RiveArtboard* artboard,
+                                                                   const char* root,
+                                                                   const char* path)
+{
+    if (artboard == nullptr || artboard->file == nullptr || root == nullptr || path == nullptr)
+    {
+        shim_set_error("artboard has no file, or root/path is null");
+        return nullptr;
+    }
+    rive::File* file = artboard->file;
+    rive::ViewModel* vm = file->viewModel(std::string(root));
+    if (vm == nullptr)
+    {
+        shim_set_error("no root view-model definition with that name");
+        return nullptr;
+    }
+    std::string p(path);
+    size_t start = 0;
+    bool descended = false;
+    size_t childIndex = 0;
+    while (start <= p.size())
+    {
+        size_t slash = p.find('/', start);
+        std::string seg =
+            slash == std::string::npos ? p.substr(start) : p.substr(start, slash - start);
+        if (seg.empty())
+        {
+            shim_set_error("empty view-model property path segment");
+            return nullptr;
+        }
+        rive::ViewModelProperty* prop = vm->property(seg);
+        if (prop == nullptr)
+        {
+            shim_set_error("view-model property not found");
+            return nullptr;
+        }
+        if (!prop->is<rive::ViewModelPropertyViewModel>())
+        {
+            shim_set_error("view-model property is not a view-model reference");
+            return nullptr;
+        }
+        childIndex = prop->as<rive::ViewModelPropertyViewModel>()->viewModelReferenceId();
+        rive::ViewModel* child = file->viewModel(childIndex);
+        if (child == nullptr)
+        {
+            shim_set_error("referenced view-model index out of range");
+            return nullptr;
+        }
+        vm = child;
+        descended = true;
+        if (slash == std::string::npos)
+            break;
+        start = slash + 1;
+    }
+    if (!descended)
+    {
+        shim_set_error("empty view-model property path");
+        return nullptr;
+    }
+    ViewModelRuntime* vmr = file->viewModelByIndex(childIndex);
+    if (vmr == nullptr)
+        shim_set_error("could not build a view-model runtime for the referenced type");
     return as_vmr_handle(vmr);
 }
 

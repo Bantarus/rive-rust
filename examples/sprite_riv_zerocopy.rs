@@ -599,6 +599,9 @@ fn drive_rig_spin(cfg: Res<Cfg>, mut q: Query<&mut RiveRig>, mut angle: Local<f3
 /// logs each read-back's value when it changes (bone rotation verbosely for the
 /// first 10 changes) and a cumulative tally every 60 frames. No-op unless
 /// `RIVE_RIG_WATCH` / `RIVE_WATCH_PLAYHEAD` / `RIVE_WATCH_FOCUS` was set.
+// A Bevy system: the arg count and the multi-component query tuple are inherent to
+// what it observes, so the two clippy heuristics don't apply.
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn report_reads(
     cfg: Res<Cfg>,
     q: Query<(

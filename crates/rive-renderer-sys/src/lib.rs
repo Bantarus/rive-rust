@@ -618,6 +618,14 @@ extern "C" {
     pub fn rive_artboard_default_view_model(
         artboard: *mut RiveArtboard,
     ) -> *mut RiveViewModelRuntime;
+    /// The DEFINITION of an inline/anonymous nested view-model type, reached by
+    /// descending viewModel-typed properties (`path`, `/`-separated) by reference-id
+    /// from a NAMED root view model (`root`) — reaches types with no top-level name.
+    pub fn rive_artboard_view_model_by_property_path(
+        artboard: *mut RiveArtboard,
+        root: *const c_char,
+        path: *const c_char,
+    ) -> *mut RiveViewModelRuntime;
     pub fn rive_view_model_name(
         vmr: *mut RiveViewModelRuntime,
         buf: *mut c_char,
